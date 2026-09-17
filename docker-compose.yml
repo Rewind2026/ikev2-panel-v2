@@ -1,0 +1,139 @@
+# docker-compose.yml
+# 设计见 docs/design.md §10.2
+#
+# 关键决策（M8 commit 24，2026-09-16）：
+#   网络模式：默认 host 网络（因为我们必须监听公网 IPv6 地址，不能接受 docker 默认
+#            bridge 的 fd00::/8 ULA——ULA 在公网不可达）。
+#            如果你的宿主机器上没有公网 IPv6 / 想用 docker bridge 网络实现多容器隔离，
+#            取消下方 ipvlan-network 注释块，并修改网络配置为自己的公网 IPv6 子网。
+#
+#   Capabilities：cap_drop ALL，cap_add NET_ADMIN + NET_BIND_SERVICE + SYS_ADMIN
+#   原因：host 网络下需要 SYS_ADMIN 做 tc 限速、ip rule 路由；
+#         NET_ADMIN 仍需保留（容器内 iptables MASQUERADE、ip link 探测）；
+#         NET_BIND_SERVICE 用于监听 500/4500 privileged 端口。
+#
+#   设备：/dev/net/tun（kernel-libipsec 的用户态 ESP 注入点）
+#
+#   ESP 兼容性说明（commit 22）：strongSwan 自编译启用 --enable-kernel-libipsec，
+#     ESP 包被封装在 UDP/4500（RFC 3948 NAT-T）里，不再走 IP 协议 50。
+#     因此即使在 OpenVZ/LXC/部分 KVM 容器宿主上，IKEv2 SA 协商也能成功。
+#     公网 IP 上可以同时跑其他服务（HTTPS/SSH/SMTP 等），互不冲突。
+#
+#   副作用：
+#     - host 网络下 8443 直接暴露在公网——建议用防火墙限制源 IP
+#     - bridge 网络下 8443 通过 docker 端口映射暴露（0.0.0.0:8443->8443），同样需要防火墙
+
+services:
+  ikev2-panel:
+    image: ikev2-panel:v2-79.2
+    build: .
+    container_name: ikev2-panel
+    restart: unless-stopped
+
+    # ===== 默认：host 网络 =====
+    network_mode: host
+
+    # ===== 可选：bridge 网络（取消下方注释启用）=====
+    # 1) 先在宿主机上为 docker 创建 ipvlan，让容器能拿到公网 IPv6 地址：
+    #    docker network create -d ipvlan \
+      #      --subnet=2408:832e:8a5:1000::/64 \
+      #      --gateway=2408:832e:8a5:1000::1 \
+      #      -o ipvlan_mode=l2 \
+      #      -o parent=ens18 \
+      #      ikev2-ipvlan
+    #    （注：ens18 和子网要替换成你自己的网卡和段）
+    # 2) 取消下方 networks 块，并把上方 network_mode 注释掉
+    # networks:
+    #   ikev2-ipvlan:
+    #     ipv4_address: 172.20.0.10        # 可选，IPv4 内网地址
+    #     ipv6_address: 2408:832e:8a5:1000::10  # 公网 IPv6 地址
+    # ports:
+    #   - "500:500/udp"
+    #   - "4500:4500/udp"
+    #   - "8443:8443/tcp"
+
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_ADMIN           # iptables MASQUERADE、ip link 探测
+      - NET_BIND_SERVICE    # 监听 500/4500 privileged 端口
+      - SYS_ADMIN           # host 网络下做 tc 限速、ip rule（bridge 模式可去掉）
+
+    devices:
+      - /dev/net/tun        # kernel-libipsec 必须的 TUN 设备
+
+    # 关键：VPN 服务器需要 IP forwarding。
+    #
+    # Docker host network mode 下默认会强制把 IPv6 forwarding 重置为 0
+    # （docker 已知的安全策略），所以理论上需要 sysctls: 让 docker daemon
+    # 在创建容器前打开宿主内核的 forwarding。
+    #
+    # v2-79.2 变更：host 网络 + user namespace 模式下 docker daemon 拒绝
+    # 写 sysctl（net.ipv4.ip_forward not allowed in host network namespace）。
+    # entrypoint.sh §3 会自愈：容器内 sysctl -w net.ipv6.conf.all.forwarding=1
+    # （privileged: true 时 /proc/sys 可写）。
+    # 所以这里不再写 sysctls，让 entrypoint 处理。
+    #
+    # bridge / ipvlan 模式如果需要 sysctl，把下面 sysctls 块解除注释：
+    #   sysctls:
+    #     net.ipv6.conf.all.forwarding: 1
+    #     net.ipv4.ip_forward: 1
+
+    privileged: true   # host 模式做 tc 限速、ip rule；entrypoint §3 自愈 forwarding 也靠它
+
+    volumes:
+      # 挂载命名 volume（必须与旧容器同名，避免升级时丢数据）。
+      # 命名方式：project_volume，project 来自 docker-compose.yml 同级目录名（ikev2-panel-v2）。
+      # 如果升级时改了项目名（比如改成 ikev2-panel-v2-v2-74），docker 会创建新 volume，
+      # 老的 LE 证书和 panel.db 都没了 → 必须用 external 显式指定旧 volume 名。
+      # 这里用 external 锁死 v2-72/v2-73 那次创建的旧 volume 名。
+      - ikev2-panel-v2_ikev2-data:/data   # 持久化：DB + 证书 + LE 证书
+
+      # v2-79.2：把宿主 /etc/sysctl.d 挂进容器（ro：默认值查询；rw：自愈时持久化）。
+      # 容器内 root 通过这条挂载在 /host-sysctl.d 写入 99-ikev2.conf，
+      # 宿主 systemd-sysctl.service 重启时自动加载 → 下次部署/重启永远自带 forwarding=1。
+      # 必须是 rw，否则 entrypoint §3 自愈后写不进宿主。
+      - /etc/sysctl.d:/host-sysctl.d:rw
+
+    environment:
+      # 基础
+      IKEV2_DATA_DIR: "/data"
+      IKEV2_LISTEN_ADDR: "0.0.0.0:8443"
+      IKEV2_LOG_LEVEL: "info"
+      IKEV2_LOG_FORMAT: "text"
+
+      # 服务器身份（v2-79：所有字段都可以不传，entrypoint.sh §0 自动探测）
+      # 唯一必填的是 IKEV2_SERVER_CN（证书需要）
+      IKEV2_SERVER_CN: "${IKEV2_SERVER_CN:-vpn.example.com}"
+      # 公网 IPv6（host 网络下留空 → 从网卡自动取）
+      # 公网 IPv4（双栈模式留空 → 从网卡自动取）
+      # 双栈模式（需要宿主 IPv4 UDP 500/4500 可用）：IKEV2_IPV6_ONLY=false
+      IKEV2_IPV6_ONLY: "${IKEV2_IPV6_ONLY:-true}"
+      # 出口网卡（host 网络下留空 → ip route 自动探测）
+      IKEV2_OUT_IF: "${IKEV2_OUT_IF:-}"
+      # VPN 网络模式（v2-79）：auto | host | bridge | ipvlan
+      # 默认 auto：宿主有公网 IP → host；只有局域网 IP → bridge
+      IKEV2_NETWORK_MODE: "${IKEV2_NETWORK_MODE:-auto}"
+      # VPN 内部虚拟 IP 段（v2-79）：auto | 10.10.0.0/24 | ...
+      # auto 模式下扫描宿主 LAN 段，自动选不冲突的段
+      IKEV2_VPN_SUBNET: "${IKEV2_VPN_SUBNET:-auto}"
+
+      # 证书模式
+      IKEV2_CERT_MODE: "${IKEV2_CERT_MODE:-self-signed}"
+      IKEV2_DOMAIN: "${IKEV2_DOMAIN:-}"             # LE 模式必填
+      # IKEV2_ACME_EMAIL: "you@example.com"
+
+      # LE 模式（仅 letsencrypt 时生效）：阿里云 DNS API 凭证
+      # 从 .env 读（不在镜像内、不在 git 中）
+      Ali_Key: "${Ali_Key:-}"
+      Ali_Secret: "${Ali_Secret:-}"
+
+      # 其他
+      IKEV2_DEFAULT_USER_PASSWORD_LEN: "12"
+      IKEV2_SESSION_TTL: "24h"
+
+volumes:
+  # 用 external 锁死旧 volume 名（跨项目名升级时不会创建新空 volume）。
+  # 创建方式：docker volume create ikev2-panel-v2_ikev2-data
+  ikev2-panel-v2_ikev2-data:
+    external: true

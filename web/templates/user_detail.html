@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>{{.User.Username}} - IKEv2 Panel</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<nav>
+    <a href="/">首页</a>
+    <a href="/users">用户</a>
+    <span class="right">管理员：{{.AdminUsername}} | <form method="POST" action="/logout" style="display:inline"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><button type="submit" class="link">登出</button></form></span>
+</nav>
+<main>
+    <h1>用户：{{.User.Username}}</h1>
+    {{if .Flash}}<div class="flash">{{.Flash}}</div>{{end}}
+    {{if .NewPassword}}<div class="flash" style="background:#fff3cd;color:#856404"><strong>新密码：</strong>{{.NewPassword}}</div>{{end}}
+    {{if .Error}}<div class="error">{{.Error}}</div>{{end}}
+
+    <table border="0" cellpadding="4">
+        <tr><th align="left">ID</th><td>{{.User.ID}}</td></tr>
+        <tr><th align="left">状态</th><td>{{if .User.Enabled}}启用{{else}}<span style="color:red">停用</span>{{end}}</td></tr>
+        <tr><th align="left">限速</th><td>{{if eq .User.SpeedLimitMbps 0}}不限{{else}}{{.User.SpeedLimitMbps}} Mbps{{end}}</td></tr>
+        <tr><th align="left">过期</th><td>{{if eq .User.ExpiresAt 0}}永不过期{{else}}{{.User.ExpiresAt}}{{end}}</td></tr>
+        <tr><th align="left">流量</th><td>↓ {{.User.BytesInTotal}} B / ↑ {{.User.BytesOutTotal}} B</td></tr>
+        <tr><th align="left">创建于</th><td>{{.User.CreatedAt}}</td></tr>
+        <tr><th align="left">最后活跃</th><td>{{if eq .User.LastUsedAt 0}}从未{{else}}{{.User.LastUsedAt}}{{end}}</td></tr>
+        <tr><th align="left">备注</th><td>{{.User.Note}}</td></tr>
+    </table>
+
+    <h3>客户端配置</h3>
+    <ul>
+        <li>iOS / macOS：<a href="/users/{{.User.ID}}/mobileconfig">下载 .mobileconfig</a> 或扫码：
+            <br><img src="/users/{{.User.ID}}/mobileconfig.qr.png" alt="QR" width="200" height="200" style="border:1px solid #ccc;padding:4px;background:#fff">
+        </li>
+        <li>Android 11+ 原生（无需第三方 app）：<a href="/users/{{.User.ID}}/android">查看配置参数</a>
+            <span style="color:#666;font-size:0.9em">— Android 设置 → VPN → 添加 IKEv2/IPsec MSCHAPv2</span>
+        </li>
+        <li>strongSwan app（Android / Linux）：<a href="/users/{{.User.ID}}/sswan">下载 .sswan 配置文件</a></li>
+        <li>CA 证书（Android 单独需要）：<a href="/ca.cert.pem">下载 ca.cert.pem</a></li>
+    </ul>
+    <p style="color:#666;font-size:0.9em">
+        <strong>iOS / macOS 提示：</strong>点击链接 → Safari 打开 → 设置 → 通用 → VPN 与设备管理 → 安装描述文件<br>
+        <strong>Android 原生提示：</strong>Android 11+ 系统设置 → VPN → 添加 → 选 "IKEv2/IPsec MSCHAPv2"（默认选项）→ 填 server/CN/用户名/密码 → 保存 → 连接。跟 iOS 走同一个 server 端的 EAP 段。
+    </p>
+
+    <h3>操作</h3>
+    <form method="POST" action="/users/{{.User.ID}}/reset-password" style="display:inline" onsubmit="return confirm('确认重置密码？')">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <button type="submit">重置密码（生成新 12 位密码）</button>
+    </form>
+    {{if .User.Enabled}}
+        <form method="POST" action="/users/{{.User.ID}}/disable" style="display:inline" onsubmit="return confirm('确认停用？正在连接的客户端会被踢下线')">
+            <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+            <button type="submit">停用</button>
+        </form>
+    {{else}}
+        <form method="POST" action="/users/{{.User.ID}}/enable" style="display:inline">
+            <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+            <button type="submit">启用</button>
+        </form>
+    {{end}}
+    <form method="POST" action="/users/{{.User.ID}}/delete" style="display:inline" onsubmit="return confirm('确认删除？此操作不可撤销')">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <button type="submit" style="background:#dc3545">删除</button>
+    </form>
+    <p><a href="/users">←返回用户列表</a></p>
+</main>
+</body>
+</html>

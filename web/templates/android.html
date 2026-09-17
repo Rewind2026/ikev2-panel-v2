@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>Android 原生客户端配置 - IKEv2 Panel</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<nav>
+    <a href="/">首页</a>
+    <a href="/users">用户</a>
+    <a href="/users/{{.User.ID}}">返回用户详情</a>
+    <span class="right">管理员：{{.AdminUsername}} | <form method="POST" action="/logout" style="display:inline"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><button type="submit" class="link">登出</button></form></span>
+</nav>
+<main>
+    <h1>Android 原生客户端配置</h1>
+    <p style="color:#666">用户：<strong>{{.User.Username}}</strong></p>
+
+    {{if .Error}}<div class="error">{{.Error}}</div>{{end}}
+    {{if .Flash}}<div class="flash">{{.Flash}}</div>{{end}}
+
+    <h3>在 Android 上的操作步骤</h3>
+    <ol>
+        <li>设置 → 网络和互联网 → <strong>VPN</strong> → 右上角 <strong>+</strong></li>
+        <li>类型选 <strong>"IKEv2/IPSec MSCHAPv2"</strong>（Android 11-15 默认第一个选项）</li>
+        <li>按下表填写（<strong>不需要</strong>任何预共享密钥 PSK）</li>
+        <li>保存 → 点连接 → 通知栏出现钥匙图标 = 连上</li>
+    </ol>
+
+    <h3>连接参数</h3>
+    <table border="1" cellpadding="8" cellspacing="0" style="background:#f9f9f9">
+        <tr><th align="left">名称（自定义）</th><td><code>IKEv2 VPN</code> 任意文字</td></tr>
+        <tr>
+            <th align="left">服务器地址</th>
+            <td>
+                <input type="text" value="{{.ServerAddr}}" readonly id="serverAddr"
+                       style="font-family:monospace;width:280px;padding:4px"
+                       onclick="this.select()">
+            </td>
+        </tr>
+        <tr>
+            <th align="left">IPSec 标识符（IPsec identifier）</th>
+            <td>
+                <input type="text" value="{{.ServerCN}}" readonly id="serverCN"
+                       style="font-family:monospace;width:280px;padding:4px"
+                       onclick="this.select()">
+                <br><span style="color:#666;font-size:0.85em">Android 翻译可能是 "IPSec 标识符" 或 "IPsec ID"。填 server CN（与 server cert 匹配）</span>
+            </td>
+        </tr>
+        <tr><th align="left">用户名</th>
+            <td><code>{{.User.Username}}</code></td>
+        </tr>
+        <tr><th align="left">密码</th>
+            <td><code>{{.User.Password}}</code>
+                <span style="color:#666;font-size:0.85em">（iOS mobileconfig 同样使用这个密码）</span>
+            </td>
+        </tr>
+    </table>
+
+    <h3>证书信任</h3>
+    <p>Android 11+ 原生客户端 <strong>强烈建议</strong> 安装 CA 根证书（自签模式必须装，否则 server cert 校验会失败；LE 模式可跳过）：</p>
+    <ol>
+        <li>下载 <a href="/ca.cert.pem">ca.cert.pem</a></li>
+        <li>设置 → 安全 → 加密与凭据 → 安装证书 → <strong>CA 证书</strong></li>
+        <li>Android 7+ 会弹警告"网络流量可能被监视"——这是 CA 证书的通用提示，本面板自签 CA 受控可忽略</li>
+    </ol>
+
+    <h3>为什么不用 strongSwan app？</h3>
+    <p style="color:#666">
+    Android 11+ 系统设置的 <code>IKEv2/IPSec MSCHAPv2</code> 选项原生支持 EAP-MSCHAPv2 + 证书认证
+    （AOSP 源码 <code>android.net.Ikev2VpnProfile.Builder.setAuthUsernamePassword</code>），
+    跟 iOS 17/18 的 mobileconfig 用同一套认证协议（<code>eap-mschapv2</code>）。
+    不装任何第三方 app 就能直接拨号。
+    </p>
+
+    <p><a href="/users/{{.User.ID}}">←返回用户详情</a></p>
+</main>
+</body>
+</html>

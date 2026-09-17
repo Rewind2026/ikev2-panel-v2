@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>新增用户 - IKEv2 Panel</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<nav>
+    <a href="/">首页</a>
+    <a href="/users">用户</a>
+    <span class="right">管理员：{{.AdminUsername}} | <form method="POST" action="/logout" style="display:inline"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><button type="submit" class="link">登出</button></form></span>
+</nav>
+<main>
+    <h1>新增用户</h1>
+    {{if .Error}}<div class="error">{{.Error}}</div>{{end}}
+    <form method="POST" action="/users">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <label>用户名（3-32 位 [a-z0-9_-]）<input name="username" value="{{.Username}}" required autofocus></label>
+        <label>备注（≤200 字）<input name="note" value="{{.Note}}" maxlength="200"></label>
+        <label>限速 Mbps（0 = 不限速，默认 10）<input name="speed_limit_mbps" type="number" min="0" max="1000" value="{{.SpeedLimit}}"></label>
+        <label>过期时间（YYYY-MM-DD，留空 = 永不过期）<input name="expires_at" type="text" placeholder="2026-12-31" value="{{.ExpiresAt}}"></label>
+        <label><input type="checkbox" name="enabled" value="1" {{if .Enabled}}checked{{end}}> 立即启用</label>
+        <button type="submit">创建（自动生成 12 位密码）</button>
+        <a href="/users">取消</a>
+    </form>
+</main>
+</body>
+</html>

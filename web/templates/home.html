@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>首页 - IKEv2 Panel</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<nav>
+    <a href="/">首页</a>
+    <a href="/users">用户</a>
+    <span class="right">管理员：{{.AdminUsername}} | <form method="POST" action="/logout" style="display:inline"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><button type="submit" class="link">登出</button></form></span>
+</nav>
+<main>
+    <h1>欢迎，{{.AdminUsername}}</h1>
+    <p>当前共有 <strong>{{.TotalUsers}}</strong> 个 VPN 用户。</p>
+    <p><a href="/users">用户管理</a></p>
+</main>
+</body>
+</html>

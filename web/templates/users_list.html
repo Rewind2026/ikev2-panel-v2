@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>用户管理 - IKEv2 Panel</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<nav>
+    <a href="/">首页</a>
+    <a href="/users">用户</a>
+    <span class="right">管理员：{{.AdminUsername}} | <form method="POST" action="/logout" style="display:inline"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><button type="submit" class="link">登出</button></form></span>
+</nav>
+<main>
+    <h1>用户管理</h1>
+    <p><a href="/users/new">+ 新增用户</a></p>
+    <table border="1" cellpadding="6" cellspacing="0" style="background:#fff;border-collapse:collapse;width:100%">
+        <thead>
+            <tr><th>ID</th><th>用户名</th><th>状态</th><th>限速</th><th>过期时间</th><th>累计流量</th><th>最后活跃</th><th>备注</th><th>操作</th></tr>
+        </thead>
+        <tbody>
+        {{range .Users}}
+            <tr>
+                <td>{{.ID}}</td>
+                <td><a href="/users/{{.ID}}">{{.Username}}</a></td>
+                <td>{{if .Enabled}}启用{{else}}<span style="color:red">停用</span>{{end}}</td>
+                <td>{{if eq .SpeedLimitMbps 0}}不限{{else}}{{.SpeedLimitMbps}} Mbps{{end}}</td>
+                <td>{{if eq .ExpiresAt 0}}永不过期{{else}}{{.ExpiresAt}}{{end}}</td>
+                <td>↓ {{.BytesInTotal}} / ↑ {{.BytesOutTotal}}</td>
+                <td>{{if eq .LastUsedAt 0}}从未{{else}}{{.LastUsedAt}}{{end}}</td>
+                <td>{{.Note}}</td>
+                <td>
+                    <form method="POST" action="/users/{{.ID}}/delete" style="display:inline" onsubmit="return confirm('确认删除？')">
+                        <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+                        <button type="submit">删除</button>
+                    </form>
+                </td>
+            </tr>
+        {{else}}
+            <tr><td colspan="9" style="text-align:center;color:#999">暂无用户</td></tr>
+        {{end}}
+        </tbody>
+    </table>
+</main>
+</body>
+</html>

@@ -1,0 +1,75 @@
+#!/bin/bash
+# 由 swanctl 在 SA up/down 时调用
+# 设计见 docs/design.md §9.2.1
+#
+# 环境变量（swanctl 提供）：
+#   PLUTO_MY_ID         = 服务器 ID
+#   PLUTO_PEER_ID       = 客户端 eap_id（swanctl 5.9+ 是 "CN=alice" 形式，需剥掉 CN=）
+#   PLUTO_PEER_SOURCEIP = 客户端虚拟 IP
+#   PLUTO_CONNECTION    = 连接名
+#   PLUTO_VERB          = up | down
+#
+# 关键修订：
+#   - Class ID 持久化到文件，避免并发冲突
+#   - down 时只删该用户的 class，不删根 qdisc
+#   - 根 qdisc 只建一次
+set -e
+
+LIMIT_DIR="/var/lib/ikev2-panel/limits"
+CLASS_DIR="/var/lib/ikev2-panel/classids"
+OUT_IF="${IKEV2_OUT_IF:-eth0}"
+
+# swanctl 5.9+ 的 PLUTO_PEER_ID 可能是 "CN=alice" 形式，需要剥掉
+USERNAME="${PLUTO_PEER_ID#CN=}"
+LIMIT_FILE="${LIMIT_DIR}/${USERNAME}"
+CLASS_FILE="${CLASS_DIR}/${USERNAME}"
+
+# 只在需要时建立根 qdisc（一次性，所有用户共用）
+ensure_root_qdisc() {
+  if ! tc qdisc show dev "$OUT_IF" 2>/dev/null | grep -q "qdisc htb"; then
+    tc qdisc add dev "$OUT_IF" root handle 1: htb default 999 || true
+    tc class add dev "$OUT_IF" parent 1: classid 1:999 htb \
+      rate 1000mbit ceil 1000mbit || true
+  fi
+}
+
+case "${PLUTO_VERB:-unknown}" in
+  up)
+    ensure_root_qdisc
+    if [ -f "$LIMIT_FILE" ]; then
+      LIMIT=$(cat "$LIMIT_FILE")
+      if [ "${LIMIT}" -gt 0 ] 2>/dev/null; then
+        mkdir -p "$CLASS_DIR"
+        if [ -f "$CLASS_FILE" ]; then
+          CLASS_ID=$(cat "$CLASS_FILE")
+        else
+          # 100-9099 范围，避免与 default class 999 冲突
+          CLASS_ID=$((RANDOM % 9000 + 100))
+          echo "$CLASS_ID" > "$CLASS_FILE"
+        fi
+
+        # 添加 leaf class（限速）
+        tc class add dev "$OUT_IF" parent 1: classid 1:${CLASS_ID} htb \
+          rate "${LIMIT}mbit" ceil "${LIMIT}mbit" 2>/dev/null || true
+
+        # 添加 filter（用 u32 匹配 VIP）
+        # 注：tc u32 只识别 IPv4，IPv6 流量无法限速
+        tc filter add dev "$OUT_IF" parent 1: protocol ip prio 1 u32 \
+          match ip src "${PLUTO_PEER_SOURCEIP}" flowid 1:${CLASS_ID} 2>/dev/null || true
+
+        echo "[updown] Applied ${LIMIT}Mbps for user ${USERNAME} (VIP ${PLUTO_PEER_SOURCEIP}, class ${CLASS_ID})"
+      fi
+    fi
+    ;;
+  down)
+    # 关键修复：只删该用户的 class，不重建根 qdisc
+    if [ -f "$CLASS_FILE" ]; then
+      CLASS_ID=$(cat "$CLASS_FILE")
+      tc class del dev "$OUT_IF" classid 1:${CLASS_ID} 2>/dev/null || true
+      tc filter del dev "$OUT_IF" parent 1: protocol ip prio 1 2>/dev/null || true
+      rm -f "$CLASS_FILE"
+      echo "[updown] Removed class ${CLASS_ID} for user ${USERNAME}"
+    fi
+    # 注意：不要 tc qdisc del root！否则其他用户的限速也失效
+    ;;
+esac
