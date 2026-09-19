@@ -1,0 +1,106 @@
+name: docker-publish
+
+# v2.79.2 起：源码在 GitHub Actions 上编译并推送多架构镜像到 ghcr.io
+# 触发：
+#   1. push tag v*  → 构建对应 tag（如 v2.79.2 → :2.79.2, :v2.79.2, :latest）
+#   2. workflow_dispatch  → 手动触发（可选输入 ref / 自定义 tag）
+#
+# 镜像仓库：ghcr.io/rewind2026/ikev2-panel-v2
+# 凭据：用 GitHub 自带 GITHUB_TOKEN，无需额外 PAT
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "自定义 tag（可选，留空用 commit SHA）"
+        required: false
+        default: ""
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: rewind2026/ikev2-panel-v2
+
+jobs:
+  build:
+    name: build & push (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # GitHub 免费 runner 只支持 linux/amd64（arm64 是 QEMU 模拟构建）
+        # arm64 真机构建需要 self-hosted runner，这里用 buildx QEMU 跨架构
+        platform:
+          - linux/amd64
+          - linux/arm64
+
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: matrix.platform == 'linux/amd64'
+        # 只登录一次（任意一个 job 即可），其他 job 复用缓存；但为保险每个都登录
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: meta
+        run: |
+          # 优先用 push 触发的 tag（去掉 v 前缀），否则用 workflow_dispatch 输入或 commit SHA
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            RAW_TAG="${GITHUB_REF_NAME}"            # e.g. v2.79.2
+            SHORT="${RAW_TAG#v}"                     # e.g. 2.79.2
+            TAGS="${REGISTRY}/${IMAGE_NAME}:${SHORT},${REGISTRY}/${IMAGE_NAME}:${RAW_TAG}"
+            # main 分支的 tag 自动同步 latest
+            TAGS="${TAGS},${REGISTRY}/${IMAGE_NAME}:latest"
+          elif [[ -n "${{ github.event.inputs.tag }}" ]]; then
+            CUSTOM="${{ github.event.inputs.tag }}"
+            TAGS="${REGISTRY}/${IMAGE_NAME}:${CUSTOM}"
+          else
+            SHA="${GITHUB_SHA::7}"
+            TAGS="${REGISTRY}/${IMAGE_NAME}:${SHA},${REGISTRY}/${IMAGE_NAME}:sha-${SHA}"
+          fi
+          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+          echo "Resolved tags: ${TAGS}"
+
+      - name: Build & push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          # tag 通过 -t 多次指定（buildx 支持逗号分隔）
+          tags: ${{ steps.meta.outputs.tags }}
+          # QEMU arm64 构建不需要 cache-from（runner 是 amd64，cache 命名空间会冲突）
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
+          provenance: false
+          push: true
+
+      - name: Image digest summary
+        if: matrix.platform == 'linux/amd64'
+        run: |
+          echo "### 多架构镜像构建完成" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- 仓库: \`${REGISTRY}/${IMAGE_NAME}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- tags: \`${{ steps.meta.outputs.tags }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "拉取示例：" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "docker pull ${REGISTRY}/${IMAGE_NAME}:2.79.2" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"

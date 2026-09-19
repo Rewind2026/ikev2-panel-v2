@@ -1,0 +1,26 @@
+{{/*
+  v2.85-PR8(U10):用户删除确认页(双确认第一步)。
+  GET /users/{id}/delete → 渲染此页 → 用户点"确认删除" → POST /users/{id}/delete/confirm
+*/}}
+<hgroup>
+  <h1>确认删除用户</h1>
+</hgroup>
+
+<article class="alert-danger">
+  <strong>⚠️ 确定删除用户 <code>{{.User.Username}}</code>?</strong>
+  <p>此操作<strong>不可撤销</strong>:</p>
+  <ul>
+    <li>DB 用户记录永久删除</li>
+    <li>/etc/swanctl/conf.d/{{.User.Username}}.conf 删除 + ReloadAll</li>
+    <li>/var/lib/ikev2-panel/limits/{{.User.Username}} 删除</li>
+    <li>活跃 SA 被强制 terminate</li>
+  </ul>
+
+  <form method="POST" action="/users/{{.User.ID}}/delete/confirm">
+    <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+    <button type="submit" class="contrast">确认删除(不可撤销)</button>
+    <a href="/users/{{.User.ID}}" role="button" class="secondary">取消</a>
+  </form>
+</article>
+
+<p><a href="/users/{{.User.ID}}">← 返回用户详情</a></p>

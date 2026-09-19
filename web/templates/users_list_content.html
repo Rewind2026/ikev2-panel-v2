@@ -1,0 +1,44 @@
+{{/*
+  用户列表内容 - P1-B + Pico v2
+*/}}
+<hgroup>
+  <h1>用户管理</h1>
+  <p><a href="/users/new" role="button" class="contrast">+ 新增用户</a></p>
+</hgroup>
+
+{{if .Flash}}<div class="alert-success"><strong>{{.Flash}}</strong></div>{{end}}
+{{if .NewPassword}}<div class="alert-warn"><strong>新用户密码（仅本次显示）：</strong><code>{{.NewPassword}}</code></div>{{end}}
+
+<figure>
+  <table class="compact striped">
+    <thead>
+      <tr>
+        <th>ID</th><th>用户名</th><th>状态</th><th>限速</th>
+        <th>过期时间</th><th>累计流量</th><th>最后活跃</th>
+        <th>备注</th><th>操作</th>
+      </tr>
+    </thead>
+    <tbody>
+    {{range .Users}}
+      <tr>
+        <td>{{.ID}}</td>
+        <td><a href="/users/{{.ID}}">{{.Username}}</a></td>
+        <td>
+          {{if .Enabled}}<span class="state-badge">启用</span>
+          {{else}}<span class="alert-danger" style="padding:0.15rem 0.5rem">停用</span>{{end}}
+        </td>
+        <td>{{if eq .SpeedLimitMbps 0}}不限{{else}}{{.SpeedLimitMbps}} Mbps{{end}}</td>
+        <td>{{if eq .ExpiresAt 0}}永不过期{{else}}{{formatTime .ExpiresAt}}{{end}}</td>
+        <td>↓ {{formatBytes .BytesInTotal}} / ↑ {{formatBytes .BytesOutTotal}}</td>
+        <td>{{if eq .LastUsedAt 0}}从未{{else}}{{formatTime .LastUsedAt}}{{end}}</td>
+        <td>{{.Note}}</td>
+        <td>
+          <a href="/users/{{.ID}}/delete" role="button" class="secondary outline">删除</a>
+        </td>
+      </tr>
+    {{else}}
+      <tr><td colspan="9" style="text-align:center;color:var(--pico-muted-color)">暂无用户</td></tr>
+    {{end}}
+    </tbody>
+  </table>
+</figure>

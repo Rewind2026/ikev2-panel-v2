@@ -1,0 +1,66 @@
+# v2.86-PR12.16: ikev2 nftables ruleset
+#
+# 设计目标:
+#   - 表名 ikev2 / ikev26 自定义,docker daemon 的 iptables-restore 不会碰
+#   - nft -f 一次原子提交,无 -I FORWARD N 位置坑
+#   - 运行时 sed 替换占位符:@VPN_SUBNET4@ / @OUT_IF4@ / @VPN_SUBNET6@ / @OUT_IF6@
+#
+# 包含:
+#   - §3.5 forward chain: FORWARD ACCEPT ipsec0 ↔ OUT_IF(policy ACCEPT 时冗余但显式)
+#   - §3.5 / §4 postrouting chain: MASQUERADE VPN 子网 → OUT_IF
+#   - §4.4 mangle chain: TCPMSS clamp (FORWARD + OUTPUT)
+#
+# 不包含:
+#   - §4.6 DDoS connlimit/hashlimit:仍走 iptables -I DOCKER-USER(daemon 重写
+#     DOCKER-USER 时不会丢 connlimit/hashlimit 因为我们在它最前面 -I 1/2,而
+#     daemon 重建时也只是整体重写 — 所以我们 §7.9 retry 也要覆盖 DOCKER-USER)
+
+table ip ikev2 {
+    chain forward {
+        type filter hook forward priority 0; policy accept;
+        iifname "ipsec0" accept comment "v2.86-PR12.16 §3.5 ipsec0 in"
+        oifname "ipsec0" accept comment "v2.86-PR12.16 §3.5 ipsec0 out"
+    }
+
+    chain postrouting {
+        type nat hook postrouting priority 100; policy accept;
+        # §4 全局 MASQUERADE(非 LOCAL 地址出向 OUT_IF)
+        oifname "@OUT_IF4@" fib daddr type != local counter masquerade comment "v2.86-PR12.16 §4 MASQUERADE OUT_IF4"
+        # §3.5 VPN 子网 → OUT_IF(兼容 PR12.13 实测必需的 -s VPN_SUBNET 规则)
+        ip saddr @VPN_SUBNET4@ oifname "@OUT_IF4@" counter masquerade comment "v2.86-PR12.16 §3.5 MASQUERADE VPN_SUBNET4"
+    }
+
+    chain mangle_forward {
+        type filter hook forward priority -150; policy accept;
+        tcp flags & (syn|rst) == syn counter tcp option maxseg size set rt mtu comment "v2.86-PR12.16 §4.4 MSS FORWARD"
+    }
+
+    chain mangle_output {
+        type route hook output priority -150; policy accept;
+        tcp flags & (syn|rst) == syn counter tcp option maxseg size set rt mtu comment "v2.86-PR12.16 §4.4 MSS OUTPUT"
+    }
+}
+
+table ip6 ikev26 {
+    chain forward {
+        type filter hook forward priority 0; policy accept;
+        iifname "ipsec0" accept comment "v2.86-PR12.16 §3.5 ipsec0 in v6"
+        oifname "ipsec0" accept comment "v2.86-PR12.16 §3.5 ipsec0 out v6"
+    }
+
+    chain postrouting {
+        type nat hook postrouting priority 100; policy accept;
+        oifname "@OUT_IF6@" fib daddr type != local counter masquerade comment "v2.86-PR12.16 §4 MASQUERADE OUT_IF6"
+        ip6 saddr @VPN_SUBNET6@ oifname "@OUT_IF6@" counter masquerade comment "v2.86-PR12.16 §3.5 MASQUERADE VPN_SUBNET6"
+    }
+
+    chain mangle_forward {
+        type filter hook forward priority -150; policy accept;
+        tcp flags & (syn|rst) == syn counter tcp option maxseg size set rt mtu comment "v2.86-PR12.16 §4.4 MSS FORWARD v6"
+    }
+
+    chain mangle_output {
+        type route hook output priority -150; policy accept;
+        tcp flags & (syn|rst) == syn counter tcp option maxseg size set rt mtu comment "v2.86-PR12.16 §4.4 MSS OUTPUT v6"
+    }
+}

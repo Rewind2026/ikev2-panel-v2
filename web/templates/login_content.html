@@ -1,0 +1,20 @@
+{{/*
+  登录页内容 - P1-B + Pico v2
+  注意：login 时无 AdminUsername,所以 layout 内的 nav 不会显示
+*/}}
+<article class="login-card">
+  <hgroup>
+    <h1>管理员登录</h1>
+    <p>IKEv2 Panel</p>
+  </hgroup>
+  {{if .Error}}<div class="alert-danger"><strong>{{.Error}}</strong></div>{{end}}
+  <form method="POST" action="/login">
+    <label>用户名
+      <input name="username" value="{{.Username}}" required autofocus>
+    </label>
+    <label>密码
+      <input name="password" type="password" required>
+    </label>
+    <button type="submit" class="contrast">登录</button>
+  </form>
+</article>

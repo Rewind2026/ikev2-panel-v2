@@ -1,0 +1,76 @@
+{{/*
+  web/templates/layout.html (P1-B 最终方案 v2)
+
+  采用"两段渲染"模式：
+    1. handlers 先 ExecuteTemplate(buf, "<page>_content.html", data)
+       渲染子模板到 buffer,得到 string
+    2. 把 string 包装成 template.HTML,塞到 data.BodyHTML
+    3. 再 ExecuteTemplate(buf, "layout", data) 渲染外壳
+
+  这样彻底避免 Go html/template 同名 define 覆盖问题
+  （每个子模板是独立的 .html 文件,独立渲染,不共享 define 命名空间）。
+
+  layout 内的 {{.BodyHTML}} 必须是 template.HTML 类型才能不被转义。
+  安全：所有页面都是 Go 后端 render 的,不含用户原始输入（mobileconfig/QR 走单独 handler）,
+  所以不需要 HTML 转义。
+*/}}
+
+{{define "layout"}}<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{.Title}} - IKEv2 Panel</title>
+    <link rel="stylesheet" href="/static/css/pico.min.css">
+    <link rel="stylesheet" href="/static/style.css">
+    <script>
+      // Dark mode 切换（Pico v2 用 data-theme 控制 + localStorage 保存偏好）.
+      // 加载顺序：先读偏好 → 再加载 CSS，避免页面"白闪"再变暗。
+      (function () {
+        var stored = null;
+        try { stored = localStorage.getItem("theme"); } catch (e) {}
+        if (!stored) {
+          stored = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches
+            ? "dark" : "light";
+        }
+        document.documentElement.setAttribute("data-theme", stored);
+      })();
+    </script>
+  </head>
+  <body>
+    {{template "nav" .}}
+    <main class="container">
+      {{.BodyHTML}}
+    </main>
+    <script>
+      // Theme 切换按钮绑定 — 跟 layout.html 的 .theme-toggle 配对。
+      document.addEventListener("DOMContentLoaded", function () {
+        document.querySelectorAll(".theme-toggle").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            var cur = document.documentElement.getAttribute("data-theme") || "light";
+            var next = cur === "dark" ? "light" : "dark";
+            document.documentElement.setAttribute("data-theme", next);
+            try { localStorage.setItem("theme", next); } catch (e) {}
+          });
+        });
+      });
+    </script>
+  </body>
+</html>
+{{end}}
+
+{{define "nav"}}{{if .AdminUsername}}<header class="page-nav">
+  <nav>
+    <a href="/"><strong>IKEv2 Panel</strong></a>
+    <a href="/">首页</a>
+    <a href="/users">用户</a>
+    <a href="/audit">日志</a>
+    <span class="spacer"></span>
+    <button type="button" class="theme-toggle" aria-label="切换主题" title="切换主题">🌓</button>
+    <span class="admin-info">管理员：{{.AdminUsername}}</span>
+    <form method="POST" action="/logout">
+      <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+      <button type="submit" class="link">登出</button>
+    </form>
+  </nav>
+</header>{{end}}{{end}}

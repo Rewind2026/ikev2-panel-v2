@@ -1,0 +1,35 @@
+{{/*
+  v2.85-PR8(U11):操作日志只读页。
+  显示最近 100 条 audit_log。
+*/}}
+<hgroup>
+  <h1>操作日志</h1>
+  <p>最近 100 条(v2.85-PR8)</p>
+</hgroup>
+
+{{if not .Events}}
+<article>
+  <p><em>暂无日志</em></p>
+  <p><small>用户创建 / 删除、阿里云凭证变更、DDNS 切换都会自动写入审计。详情见 <code>docs/TROUBLESHOOTING.md</code>。</small></p>
+</article>
+{{else}}
+<figure>
+<table class="compact striped">
+  <thead>
+    <tr><th>时间</th><th>操作者</th><th>事件</th><th>详情</th></tr>
+  </thead>
+  <tbody>
+  {{range .Events}}
+    <tr>
+      <td><code>{{formatUnixNano .Timestamp}}</code></td>
+      <td><code>{{.Actor}}</code></td>
+      <td><code>{{.Event}}</code></td>
+      <td><code>{{.Details}}</code></td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
+</figure>
+{{end}}
+
+<p><a href="/">← 返回首页</a></p>

@@ -1,0 +1,34 @@
+# 构建产物
+bin/
+dist/
+*.tar
+*.tar.gz
+*.zip
+
+# Go
+*.exe
+*.test
+*.out
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# 数据卷(用户数据)
+data/
+/data/
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 构建日志
+*.log
+!docs/**/*.log
+
+# 临时
+/tmp/

@@ -1,0 +1,411 @@
+/* IKEv2 Panel - 品牌色 & Pico v2 局部覆盖 */
+
+/* 品牌主色:与原 nav/button 一致的深蓝 */
+:root {
+  --pico-primary: #2c3e50;
+  --pico-primary-hover: #1a252f;
+  --pico-primary-focus: rgba(44, 62, 80, 0.25);
+  --pico-primary-inverse: #fff;
+
+  /* v2.86 UI polish:扩展色彩变量 */
+  --ikev2-card-radius: 12px;
+  --ikev2-card-shadow: 0 2px 8px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+  --ikev2-card-shadow-hover: 0 6px 20px rgba(0,0,0,0.10), 0 2px 6px rgba(0,0,0,0.05);
+  --ikev2-color-success: #10b981;
+  --ikev2-color-warn: #f59e0b;
+  --ikev2-color-danger: #ef4444;
+  --ikev2-color-info: #3b82f6;
+  --ikev2-color-muted: #6b7280;
+  --ikev2-accent: #4f46e5;
+  --ikev2-accent-soft: rgba(79, 70, 229, 0.08);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --pico-primary: #4a90c4;
+    --pico-primary-hover: #6ba3d0;
+    --ikev2-card-shadow: 0 2px 8px rgba(0,0,0,0.30), 0 1px 2px rgba(0,0,0,0.20);
+    --ikev2-card-shadow-hover: 0 6px 20px rgba(0,0,0,0.40), 0 2px 6px rgba(0,0,0,0.25);
+    --ikev2-accent-soft: rgba(99, 102, 241, 0.18);
+  }
+}
+
+/* 顶部 nav:靠 Pico 的 <nav> 标签自带样式,微调布局 */
+header.page-nav {
+  border-bottom: 1px solid var(--pico-muted-border-color);
+  margin-bottom: var(--pico-spacing);
+}
+/* 主题切换按钮:跟 nav 其他元素对齐 */
+header.page-nav nav button.theme-toggle {
+  background: none;
+  border: 1px solid var(--pico-muted-border-color);
+  border-radius: 4px;
+  padding: 0.25rem 0.5rem;
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+  margin: 0;
+}
+header.page-nav nav button.theme-toggle:hover {
+  background: var(--pico-muted-background-color);
+}
+header.page-nav nav {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.75rem 1rem;
+}
+header.page-nav nav a {
+  color: var(--pico-primary);
+  text-decoration: none;
+  margin: 0;
+  padding: 0.25rem 0;
+}
+header.page-nav nav a:hover {
+  text-decoration: underline;
+}
+header.page-nav nav .spacer {
+  flex: 1;
+}
+header.page-nav nav .admin-info {
+  font-size: 0.9em;
+  color: var(--pico-muted-color);
+}
+header.page-nav nav form {
+  display: inline;
+  margin: 0;
+}
+header.page-nav nav button.link {
+  background: none;
+  border: none;
+  color: var(--pico-primary);
+  cursor: pointer;
+  padding: 0;
+  font: inherit;
+  text-decoration: underline;
+}
+
+/* 错误/成功/警告横幅 */
+.alert-danger {
+  background: var(--pico-del-background);
+  color: var(--pico-del-color);
+  border-left: 4px solid var(--pico-del-border);
+  padding: 0.75rem 1rem;
+  border-radius: 4px;
+  margin-bottom: 1rem;
+}
+.alert-warn {
+  background: #fff3cd;
+  color: #856404;
+  border-left: 4px solid #ffc107;
+  padding: 0.75rem 1rem;
+  border-radius: 4px;
+  margin-bottom: 1rem;
+}
+.alert-success {
+  background: #d4edda;
+  color: #155724;
+  border-left: 4px solid #28a745;
+  padding: 0.75rem 1rem;
+  border-radius: 4px;
+  margin-bottom: 1rem;
+}
+
+/* 登录页:居中卡片 */
+article.login-card {
+  max-width: 24rem;
+  margin: 4rem auto;
+  padding: 1.5rem;
+}
+
+/* 首页服务器地址显示 */
+.server-addr {
+  font-size: 1.1em;
+  padding: 0.5rem 0.75rem;
+  background: var(--pico-code-background-color);
+  border-radius: 4px;
+}
+
+/* 表格紧凑 */
+table.compact th,
+table.compact td {
+  padding: 0.4rem 0.6rem;
+}
+
+/* SA 表里的状态徽章 */
+.state-badge {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.85em;
+  background: var(--pico-ins-background);
+  color: var(--pico-ins-color);
+}
+
+/* ====================================================================
+   v2.86 UI polish:卡片 + 状态徽章 + 表单 + 按钮
+   ==================================================================== */
+
+/* 卡片统一美化(只针对首页主要 article,不动 login/user_detail 等子页面) */
+main > article {
+  border-radius: var(--ikev2-card-radius);
+  box-shadow: var(--ikev2-card-shadow);
+  padding: 1.5rem 1.75rem;
+  transition: box-shadow 180ms ease, transform 180ms ease;
+  margin-bottom: 1.25rem;
+}
+main > article:hover {
+  box-shadow: var(--ikev2-card-shadow-hover);
+}
+
+/* 卡片标题:左侧色条 + 略大字号 + 字重 */
+main > article > header {
+  position: relative;
+  padding-left: 0.85rem;
+  margin-bottom: 1rem;
+  border-bottom: 1px solid var(--pico-muted-border-color);
+  padding-bottom: 0.6rem;
+}
+main > article > header::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0.15em;
+  bottom: 0.55em;
+  width: 4px;
+  border-radius: 2px;
+  background: var(--ikev2-accent);
+}
+main > article > header > strong {
+  font-size: 1.08rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+main > article > header > small {
+  display: block;
+  margin-top: 0.2rem;
+  color: var(--ikev2-color-muted);
+  font-size: 0.82rem;
+  font-weight: 400;
+}
+
+/* 状态徽章:绿/黄/红圆点 + 文字 */
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.2rem 0.65rem;
+  border-radius: 999px;
+  font-size: 0.82rem;
+  font-weight: 500;
+  line-height: 1.4;
+}
+.status-badge::before {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.status-badge.success {
+  background: rgba(16, 185, 129, 0.10);
+  color: var(--ikev2-color-success);
+}
+.status-badge.success::before {
+  background: var(--ikev2-color-success);
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.18);
+}
+.status-badge.warn {
+  background: rgba(245, 158, 11, 0.10);
+  color: var(--ikev2-color-warn);
+}
+.status-badge.warn::before {
+  background: var(--ikev2-color-warn);
+  box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.18);
+}
+.status-badge.danger {
+  background: rgba(239, 68, 68, 0.10);
+  color: var(--ikev2-color-danger);
+}
+.status-badge.danger::before {
+  background: var(--ikev2-color-danger);
+  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.18);
+}
+.status-badge.muted {
+  background: var(--pico-muted-background-color);
+  color: var(--ikev2-color-muted);
+}
+.status-badge.muted::before {
+  background: var(--ikev2-color-muted);
+}
+
+/* 表单字段:focus 高亮(基于 Pico 默认,但稍加强) */
+main > article input[type="text"]:focus,
+main > article input[type="password"]:focus,
+main > article input[type="email"]:focus,
+main > article input[type="url"]:focus,
+main > article select:focus,
+main > article textarea:focus {
+  box-shadow: 0 0 0 3px var(--ikev2-accent-soft);
+  border-color: var(--ikev2-accent);
+}
+
+/* radio 卡片化(LE / 自签 切换) */
+main > article fieldset {
+  border: 1px solid var(--pico-muted-border-color);
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+  margin-bottom: 1rem;
+}
+main > article fieldset legend {
+  font-size: 0.82rem;
+  color: var(--ikev2-color-muted);
+  padding: 0 0.4rem;
+}
+main > article fieldset label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0;
+  cursor: pointer;
+}
+
+/* 按钮:hover + active 反馈 */
+main > article button[type="submit"]:not(.secondary):not(.contrast) {
+  background: linear-gradient(135deg, var(--ikev2-accent) 0%, #6366f1 100%);
+  border-color: var(--ikev2-accent);
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  padding: 0.7rem 1.5rem;
+  transition: transform 120ms ease, box-shadow 120ms ease;
+}
+main > article button[type="submit"]:not(.secondary):not(.contrast):hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(79, 70, 229, 0.25);
+}
+main > article button[type="submit"]:not(.secondary):not(.contrast):active {
+  transform: translateY(0);
+}
+main > article button.secondary {
+  background: transparent;
+  border: 1px solid var(--pico-muted-border-color);
+  color: var(--ikev2-color-muted);
+}
+main > article button.secondary:hover {
+  background: var(--pico-muted-background-color);
+  color: var(--pico-color);
+}
+
+/* details > summary 美化 */
+main > article details summary {
+  cursor: pointer;
+  color: var(--ikev2-accent);
+  padding: 0.4rem 0;
+  user-select: none;
+}
+main > article details summary:hover {
+  color: var(--pico-primary-hover);
+}
+
+/* code 内联标签:小 padding + 圆角 */
+main > article code {
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  font-size: 0.9em;
+}
+
+/* 空状态提示(无活跃连接 / 无用户) */
+main > article > p > em,
+main > article > p > i {
+  color: var(--ikev2-color-muted);
+  font-style: normal;
+  font-style: italic;
+}
+main > article > p:has(> em:only-child) {
+  text-align: center;
+  padding: 2rem 1rem;
+  color: var(--ikev2-color-muted);
+}
+
+/* 用户管理主按钮群(快速入口) */
+main > article > p > a[role="button"] {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-right: 0.5rem;
+}
+
+/* 字段 placeholder / helper text */
+main > article small:not(header > small) {
+  display: block;
+  margin-top: 0.3rem;
+  color: var(--ikev2-color-muted);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+/* 输入警告颜色强调(LE 模式必填 + restart 提示) */
+main > article p small[style*="orange"] {
+  background: rgba(245, 158, 11, 0.08);
+  border-left: 3px solid var(--ikev2-color-warn);
+  padding: 0.5rem 0.75rem;
+  border-radius: 4px;
+  display: block;
+  margin: 0.75rem 0;
+}
+
+/* 默认密码横幅强化 */
+main > article.alert-warning {
+  background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+  border-left: 4px solid var(--ikev2-color-warn);
+  padding: 1rem 1.25rem;
+}
+
+/* onboarding checklist(首次部署引导) */
+main > article.alert-success {
+  border-radius: var(--ikev2-card-radius);
+  padding: 1.25rem 1.5rem;
+}
+main > article.alert-success header strong {
+  font-size: 1.1rem;
+}
+main > article.alert-success ol li {
+  padding: 0.3rem 0;
+}
+
+/* 表格紧凑 + 状态徽章在 SA 表里 */
+figure table.compact tbody tr:hover {
+  background: var(--pico-muted-background-color);
+}
+figure table.compact .state-badge {
+  font-weight: 500;
+}
+
+/* 大标题(hgroup) */
+hgroup > h1 {
+  font-size: 1.75rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin-bottom: 0.25rem;
+}
+hgroup > p {
+  color: var(--ikev2-color-muted);
+  margin-bottom: 1.5rem;
+}
+
+/* h3 section heading */
+h3 {
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin-top: 2rem;
+  margin-bottom: 0.75rem;
+  color: var(--pico-color);
+}
+
+/* 响应式:narrow 屏幕卡片 padding 缩小 */
+@media (max-width: 768px) {
+  main > article {
+    padding: 1rem 1.1rem;
+  }
+}
