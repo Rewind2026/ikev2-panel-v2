@@ -48,9 +48,11 @@ const (
 
 // SALifecycleEvent 简化的事件载荷(只取审计需要的字段)。
 type SALifecycleEvent struct {
-	Type     SAEventType
-	UniqueID uint32 // charon IKE_SA unique-id(同一 SA 重协商前后不变)
-	Remote   string // 客户端 IP(v4 或 v6)
+	Type      SAEventType
+	UniqueID  uint32 // charon IKE_SA unique-id(同一 SA 重协商前后不变)
+	Remote    string // 客户端 IP(v4 或 v6,= remote-host)
+	RemoteID  string // EAP identity(= remote-id,如 "rewind")— v2.86-PR12.18 新增,用于反查 user
+	RemoteVIP string // 虚拟 IP(= remote-vips,如 "10.10.0.1")— v2.86-PR12.18 新增,用于 collector 反查
 }
 
 // SALifecycleHandler 事件回调(handler)。nil = 丢弃。
@@ -147,43 +149,56 @@ func (l *LifecycleListener) runOnce(ctx context.Context) error {
 
 // handleEvent 解析单条 ike-updown 事件。
 //
-// vici event 格式(参考 strongSwan 6.0+ docs):
-//   - Event.Name == "ike-updown"
-//   - Event.Message 字段:
-//       "up" (建立,value="yes") 或 不存在(默认删除) → 决定 SAEstablished/SADeleted
-//       "unique" 字段 → IKE SA unique-id(string 格式,govici marshalField 强转)
-//       "remote" 字段 → 客户端 IP(v4 或 v6 string)
+// v2.86-PR12.18 重大修正:strongSwan 6.0+ 的 ike-updown 事件 payload 结构是
+//   - 顶层 "up" = "yes"/"no"
+//   - 顶层 一个或多个 connection-name(如 "ikev2-rw")键,值是嵌套 *vici.Message
+//   - 嵌套 Message 里才是 uniqueid / remote-host / remote-id / remote-vips
 //
-// govici v0.8.1:Get 返回值类型只能是 string / []string / *Message(见 doc):
-//   - bool 在 marshalField 里被转成 "yes"/"no" 字符串
-//   - 整数被 strconv.FormatInt 转字符串
-//   - 所以这里所有字段都要按 string 解析,再 strconv
+// 之前 v2.86-PR15 误以为顶层字段就是 unique/remote,实测 payload 全部 nil
+// → unique=0 remote="" 写到 audit_log,完全没用。
 //
-// 字段不一定全有(charon 老版本字段名可能不同),部分缺失就记 None。
+// 实测 payload(2026-09-19 50.63,strongSwan 6.0.1):
+//   up = "yes"
+//   ikev2-rw = {
+//     uniqueid = 1
+//     state = ESTABLISHED
+//     local-host = 2408:822e:...:b567
+//     remote-host = 2408:832e:881:6460:...
+//     remote-id = rewind           ← EAP 用户名
+//     remote-vips = 10.10.0.1      ← 虚拟 IP
+//     ...
+//   }
 func (l *LifecycleListener) handleEvent(ev vici.Event) {
 	if ev.Message == nil {
 		return
 	}
 	msg := ev.Message
 
-	// 解析 up:charon 用 "yes"/"no" 字符串(部分老版本用 "up"/"down")
+	// 1. 解析 up
 	var up bool
 	if v, ok := msg.Get("up").(string); ok {
 		up = v == "yes" || v == "up" || v == "true"
 	}
 
-	// 解析 unique:string → uint32
+	// 2. 遍历顶层所有 connection-name 字段,找到第一个 *vici.Message 嵌套 SA
 	var uniqueID uint32
-	if v, ok := msg.Get("unique").(string); ok {
-		if n, err := strconv.ParseUint(v, 10, 32); err == nil {
-			uniqueID = uint32(n)
+	var remoteHost, remoteID, remoteVips string
+	for _, k := range msg.Keys() {
+		if k == "up" {
+			continue // "up" 是顶层状态字段,跳过
 		}
-	}
+		raw := msg.Get(k)
+		saMsg, ok := raw.(*vici.Message)
+		if !ok {
+			continue
+		}
 
-	// remote 直接是 string
-	var remote string
-	if v, ok := msg.Get("remote").(string); ok {
-		remote = v
+		// 找到了嵌套 SA Message → 解析字段
+		uniqueID = parseUint32Field(saMsg, "uniqueid")
+		remoteHost = parseStringField(saMsg, "remote-host")
+		remoteID = parseStringField(saMsg, "remote-id")
+		remoteVips = parseStringField(saMsg, "remote-vips")
+		break // 只取第一个 connection(多 conn 场景罕见)
 	}
 
 	evtType := SADeleted
@@ -192,12 +207,55 @@ func (l *LifecycleListener) handleEvent(ev vici.Event) {
 	}
 
 	evt := SALifecycleEvent{
-		Type:     evtType,
-		UniqueID: uniqueID,
-		Remote:   remote,
+		Type:      evtType,
+		UniqueID:  uniqueID,
+		Remote:    remoteHost, // 兼容老逻辑:用 remote-host 作 Remote
+		RemoteID:  remoteID,
+		RemoteVIP: remoteVips,
 	}
 	if l.handler != nil {
 		l.handler(evt)
+	}
+}
+
+// parseStringField 辅助:从 vici.Message 拿 string 字段,缺失返回空。
+func parseStringField(m *vici.Message, key string) string {
+	if m == nil {
+		return ""
+	}
+	v := m.Get(key)
+	if v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return fmt.Sprintf("%v", v)
+}
+
+// parseUint32Field 辅助:从 vici.Message 拿 uint32 字段(支持 string/int64 两种 govici 返回)。
+func parseUint32Field(m *vici.Message, key string) uint32 {
+	if m == nil {
+		return 0
+	}
+	v := m.Get(key)
+	if v == nil {
+		return 0
+	}
+	switch x := v.(type) {
+	case int64:
+		return uint32(x)
+	case int:
+		return uint32(x)
+	case uint64:
+		return uint32(x)
+	case string:
+		n, _ := strconv.ParseUint(x, 10, 32)
+		return uint32(n)
+	default:
+		s := fmt.Sprintf("%v", v)
+		n, _ := strconv.ParseUint(s, 10, 32)
+		return uint32(n)
 	}
 }
 
@@ -212,7 +270,8 @@ func NewSALifecycleAuditHandler(s *store.Store, logger *slog.Logger) SALifecycle
 		if s == nil {
 			return
 		}
-		details := fmt.Sprintf("unique=%d remote=%s", evt.UniqueID, evt.Remote)
+		details := fmt.Sprintf("unique=%d remote=%s eap_id=%s vip=%s",
+			evt.UniqueID, evt.Remote, evt.RemoteID, evt.RemoteVIP)
 		if err := s.WriteAudit(context.Background(), store.AuditEvent{
 			Timestamp: time.Now().UnixNano(),
 			Actor:     "system",

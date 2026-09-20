@@ -5,16 +5,28 @@
 //   用 CallStreaming(ctx, "list-sas", "list-sa", msg) 拿到 iter.Seq2[*Message, error]，
 //   每个元素就是单个 IKE_SA 的结构化 Message。
 //
-// 协议 Message 结构：
-//   ike-sa: {
-//       uniqueid:    "1"
-//       state:       "ESTABLISHED"
-//       local-id:    "1 ikev2.example.com"   // "type id"
-//       remote-id:   "2 alice"
-//       local-addr:  "2001:db8::75[500]"
-//       remote-addr: "2001:db8::63[4500]"
-//       child-sas:   "..."  (嵌套 Message: key=child name, val=Message)
+// 协议 Message 结构（strongSwan 6.0.1 govici v0.8.1 实测, v2.86-PR12.18 修正）：
+//   {
+//       ikev2-rw: {                          // 顶层 key = connection-name
+//           uniqueid:    "1"
+//           state:       "ESTABLISHED"
+//           local-id:    "1 ikev2.example.com"   // "type id"
+//           remote-id:   "2 alice"
+//           local-addr:  "2001:db8::75[500]"
+//           remote-addr: "2001:db8::63[4500]"
+//           child-sas:   {                     // 再嵌套: key=child name, val=Message
+//               ikev2-rw: {
+//                   bytes-in:  N
+//                   bytes-out: N
+//                   ...
+//               }
+//           }
+//       }
 //   }
+//
+// 注意:list-sas streaming 顶层 Message 是 connection-name 包裹的结构,
+// 跟 ike-updown 事件的 payload 一样。原 parser 误以为是平铺结构,
+// 导致 uniqueid/state/remote-id/bytes 全空,collector 永远拿不到流量。
 //
 // 优势（vs 原 os/exec + 字符串解析）：
 //   - 原实现需要解析 key=value 缩进、flush child 等复杂状态机
@@ -100,19 +112,37 @@ func (m *Manager) ListSAs(ctx context.Context) ([]SA, error) {
 
 // parseSingleSA 解析单个 IKE_SA Message。
 //
-// 子段 child-sas 是嵌套 Message，key=child name，val=Message。
+// v2.86-PR12.18 修复:strongSwan VICI list-sas streaming 推送的"单个 SA Message"
+// 实际是嵌套结构——顶层 key 是 connection-name (如 "ikev2-rw"),
+// val 是嵌套的 Message（含 uniqueid/state/remote-id/child-sas/...）。
+// 这跟 ike-updown 事件的 payload 一样,但跟最初设计注释假设的"顶层就是 SA 字段"
+// 不一致。原实现导致 uniqueid/state/remote-id 全部空,child-sas 也丢了,
+// collector 永远拿不到 RemoteID,用户流量永远不更新。
 func parseSingleSA(m *vici.Message) (SA, error) {
+	// 1) 找到嵌套的 SA Message（遍历顶层 keys,找第一个 *vici.Message）
+	var inner *vici.Message
+	for _, k := range m.Keys() {
+		if v, ok := m.Get(k).(*vici.Message); ok {
+			inner = v
+			break
+		}
+	}
+	if inner == nil {
+		// 兼容老格式:顶层就是 SA 字段（早期 strongSwan 5.x 或未来可能改回）
+		inner = m
+	}
+
 	sa := SA{
-		UniqueID:   getString(m, "uniqueid"),
-		IkeState:   getString(m, "state"),
-		LocalAddr:  getString(m, "local-addr"),
-		RemoteAddr: getString(m, "remote-addr"),
-		RemoteID:   extractID(getString(m, "remote-id")),
-		LocalID:    extractID(getString(m, "local-id")),
+		UniqueID:   getString(inner, "uniqueid"),
+		IkeState:   getString(inner, "state"),
+		LocalAddr:  getString(inner, "local-addr"),
+		RemoteAddr: getString(inner, "remote-addr"),
+		RemoteID:   extractID(getString(inner, "remote-id")),
+		LocalID:    extractID(getString(inner, "local-id")),
 	}
 
 	// 解析 child-sas
-	if c := m.Get("child-sas"); c != nil {
+	if c := inner.Get("child-sas"); c != nil {
 		childMsg, ok := c.(*vici.Message)
 		if !ok {
 			return sa, fmt.Errorf("vici child-sas: unexpected type %T", c)

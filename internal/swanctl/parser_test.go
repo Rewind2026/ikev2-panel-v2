@@ -1,4 +1,4 @@
-﻿// VICI list-sas 响应 Message 解析测试。
+// VICI list-sas 响应 Message 解析测试。
 //
 // 测试策略：
 //   - 手工构造 vici.Message（模拟 charon list-sa event 推送的单个 SA Message）
@@ -15,10 +15,11 @@ import (
 	"github.com/strongswan/govici/vici"
 )
 
-// makeSA 构造一个 IKE_SA Message（含 children）。
+// makeSAFlat 构造一个老格式 IKE_SA Message（顶层就是 SA 字段）。
+// 用于覆盖 parseSingleSA 的 fallback 路径（inner == nil）。
 //
 // children map 的 val 必须是 *vici.Message（govici 协议层要求）。
-func makeSA(uniqueid, state, remoteID, remoteAddr string, children map[string]*vici.Message) *vici.Message {
+func makeSAFlat(uniqueid, state, remoteID, remoteAddr string, children map[string]*vici.Message) *vici.Message {
 	m := vici.NewMessage()
 	m.Set("uniqueid", uniqueid)
 	m.Set("state", state)
@@ -38,6 +39,20 @@ func makeSA(uniqueid, state, remoteID, remoteAddr string, children map[string]*v
 	return m
 }
 
+// makeStreamingSA 构造 strongSwan VICI list-sas streaming 真实结构。
+//
+// v2.86-PR12.18 实测:顶层 Message 只含一个 key = connection-name,
+// val 是嵌套 Message（含 uniqueid/state/remote-id/child-sas）。
+// parser 必须剥一层才能拿到 SA 字段。
+func makeStreamingSA(connName string, uniqueid, state, remoteID, remoteAddr string, children map[string]*vici.Message) *vici.Message {
+	inner := makeSAFlat(uniqueid, state, remoteID, remoteAddr, children)
+
+	// 顶层包一层 connection-name
+	out := vici.NewMessage()
+	out.Set(connName, inner)
+	return out
+}
+
 // makeChild 构造一个 child SA Message。
 //
 // VICI 数字字段用 int64（govici 协议层默认类型）。
@@ -51,7 +66,8 @@ func makeChild(bytesIn, bytesOut int64, localTS, remoteTS string) *vici.Message 
 }
 
 func TestParseSingleSA_Established(t *testing.T) {
-	src := makeSA("1", "ESTABLISHED", "alice", "2001:db8::63[4500]",
+	// 真实 streaming 结构:顶层 ikev2-rw 包裹
+	src := makeStreamingSA("ikev2-rw", "1", "ESTABLISHED", "alice", "2001:db8::63[4500]",
 		map[string]*vici.Message{
 			"ikev2-rw": makeChild(1024, 2048, "0.0.0.0/0, ::/0", "0.0.0.0/0, ::/0"),
 		})
@@ -89,8 +105,21 @@ func TestParseSingleSA_Established(t *testing.T) {
 	}
 }
 
+func TestParseSingleSA_FlatFallback(t *testing.T) {
+	// 兼容老格式:顶层就是 SA 字段（早期 strongSwan / 测试用）
+	src := makeSAFlat("2", "ESTABLISHED", "bob", "2001:db8::64[4500]", nil)
+
+	sa, err := parseSingleSA(src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if sa.RemoteID != "bob" {
+		t.Errorf("RemoteID: got %q", sa.RemoteID)
+	}
+}
+
 func TestParseSingleSA_Connecting(t *testing.T) {
-	src := makeSA("2", "CONNECTING", "bob", "2001:db8::64[4500]", nil)
+	src := makeStreamingSA("ikev2-rw", "2", "CONNECTING", "bob", "2001:db8::64[4500]", nil)
 
 	sa, err := parseSingleSA(src)
 	if err != nil {
@@ -108,20 +137,20 @@ func TestParseSingleSA_Connecting(t *testing.T) {
 }
 
 func TestParseSingleSA_NoChildren(t *testing.T) {
-	src := makeSA("3", "ESTABLISHED", "carol", "2001:db8::65[4500]", nil)
+	src := makeStreamingSA("ikev2-rw", "3", "ESTABLISHED", "carol", "2001:db8::65[4500]", nil)
 
 	sa, err := parseSingleSA(src)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
 	if sa.Children != nil {
-		// 没 child-sas 字段时，应为 nil（parseSingleSA 不主动初始化）
+		// 没 child-sas 字段时,应为 nil（parseSingleSA 不主动初始化）
 		t.Errorf("Children: expected nil, got %v", sa.Children)
 	}
 }
 
 func TestParseSingleSA_MultipleChildren(t *testing.T) {
-	src := makeSA("1", "ESTABLISHED", "alice", "2001:db8::63[4500]",
+	src := makeStreamingSA("ikev2-rw", "1", "ESTABLISHED", "alice", "2001:db8::63[4500]",
 		map[string]*vici.Message{
 			"ikev2-rw-a": makeChild(100, 200, "0.0.0.0/0", "0.0.0.0/0"),
 			"ikev2-rw-b": makeChild(300, 400, "::/0", "::/0"),

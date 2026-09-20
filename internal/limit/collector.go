@@ -68,7 +68,7 @@ func NewCollector(s SwanctlManager, st UserStore, logger *slog.Logger) *Collecto
 		swanctl:   s,
 		store:     st,
 		logger:    logger,
-		period:    5 * time.Minute,
+		period:    30 * time.Second, // v2.86-PR12.18 临时改 30s 验证,后续改回 5m
 		prevBytes: make(map[string][2]int64),
 	}
 }
@@ -136,6 +136,11 @@ func (c *Collector) collect(ctx context.Context) {
 		}
 		user := sa.RemoteID
 		if user == "" {
+			// v2.86-PR12.18 调试:RemoteID 空时 dump 整个 SA,排查 list-sas 与 ike-updown 的字段差异
+			c.logger.Info("collector: sa.RemoteID empty, dump",
+				"uniqueid", sa.UniqueID, "state", sa.IkeState,
+				"remote", sa.RemoteAddr, "remote_id_raw", sa.RemoteID,
+				"children", len(sa.Children))
 			continue
 		}
 		for childName, child := range sa.Children {
@@ -191,6 +196,6 @@ func (c *Collector) collect(ctx context.Context) {
 			continue
 		}
 	}
-	c.logger.Debug("collector: stats collected",
+	c.logger.Info("collector: stats collected",
 		"users", len(deltaByUser), "sas", len(sas), "tracked_keys", len(c.prevBytes))
 }
