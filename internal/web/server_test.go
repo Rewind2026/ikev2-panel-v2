@@ -428,6 +428,62 @@ func TestRecoverPanic_LoggedStack(t *testing.T) {
 	}
 }
 
+// ---------- trailing slash redirect tests ----------
+
+// TestTrailingSlashRedirect v2.86-PR12.21:验证 /path/ 301 → /path。
+//
+// 背景:Go 1.22 ServeMux 严格区分 /users 与 /users/,iOS mobileconfig / 用户书签 /
+// 客户端 VPN 起来后内部跳转经常带 trailing slash,导致 404。
+func TestTrailingSlashRedirect(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /users", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("users-ok"))
+	})
+	mux.HandleFunc("GET /users/{id}", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprintf(w, "user-%s", r.PathValue("id"))
+	})
+	handler := trailingSlashRedirect(mux)
+
+	tests := []struct {
+		name       string
+		path       string
+		wantStatus int
+		wantLoc    string // expected Location header (for 301)
+		wantBody   string // expected body (for 200)
+	}{
+		{"trailing slash /users/", "/users/", http.StatusMovedPermanently, "/users", ""},
+		{"trailing slash /users/4/", "/users/4/", http.StatusMovedPermanently, "/users/4", ""},
+		{"no slash /users", "/users", http.StatusOK, "", "users-ok"},
+		{"no slash /users/4", "/users/4", http.StatusOK, "", "user-4"},
+		{"root /", "/", http.StatusNotFound, "", ""}, // mux 没注册 / → 404,trailingSlashRedirect 跳过不动
+		{"query string preserved", "/users/?foo=bar", http.StatusMovedPermanently, "/users?foo=bar", ""},
+		{"file ext .pem/ 不重定向", "/ca.cert.pem/", http.StatusNotFound, "", ""}, // .pem 含 .,跳过 redirect → mux 404
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", tt.path, nil)
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+
+			if got := rr.Code; got != tt.wantStatus {
+				t.Errorf("status: got %d want %d, body=%s", got, tt.wantStatus, rr.Body.String())
+			}
+			if tt.wantLoc != "" {
+				if got := rr.Header().Get("Location"); got != tt.wantLoc {
+					t.Errorf("Location: got %q want %q", got, tt.wantLoc)
+				}
+			}
+			if tt.wantBody != "" {
+				if got := rr.Body.String(); got != tt.wantBody {
+					t.Errorf("body: got %q want %q", got, tt.wantBody)
+				}
+			}
+		})
+	}
+}
+
 // ---------- helpers ----------
 
 // createTestUser 建一个测试用户，返回 userID。重复样板逻辑收敛在这里。

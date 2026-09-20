@@ -176,11 +176,52 @@ func New(srv *Server, staticDir string) http.Handler {
 	mux.Handle("GET /audit", protect(http.HandlerFunc(srv.handleAudit)))
 
 	// 中间件链（外→内）：
-	//   recoverPanic → secureHeaders → logging → mux
+	//   recoverPanic → secureHeaders → logging → trailingSlashRedirect → mux
 	// recover 必须最外层，否则 logging 自身 panic 或 mux panic 会逃逸。
 	// secureHeaders 必须在 logging 之内,这样所有响应(含 panic 500)都有安全 header。
+	// trailingSlashRedirect 在 logging 之内、mux 之外,这样 301 响应也走 secureHeaders。
 	// 设计见 docs/design.md §3（错误处理策略）+ v2-80+ backlog（panic recover）+ v2.86-PR9
-	return recoverPanic(srv.Logger)(secureHeaders()(logging(srv.Logger, srv.Metrics)(mux)))
+	return recoverPanic(srv.Logger)(secureHeaders()(logging(srv.Logger, srv.Metrics)(trailingSlashRedirect(mux))))
+}
+
+// trailingSlashRedirect v2.86-PR12.21:把 /path/ 301 重定向到 /path。
+//
+// 背景：Go 1.22 net/http.ServeMux 严格区分 /users 与 /users/,iOS mobileconfig
+// 安装后的内部跳转 / 用户书签 / 客户端 VPN 起来后浏览器自动补 trailing slash
+// 都会触发 404。这里统一做 301 → 去 slash 版本。
+//
+// 例外（不动）：
+//   - 静态资源 /static/(FileServer 自己处理 slash)
+//   - 根路径 /
+//   - 带 file extension 的路径(.css / .png / .pem / .mobileconfig / .sswan)
+//   - POST 请求不重写(避免重发)
+//   - query string 保留
+func trailingSlashRedirect(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		// 不重写条件(顺序敏感):
+		// 1) 根路径 /
+		// 2) 非 GET(避免 POST 重发)
+		// 3) 路径长度 <= 1 (避免 "//" 这种边界)
+		// 4) 末尾不是 /
+		// 5) 去掉末尾 / 后的最后一段含 "." (文件路径: .pem .css .png .mobileconfig .sswan)
+		if path == "/" || r.Method != "GET" || len(path) <= 1 || path[len(path)-1] != '/' {
+			next.ServeHTTP(w, r)
+			return
+		}
+		trimmed := strings.TrimRight(path, "/")
+		lastSlash := strings.LastIndex(trimmed, "/")
+		lastSeg := trimmed[lastSlash+1:]
+		if strings.Contains(lastSeg, ".") {
+			// 文件路径 → 不动
+			next.ServeHTTP(w, r)
+			return
+		}
+		if r.URL.RawQuery != "" {
+			trimmed += "?" + r.URL.RawQuery
+		}
+		http.Redirect(w, r, trimmed, http.StatusMovedPermanently)
+	})
 }
 
 // recoverPanic 把单个请求里的 panic 兜住，返回 500 而不是让进程崩溃。
