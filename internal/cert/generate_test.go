@@ -97,7 +97,8 @@ func TestRenderMobileconfig(t *testing.T) {
 
 	// v2-76：EAP-MSCHAPv2 模式。参数顺序：username, password, serverAddr, serverID, caPEM
 	// v2.85-PR3:加 tzName 参数(测试用 "UTC")
-	out, err := RenderMobileconfig("alice", "alicePass123", "vpn.example.com", "vpn.example.com", caCert, "UTC")
+	// v2.86-PR12.21:加 opts 参数,测试用 nil(用全局默认)
+	out, err := RenderMobileconfig("alice", "alicePass123", "vpn.example.com", "vpn.example.com", caCert, "UTC", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,8 +133,20 @@ func TestRenderMobileconfig(t *testing.T) {
 	if !strings.Contains(s, "<key>AuthPassword</key><string>alicePass123</string>") {
 		t.Error("AuthPassword must be embedded in profile (no iOS password prompt)")
 	}
-	if !strings.Contains(s, "<key>AuthPasswordRetries</key><integer>3</integer>") {
-		t.Error("AuthPasswordRetries should be 3 (strongSwan recommendation)")
+	// v2.86-PR12.22 audit: AuthPasswordRetries 字段 Apple 文档没有,已移除。
+	if strings.Contains(s, "<key>AuthPasswordRetries</key>") {
+		t.Error("AuthPasswordRetries should NOT appear (v2.86-PR12.22 audit removed)")
+	}
+	// v2.86-PR12.22 audit: Apple 文档用 NATKeepAliveOffloadEnable(大写 A),
+	// 不能用 NATKeepaliveEnabled(小写 a),plist key 大小写敏感。
+	if !strings.Contains(s, "<key>NATKeepAliveOffloadEnable</key>") {
+		t.Error("must contain NATKeepAliveOffloadEnable (Apple canonical name)")
+	}
+	if strings.Contains(s, "<key>NATKeepaliveEnabled</key>") {
+		t.Error("must NOT contain legacy NATKeepaliveEnabled (Apple uses NATKeepAliveOffloadEnable)")
+	}
+	if !strings.Contains(s, "<key>NATKeepAliveInterval</key>") {
+		t.Error("must contain NATKeepAliveInterval (Apple canonical name)")
 	}
 	// v2-75 PSK 模式已废：确保不再出现
 	if strings.Contains(s, "<key>AuthenticationMethod</key><string>SharedSecret</string>") {
@@ -199,12 +212,13 @@ func TestRenderMobileconfig(t *testing.T) {
 	if !strings.Contains(s, "<key>DisconnectOnIdle</key><integer>0</integer>") {
 		t.Error("DisconnectOnIdle must be 0 (Never disconnect per Apple Deployment Guide)")
 	}
-	if !strings.Contains(s, "<key>NATKeepaliveEnabled</key><true/>") {
-		t.Error("NATKeepaliveEnabled must be <true/> (硬件加速 NAT keepalive)")
+	// v2.86-PR12.22 audit: Apple 用 NATKeepAliveOffloadEnable + NATKeepAliveInterval(大写 A)
+	if !strings.Contains(s, "<key>NATKeepAliveOffloadEnable</key><true/>") {
+		t.Error("NATKeepAliveOffloadEnable must be <true/> (硬件加速 NAT keepalive)")
 	}
 	// 最小 20 秒（Apple 规范），推荐 60
-	if !strings.Contains(s, "<key>NATKeepaliveInterval</key><integer>60</integer>") {
-		t.Error("NATKeepaliveInterval must be 60s (Apple 最小 20)")
+	if !strings.Contains(s, "<key>NATKeepAliveInterval</key><integer>60</integer>") {
+		t.Error("NATKeepAliveInterval must be 60s (Apple 最小 20)")
 	}
 	if !strings.Contains(s, "<key>OnDemandEnabled</key><integer>1</integer>") {
 		t.Error("OnDemandEnabled must be 1 (Wi-Fi/Cellular 切换自动重连)")
@@ -217,7 +231,7 @@ func TestRenderMobileconfig(t *testing.T) {
 	}
 
 	// LE 模式：无内联 CA
-	out2, err := RenderMobileconfig("bob", "bobPass456", "vpn.example.com", "vpn.example.com", nil, "UTC")
+	out2, err := RenderMobileconfig("bob", "bobPass456", "vpn.example.com", "vpn.example.com", nil, "UTC", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

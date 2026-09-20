@@ -83,6 +83,145 @@
             <a href="/users/{{.User.ID}}/mobileconfig" role="button">下载 .mobileconfig</a>
           </div>
         </div>
+
+        {{/* v2.86-PR12.21:mobileconfig 高级选项(每用户覆盖) */}}
+<details class="mobileconfig-options">
+  <summary>⚙️ 高级选项(每用户 mobileconfig 覆盖)</summary>
+  <p class="text-sm text-muted">
+    这些参数只影响本用户下载的 .mobileconfig,不影响其他人。
+    修改后下次扫码 / 下载自动生效,无需重新配置服务端。
+    优先级:<strong>本用户 overlay &gt; 管理员全局默认 &gt; 出厂</strong>。
+    想改所有用户的默认值,到 <a href="/admin/mobileconfig-defaults">管理员后台 → 配置 → Mobileconfig 默认值</a>。
+  </p>
+
+  <form method="POST" action="/users/{{.User.ID}}/mobileconfig-options" id="mc-opts-form">
+    <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+
+    <label>
+      <span>连接显示名</span>
+      <input type="text" name="user_defined_name" maxlength="64"
+             placeholder="留空 = IKEv2 VPN"
+             title="iOS 设置里的连接名称,留空用默认(不能含 &lt; &gt; &amp; 等特殊字符)">
+    </label>
+
+    <label>
+      <span>按需连接场景 (OnDemand)</span>
+      <select name="on_demand_profile">
+        <option value="">— 使用全局默认(始终连接)—</option>
+        <option value="always">始终连接(任何网络都连)</option>
+        <option value="home_wifi_disconnect">家里 Wi-Fi 断开 VPN(填 SSID)</option>
+        <option value="cellular_only">仅蜂窝连接 VPN,Wi-Fi 不连</option>
+        <option value="captive_probe">智能判断(能上 internet.apple.com 不连,否则连)</option>
+        <option value="manual">完全手动(关闭按需,自己点连接)</option>
+      </select>
+    </label>
+
+    <label>
+      <span>家里 Wi-Fi SSID(仅 home_wifi_disconnect 模式用)</span>
+      <input type="text" name="ondemand_ssid" maxlength="32"
+             placeholder="例如 Home-5G">
+    </label>
+
+    <label>
+      <span>启用按需自动连接</span>
+      <select name="on_demand_enabled">
+        <option value="">— 用全局默认 —</option>
+        <option value="1">启用</option>
+        <option value="0">停用</option>
+      </select>
+    </label>
+
+    <label>
+      <span>睡眠时断开 VPN</span>
+      <select name="disconnect_on_sleep">
+        <option value="">— 用全局默认 —</option>
+        <option value="1">是(锁屏断 VPN,省电)</option>
+        <option value="0">否(锁屏保持连接,推送及时)</option>
+      </select>
+    </label>
+
+    <label>
+      <span>NAT 保活</span>
+      <select name="nat_keepalive_enabled">
+        <option value="">— 用全局默认 —</option>
+        <option value="1">启用(防运营商 NAT 过期)</option>
+        <option value="0">停用</option>
+      </select>
+    </label>
+
+    <label>
+      <span>NAT 保活间隔(秒)</span>
+      <input type="number" name="nat_keepalive_interval" min="20" max="600"
+             placeholder="20–600,默认 60">
+    </label>
+
+    <label>
+      <span>全局路由(全部流量进 VPN)</span>
+      <select name="include_all_networks">
+        <option value="">— 用全局默认 —</option>
+        <option value="1">是(推荐,iOS 17+ 默认行为)</option>
+        <option value="0">否(split tunnel,部分流量直连)</option>
+      </select>
+    </label>
+
+    <label>
+      <span>排除局域网(192.168/10/172.16)</span>
+      <select name="exclude_local_networks">
+        <option value="">— 用全局默认 —</option>
+        <option value="1">是(保留局域网访问,推荐)</option>
+        <option value="0">否(所有流量走 VPN)</option>
+      </select>
+    </label>
+
+    <label>
+      <span>DNS 服务器(每行一个 IP,最多 6 个)</span>
+      <textarea name="dns_servers" rows="4" placeholder="1.1.1.1&#10;8.8.8.8&#10;2606:4700:4700::1111"></textarea>
+    </label>
+
+    <label>
+      <span>DPD 心跳速率</span>
+      <select name="dead_peer_detection_rate">
+        <option value="">— 用全局默认 —</option>
+        <option value="None">None(不检测)</option>
+        <option value="Low">Low(30 分钟)</option>
+        <option value="Medium">Medium(10 分钟,默认)</option>
+        <option value="High">High(1 分钟)</option>
+      </select>
+    </label>
+
+    <p class="text-sm text-muted mt-3">
+      📖 <strong>说明</strong>:
+      <code>AuthPasswordRetries</code> 字段在 iOS 官方文档中并不存在(已在
+      v2.86-PR12.22 audit 中移除);EAP 失败重试由客户端 OS 内部决定。
+    </p>
+
+    <div class="row">
+      <button type="submit">保存(下次下载生效)</button>
+      <button type="submit" name="clear" value="1" class="secondary"
+              onclick="return confirm('清空所有覆盖项,回到全局默认?')">恢复全局默认</button>
+    </div>
+  </form>
+
+  <details>
+    <summary>📖 参数说明</summary>
+    <ul class="text-sm" style="line-height: 1.7;">
+      <li><strong>连接显示名</strong>:iOS 设置 → VPN 列表里显示的名字,留空用默认 "IKEv2 VPN"。</li>
+      <li><strong>按需连接场景</strong>:5 个预设,见上方 select 提示。改完后 home_wifi_disconnect 必填 SSID。</li>
+      <li><strong>睡眠时断开</strong>:默认 <em>否</em>(锁屏保活,推送及时)。想省电改 <em>是</em>。</li>
+      <li><strong>NAT 保活</strong>:默认开启。运营商 NAT 过期会踢掉 VPN,启用后硬件网卡持续发 keepalive。</li>
+      <li><strong>NAT 保活间隔</strong>:默认 60 秒。国内运营商 NAT 寿命 ~120s,建议保持 60;国外 ~30s 改 25。</li>
+      <li><strong>全局路由</strong>:默认 <em>是</em>(所有流量进 VPN)。改 <em>否</em> 后部分流量直连(split tunnel),适合想用内网服务的场景。</li>
+      <li><strong>排除局域网</strong>:默认 <em>是</em>(192.168.x.x 路由器管理页面等仍可访问)。</li>
+      <li><strong>DNS 服务器</strong>:隧道内 DNS 解析器。改用内网 DNS / AdGuard / NextDNS 都能填。</li>
+      <li><strong>EAP 密码重试</strong>:默认 3 次。改成 1 可以让密码错时快速失败,不阻塞用户。</li>
+      <li><strong>DPD 心跳</strong>:检测对端存活。Wi-Fi 信号差选 Low;企业网选 High。</li>
+    </ul>
+    <p class="text-sm text-muted">
+      ⚠️ <strong>没开放的字段</strong>(算法/DH 群/PFS/MTU/证书 CN/EAP 模式等)跟服务端 strongSwan 绑死,
+      改一边 = VPN 起不来。这是有意设计,避免误操作。
+    </p>
+  </details>
+</details>
       </div>
 
       <div class="os-panel" data-os-key="android-native">

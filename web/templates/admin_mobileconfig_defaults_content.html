@@ -1,0 +1,221 @@
+{{/*
+  /admin/mobileconfig-defaults 内容 (v2.86-PR12.22)
+
+  管理员后台 → mobileconfig 全局默认值设置页。
+
+  三层优先级:
+    - 用户 overlay (store.User.MobileConfigOpts)  ← 用户详情页 "高级选项"
+    - 本页设置的 admin defaults                    ← **当前页**
+    - cert.BaseMobileConfigDefaults() builtin       ← 出厂不可改
+
+  字段含义:
+    - UserDefinedName         连接显示名;留空用 "IKEv2 VPN"
+    - OnDemandProfile         5 个 preset,见 cert.OnDemandProfile
+    - OnDemandEnabled         是否启用 OnDemand
+    - DisconnectOnSleep       锁屏是否断 VPN
+    - NATKeepaliveEnabled/Interval  锁屏后硬件网卡 keepalive 间隔(20-600s)
+    - IncludeAllNetworks      全局路由(true = 所有流量进 VPN)
+    - ExcludeLocalNetworks    排除局域网(true = 192.168.x 仍可访问)
+    - DNSServers              隧道内 DNS
+    - DeadPeerDetectionRate   DPD 心跳(None/Low/Medium/High)
+
+  ⚠️ **没开放的字段**:算法/DH 群/PFS/MTU/证书 CN/EAP 模式等跟服务端 strongSwan 绑死,
+  改一边 = VPN 起不来。本页不暴露,是有意设计。
+
+  历史: v2.86-PR12.22 首次添加(admin defaults 层)。
+
+  Template helpers 用法:
+    - boolPtrVal *bool → "1" / "0" / ""
+    - intPtrVal  *int  → strconv.Itoa(*p) / ""
+    - "未设置"和"显式 false"通过这两个 helper 区分
+*/}}
+
+<header class="page-header">
+  <hgroup>
+    <h1>📱 Mobileconfig 默认值</h1>
+    <p>v2.86-PR12.22 — 管理员全局默认(运行时热改,无需重启)</p>
+  </hgroup>
+  <div class="page-meta">
+    {{if .Current}}<span class="badge ok">已自定义</span>{{else}}<span class="badge">出厂</span>{{end}}
+  </div>
+</header>
+
+{{if .Flash}}<div class="banner-ok alert-ok dismissable" data-dismiss-key="mc-defaults-flash">{{.Flash}}</div>{{end}}
+{{if .Error}}<div class="banner-danger alert-danger">{{.Error}}</div>{{end}}
+
+<article>
+  <p class="text-sm">
+    这组默认值影响 <strong>所有用户</strong> 下载的 <code>.mobileconfig</code>(除非用户在
+    详情页单独设过覆盖项)。优先级:<strong>用户 overlay &gt; 本页 admin defaults &gt; 出厂</strong>。
+  </p>
+  <p class="text-sm">
+    修改保存后<strong>立即生效</strong>,用户下次扫码 / 下载 / 重新拉取描述文件就用新值。<strong>无需重启容器</strong>。
+  </p>
+</article>
+
+{{$cur := .Current}}
+<form method="POST" action="/admin/mobileconfig-defaults">
+  <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+
+  <fieldset>
+    <legend>📶 按需自动连接</legend>
+
+    <label>
+      <span>按需连接场景 (OnDemand)</span>
+      <select name="on_demand_profile">
+        <option value="" {{if not $cur}}selected{{end}}>— 使用 builtin 出厂值("always")—</option>
+        <option value="always" {{if and $cur (eq $cur.OnDemandProfile "always")}}selected{{end}}>始终连接(任何网络都连)</option>
+        <option value="home_wifi_disconnect" {{if and $cur (eq $cur.OnDemandProfile "home_wifi_disconnect")}}selected{{end}}>家里 Wi-Fi 断开 VPN(SSID 必须在每用户详情页填)</option>
+        <option value="cellular_only" {{if and $cur (eq $cur.OnDemandProfile "cellular_only")}}selected{{end}}>仅蜂窝连接 VPN,Wi-Fi 不连</option>
+        <option value="captive_probe" {{if and $cur (eq $cur.OnDemandProfile "captive_probe")}}selected{{end}}>智能判断(能上 captive.apple.com 不连)</option>
+        <option value="manual" {{if and $cur (eq $cur.OnDemandProfile "manual")}}selected{{end}}>完全手动(关闭按需)</option>
+      </select>
+    </label>
+
+    <label>
+      <span>启用按需自动连接</span>
+      <select name="on_demand_enabled">
+        <option value="" {{if or (not $cur) (not $cur.OnDemandEnabled)}}selected{{end}}>— 用 builtin 出厂值 —</option>
+        <option value="1" {{if and $cur (eq (boolPtrVal $cur.OnDemandEnabled) "1")}}selected{{end}}>启用</option>
+        <option value="0" {{if and $cur (eq (boolPtrVal $cur.OnDemandEnabled) "0")}}selected{{end}}>停用</option>
+      </select>
+    </label>
+  </fieldset>
+
+  <fieldset>
+    <legend>🔌 连接行为</legend>
+
+    <label>
+      <span>连接显示名 (iOS 设置里的连接名)</span>
+      <input type="text" name="user_defined_name" maxlength="64"
+             placeholder='留空 = 用 builtin "IKEv2 VPN"'
+             value="{{if $cur}}{{$cur.UserDefinedName}}{{end}}">
+    </label>
+
+    <label>
+      <span>睡眠时断开 VPN</span>
+      <select name="disconnect_on_sleep">
+        <option value="" {{if or (not $cur) (not $cur.DisconnectOnSleep)}}selected{{end}}>— 用 builtin 出厂值 —</option>
+        <option value="1" {{if and $cur (eq (boolPtrVal $cur.DisconnectOnSleep) "1")}}selected{{end}}>是(锁屏断 VPN,省电)</option>
+        <option value="0" {{if and $cur (eq (boolPtrVal $cur.DisconnectOnSleep) "0")}}selected{{end}}>否(锁屏保持连接,推送及时)</option>
+      </select>
+    </label>
+
+    <label>
+      <span>NAT 保活</span>
+      <select name="nat_keepalive_enabled">
+        <option value="" {{if or (not $cur) (not $cur.NATKeepaliveEnabled)}}selected{{end}}>— 用 builtin 出厂值 —</option>
+        <option value="1" {{if and $cur (eq (boolPtrVal $cur.NATKeepaliveEnabled) "1")}}selected{{end}}>启用(防运营商 NAT 过期)</option>
+        <option value="0" {{if and $cur (eq (boolPtrVal $cur.NATKeepaliveEnabled) "0")}}selected{{end}}>停用</option>
+      </select>
+    </label>
+
+    <label>
+      <span>NAT 保活间隔(秒,20-600)</span>
+      <input type="number" name="nat_keepalive_interval" min="20" max="600"
+             placeholder="留空 = 用 builtin 出厂值(60)"
+             value="{{if $cur}}{{intPtrVal $cur.NATKeepaliveInterval}}{{end}}">
+    </label>
+  </fieldset>
+
+  <fieldset>
+    <legend>🌐 路由 / DNS</legend>
+
+    <label>
+      <span>全局路由(全部流量进 VPN)</span>
+      <select name="include_all_networks">
+        <option value="" {{if or (not $cur) (not $cur.IncludeAllNetworks)}}selected{{end}}>— 用 builtin 出厂值 —</option>
+        <option value="1" {{if and $cur (eq (boolPtrVal $cur.IncludeAllNetworks) "1")}}selected{{end}}>是(推荐,iOS 17+ 默认行为)</option>
+        <option value="0" {{if and $cur (eq (boolPtrVal $cur.IncludeAllNetworks) "0")}}selected{{end}}>否(split tunnel,部分流量直连)</option>
+      </select>
+    </label>
+
+    <label>
+      <span>排除局域网(192.168/10/172.16)</span>
+      <select name="exclude_local_networks">
+        <option value="" {{if or (not $cur) (not $cur.ExcludeLocalNetworks)}}selected{{end}}>— 用 builtin 出厂值 —</option>
+        <option value="1" {{if and $cur (eq (boolPtrVal $cur.ExcludeLocalNetworks) "1")}}selected{{end}}>是(保留局域网访问)</option>
+        <option value="0" {{if and $cur (eq (boolPtrVal $cur.ExcludeLocalNetworks) "0")}}selected{{end}}>否</option>
+      </select>
+    </label>
+
+    <label>
+      <span>DNS 服务器(每行一个 IP,最多 6 个)</span>
+      <textarea name="dns_servers" rows="4"
+                placeholder="留空 = 用 builtin 出厂值&#10;例:&#10;1.1.1.1&#10;8.8.8.8&#10;2606:4700:4700::1111">{{if and $cur $cur.DNSServers}}{{range $cur.DNSServers}}{{.}}
+{{end}}{{end}}</textarea>
+    </label>
+  </fieldset>
+
+  <fieldset>
+    <legend>🔐 DPD 心跳</legend>
+
+    <label>
+      <span>DPD 心跳速率</span>
+      <select name="dead_peer_detection_rate">
+        <option value="" {{if or (not $cur) (eq $cur.DeadPeerDetectionRate "")}}selected{{end}}>— 用 builtin 出厂值 —</option>
+        <option value="None" {{if and $cur (eq $cur.DeadPeerDetectionRate "None")}}selected{{end}}>None(不检测)</option>
+        <option value="Low" {{if and $cur (eq $cur.DeadPeerDetectionRate "Low")}}selected{{end}}>Low(30 分钟)</option>
+        <option value="Medium" {{if and $cur (eq $cur.DeadPeerDetectionRate "Medium")}}selected{{end}}>Medium(10 分钟,默认)</option>
+        <option value="High" {{if and $cur (eq $cur.DeadPeerDetectionRate "High")}}selected{{end}}>High(1 分钟)</option>
+      </select>
+    </label>
+  </fieldset>
+
+  <div class="row mt-4">
+    <button type="submit">保存(下次用户下载生效)</button>
+    <a href="/" role="button" class="secondary">取消</a>
+  </div>
+</form>
+
+{{if .Current}}
+<form method="POST" action="/admin/mobileconfig-defaults/clear" class="mt-4">
+  <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+  <button type="submit" class="secondary"
+          onclick="return confirm('确认恢复 builtin 出厂值?\n所有用户下载的 mobileconfig 将立刻改回默认参数。')">恢复 builtin 出厂值</button>
+</form>
+{{end}}
+
+<details class="mt-5">
+  <summary>📖 参数说明(同用户详情页"高级选项")</summary>
+  <ul class="text-sm" style="line-height: 1.7;">
+    <li><strong>连接显示名</strong>:iOS 设置 → VPN 列表里显示的名字。留空用 "IKEv2 VPN"。</li>
+    <li><strong>按需连接场景</strong>:5 个预设,见 select。注意 <code>home_wifi_disconnect</code> 需要每用户填 SSID(SSID 是 per-network 的,不能全局)。</li>
+    <li><strong>睡眠时断开</strong>:默认 <em>否</em>(锁屏保活,推送及时)。改 <em>是</em> 省电但推送延迟。</li>
+    <li><strong>NAT 保活</strong>:默认开启,运营商 NAT 过期会踢掉 VPN,启用后硬件网卡持续发 keepalive。</li>
+    <li><strong>NAT 保活间隔</strong>:默认 60 秒。国内运营商 NAT 寿命 ~120s,建议保持 60;国外可改 25。</li>
+    <li><strong>全局路由</strong>:默认 <em>是</em>(所有流量进 VPN)。改 <em>否</em> 部分流量直连(split tunnel)。</li>
+    <li><strong>排除局域网</strong>:默认 <em>是</em>(192.168.x.x 路由器管理页面等仍可访问)。</li>
+    <li><strong>DNS 服务器</strong>:隧道内 DNS 解析器。改用内网 DNS / AdGuard / NextDNS 都能填。</li>
+    <li><strong>EAP 密码重试</strong>:默认 3 次。改 1 让密码错时快速失败,不阻塞用户。</li>
+    <li><strong>DPD 心跳</strong>:检测对端存活。Wi-Fi 信号差选 Low;企业网选 High。</li>
+  </ul>
+  <p class="text-sm text-muted">
+    ⚠️ <strong>没开放的字段</strong>(算法/DH 群/PFS/MTU/证书 CN/EAP 模式等)跟服务端 strongSwan 绑死,
+    改一边 = VPN 起不来。这是有意设计,避免误操作。
+  </p>
+</details>
+
+{{if .Current}}
+<article class="mt-5">
+  <h4>当前 builtin 出厂值参考(只读)</h4>
+  <p class="text-sm text-muted">留空的字段会回退到这些值。</p>
+  <dl class="kv-list">
+    <dt>UserDefinedName</dt><dd>留空时显示为 "IKEv2 VPN"</dd>
+    <dt>OnDemandProfile</dt><dd>always</dd>
+    <dt>OnDemandEnabled</dt><dd>true</dd>
+    <dt>DisconnectOnSleep</dt><dd>false(锁屏保活)</dd>
+    <dt>NATKeepaliveEnabled</dt><dd>true</dd>
+    <dt>NATKeepaliveInterval</dt><dd>60 秒</dd>
+    <dt>IncludeAllNetworks</dt><dd>true</dd>
+    <dt>ExcludeLocalNetworks</dt><dd>true</dd>
+    <dt>DNSServers</dt><dd>1.1.1.1, 8.8.8.8, 2606:4700:4700::1111, 2001:4860:4860::8888</dd>
+    <dt>DeadPeerDetectionRate</dt><dd>Medium</dd>
+  </dl>
+</article>
+{{end}}
+
+<p class="mt-4 text-sm text-muted">
+  💡 用户详情页 "⚙️ 高级选项" 里的覆盖项优先级<strong>高于</strong>本页 admin defaults。
+  修改每用户覆盖请到 <a href="/users">用户列表</a>。
+</p>

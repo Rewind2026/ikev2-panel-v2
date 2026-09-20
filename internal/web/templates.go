@@ -114,6 +114,9 @@ func LoadTemplates(templatesDir string, displayTZ string) (*template.Template, e
 		"jsonOneClient":       jsonOneClient,
 		// v2.86-PR12.21: audit 严重性映射 (timeline-dot class),基于 event name 启发式
 		"auditSeverity": auditSeverity,
+		// v2.86-PR12.22: admin mobileconfig defaults 表单用,*bool / *int 转字符串
+		"boolPtrVal":  boolPtrVal,
+		"intPtrVal":   intPtrValTpl,
 	})
 
 	if _, err := t.ParseFiles(paths...); err != nil {
@@ -450,4 +453,31 @@ func auditSeverity(event string) string {
 	default:
 		return "info"
 	}
+}
+
+// boolPtrVal v2.86-PR12.22: 把 *bool 转成 "1" / "0" / "" 给 select option 比较用。
+//
+// nil  → ""  (空字符串,占位 select 选中)
+// &true → "1"
+// &false → "0"
+//
+// Go html/template 不能直接 deref 指针,所以走 FuncMap。
+func boolPtrVal(p *bool) string {
+	if p == nil {
+		return ""
+	}
+	if *p {
+		return "1"
+	}
+	return "0"
+}
+
+// intPtrValTpl v2.86-PR12.22: 同上,*int 转字符串给 input value 用。
+//
+// nil → ""(占位 placeholder 选中),其它 → strconv.Itoa。
+func intPtrValTpl(p *int) string {
+	if p == nil {
+		return ""
+	}
+	return strconv.Itoa(*p)
 }

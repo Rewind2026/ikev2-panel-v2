@@ -68,6 +68,10 @@ type Server struct {
 	// 跟 PanelState 是独立的另一个 Store(同目录不同文件),可独立读写。
 	CertConfigStore *panelstate.CertConfigStore
 
+	// v2.86-PR12.22:管理员全局 mobileconfig 默认值(运行时热改,无需重启)。
+	// 优先级:overlay(user.MobileConfigOpts) > MobileConfigDefaults > BaseMobileConfigDefaults()。
+	MobileConfigDefaults *panelstate.MobileConfigDefaultsStore
+
 	// v2-83:阿里云凭证来源(从 main.go 注入,给面板显示用)
 	AliyunAccessKeySource string
 
@@ -144,6 +148,11 @@ func New(srv *Server, staticDir string) http.Handler {
 	// Android 11+ 原生客户端配置页（不走 sswan 导入，走系统 VPN 设置手动配 EAP-MSCHAPv2）
 	mux.Handle("GET /users/{id}/android", protect(http.HandlerFunc(srv.handleUserAndroidConfig)))
 	mux.Handle("POST /users/{id}/reset-password", protectPOST(http.HandlerFunc(srv.handleUserResetPassword)))
+	// v2.86-PR12.21:每用户 mobileconfig 覆盖项 API。
+	//   GET  /users/{id}/mobileconfig-options  读取当前覆盖项(返回 JSON,前端表单渲染)
+	//   POST /users/{id}/mobileconfig-options  保存覆盖项(返回 JSON,前端 toast)
+	mux.Handle("GET /users/{id}/mobileconfig-options", protect(http.HandlerFunc(srv.handleUserMobileconfigOptionsGet)))
+	mux.Handle("POST /users/{id}/mobileconfig-options", protectPOST(http.HandlerFunc(srv.handleUserMobileconfigOptionsSave)))
 	mux.Handle("POST /users/{id}/enable", protectPOST(http.HandlerFunc(srv.handleUserEnable)))
 	mux.Handle("POST /users/{id}/disable", protectPOST(http.HandlerFunc(srv.handleUserDisable)))
 	// v2.85-PR8(U10):双确认 - GET 拉确认页,POST 才真删
@@ -171,6 +180,14 @@ func New(srv *Server, staticDir string) http.Handler {
 	mux.Handle("GET /api/cert/status", protect(http.HandlerFunc(srv.handleCertStatus)))
 	mux.Handle("POST /api/cert/save", protectPOST(http.HandlerFunc(srv.handleCertSave)))
 	mux.Handle("POST /api/cert/clear", protectPOST(http.HandlerFunc(srv.handleCertClear)))
+
+	// v2.86-PR12.22:管理员后台 mobileconfig 全局默认值。
+	//   - GET  /admin/mobileconfig-defaults         设置页
+	//   - POST /admin/mobileconfig-defaults         保存(admin 默认,运行时热改无需重启)
+	//   - POST /admin/mobileconfig-defaults/clear   清除(回 builtin 出厂)
+	mux.Handle("GET /admin/mobileconfig-defaults", protect(http.HandlerFunc(srv.handleAdminMobileconfigDefaults)))
+	mux.Handle("POST /admin/mobileconfig-defaults", protectPOST(http.HandlerFunc(srv.handleAdminMobileconfigDefaultsSave)))
+	mux.Handle("POST /admin/mobileconfig-defaults/clear", protectPOST(http.HandlerFunc(srv.handleAdminMobileconfigDefaultsClear)))
 
 	// v2.85-PR8(U11):审计日志只读页
 	mux.Handle("GET /audit", protect(http.HandlerFunc(srv.handleAudit)))

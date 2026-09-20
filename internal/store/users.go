@@ -1,4 +1,4 @@
-﻿// users 表 CRUD
+// users 表 CRUD
 // 设计见 docs/design.md §6.1
 package store
 
@@ -26,8 +26,9 @@ func (s *Store) CreateUser(ctx context.Context, u *User) (int64, error) {
 	res, err := s.DB.ExecContext(ctx, `
 		INSERT INTO users
 			(username, password, enabled, note, speed_limit_mbps, expires_at,
-			 bytes_in_total, bytes_out_total, created_at, updated_at, last_used_at)
-		VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?, 0)
+			 bytes_in_total, bytes_out_total, created_at, updated_at, last_used_at,
+			 mobileconfig_opts)
+		VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?, 0, '')
 	`,
 		u.Username, u.Password, boolToInt(u.Enabled), u.Note, u.SpeedLimitMbps, u.ExpiresAt,
 		now, now,
@@ -50,7 +51,8 @@ func (s *Store) CreateUser(ctx context.Context, u *User) (int64, error) {
 func (s *Store) GetUserByID(ctx context.Context, id int64) (*User, error) {
 	row := s.DB.QueryRowContext(ctx, `
 		SELECT id, username, password, enabled, note, speed_limit_mbps, expires_at,
-		       bytes_in_total, bytes_out_total, created_at, updated_at, last_used_at
+		       bytes_in_total, bytes_out_total, created_at, updated_at, last_used_at,
+		       mobileconfig_opts
 		FROM users WHERE id = ?
 	`, id)
 	return scanUser(row)
@@ -60,7 +62,8 @@ func (s *Store) GetUserByID(ctx context.Context, id int64) (*User, error) {
 func (s *Store) GetUserByUsername(ctx context.Context, username string) (*User, error) {
 	row := s.DB.QueryRowContext(ctx, `
 		SELECT id, username, password, enabled, note, speed_limit_mbps, expires_at,
-		       bytes_in_total, bytes_out_total, created_at, updated_at, last_used_at
+		       bytes_in_total, bytes_out_total, created_at, updated_at, last_used_at,
+		       mobileconfig_opts
 		FROM users WHERE username = ?
 	`, username)
 	return scanUser(row)
@@ -70,7 +73,8 @@ func (s *Store) GetUserByUsername(ctx context.Context, username string) (*User, 
 func (s *Store) ListUsers(ctx context.Context) ([]*User, error) {
 	rows, err := s.DB.QueryContext(ctx, `
 		SELECT id, username, password, enabled, note, speed_limit_mbps, expires_at,
-		       bytes_in_total, bytes_out_total, created_at, updated_at, last_used_at
+		       bytes_in_total, bytes_out_total, created_at, updated_at, last_used_at,
+		       mobileconfig_opts
 		FROM users ORDER BY id ASC
 	`)
 	if err != nil {
@@ -137,6 +141,26 @@ func (s *Store) UpdateUserNote(ctx context.Context, id int64, note string) error
 	return nil
 }
 
+// UpdateUserMobileConfigOpts 更新用户的 mobileconfig 覆盖项(JSON 字符串)。
+//
+// v2.86-PR12.21:管理员后台 -> 用户详情页保存时调用。
+// 入参 jsonOpts 必须是合法 JSON,handler 端负责 Validate。
+// 传 "" 表示清空覆盖,回到 cert 默认值。
+func (s *Store) UpdateUserMobileConfigOpts(ctx context.Context, id int64, jsonOpts string) error {
+	now := time.Now().Unix()
+	res, err := s.DB.ExecContext(ctx,
+		`UPDATE users SET mobileconfig_opts = ?, updated_at = ? WHERE id = ?`,
+		jsonOpts, now, id,
+	)
+	if err != nil {
+		return fmt.Errorf("update mobileconfig_opts: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // DeleteUser 删除用户。
 func (s *Store) DeleteUser(ctx context.Context, id int64) error {
 	res, err := s.DB.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, id)
@@ -161,7 +185,8 @@ func (s *Store) CountUsers(ctx context.Context) (int, error) {
 func (s *Store) GetExpiredUsers(ctx context.Context, nowUnix int64) ([]*User, error) {
 	rows, err := s.DB.QueryContext(ctx, `
 		SELECT id, username, password, enabled, note, speed_limit_mbps, expires_at,
-		       bytes_in_total, bytes_out_total, created_at, updated_at, last_used_at
+		       bytes_in_total, bytes_out_total, created_at, updated_at, last_used_at,
+		       mobileconfig_opts
 		FROM users
 		WHERE expires_at > 0 AND expires_at < ?
 		ORDER BY expires_at ASC
@@ -216,7 +241,7 @@ func scanUser(r rowScanner) (*User, error) {
 	err := r.Scan(
 		&u.ID, &u.Username, &u.Password, &enabled, &u.Note,
 		&u.SpeedLimitMbps, &u.ExpiresAt, &u.BytesInTotal, &u.BytesOutTotal,
-		&u.CreatedAt, &u.UpdatedAt, &u.LastUsedAt,
+		&u.CreatedAt, &u.UpdatedAt, &u.LastUsedAt, &u.MobileConfigOpts,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {

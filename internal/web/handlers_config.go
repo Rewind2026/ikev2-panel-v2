@@ -11,6 +11,50 @@ import (
 	"github.com/yourname/ikev2-panel-v2/internal/store"
 )
 
+// resolveEffectiveOpts 把 admin defaults + user overlay 合并成最终 *cert.MobileConfigOpts。
+//
+// v2.86-PR12.22 三层优先级:
+//   - cert.BaseMobileConfigDefaults()(builtin 出厂值)
+//   - panelstate.MobileConfigDefaults(管理员全局)
+//   - store.User.MobileConfigOpts(每用户 overlay,已 decode)
+//
+// 调用场景:任何要渲染 mobileconfig 的 handler(GET /users/{id}/mobileconfig
+// 或 /install/{token}),都从这里拿最终值,避免重复合并逻辑。
+//
+// 出错时 nil 字段 → handler 用 builtin 默认;整个 helper 不会 panic / 报错。
+func (s *Server) resolveEffectiveOpts(userOverlayJSON string) *cert.MobileConfigOpts {
+	// 1) admin defaults
+	var adminOpts *cert.MobileConfigOpts
+	if s.MobileConfigDefaults != nil {
+		if d, err := s.MobileConfigDefaults.ReadMobileConfigDefaults(); err == nil && d != nil {
+			adminOpts = d.ToMobileConfigOpts()
+		} else if err != nil {
+			s.Logger.Warn("resolveEffectiveOpts: read admin defaults", "err", err)
+		}
+	}
+
+	// 2) user overlay
+	userOpts, err := cert.DecodeMobileConfigOpts(userOverlayJSON)
+	if err != nil {
+		// JSON 损坏 caller 会自己处理,这里只 log 不 fail
+		s.Logger.Warn("resolveEffectiveOpts: decode user overlay", "err", err)
+		userOpts = nil
+	}
+
+	// 3) 三层合并,返回最终 opts(handler 传 nil 时全部用 builtin)
+	return mergedOptsFromLayers(adminOpts, userOpts)
+}
+
+// mergedOptsFromLayers 调 cert.EffectiveMobileConfigOpts 三层合并。
+//
+// 这里 thin wrap 的目的:跟 cert.BaseMobileConfigDefaults() 解耦(handler 不直接 import
+// cert.BaseMobileConfigDefaults 是因为 PR12.22 之前 cert.DefaultMobileConfigOpts 已被多处引用,
+// 但 PR12.22 之后语义是 "已合并值",这里显式合并更直观)。
+func mergedOptsFromLayers(admin, overlay *cert.MobileConfigOpts) *cert.MobileConfigOpts {
+	eff := cert.EffectiveMobileConfigOpts(admin, overlay)
+	return &eff
+}
+
 // handleUserMobileconfig GET /users/{id}/mobileconfig
 // 自签模式：mobileconfig 内联 CA 证书；LE 模式：不内联
 func (s *Server) handleUserMobileconfig(w http.ResponseWriter, r *http.Request) {
@@ -37,7 +81,21 @@ func (s *Server) handleUserMobileconfig(w http.ResponseWriter, r *http.Request) 
 
 	// v2-76+：EAP-MSCHAPv2 模式，AuthName/AuthPassword 直接写进 profile，iOS 不弹密码框。
 	// v2.85-PR3:透传 s.DisplayTimezone,BuildTimestamp 用配置的时区渲染。
-	out, err := cert.RenderMobileconfig(u.Username, u.Password, serverAddr, s.ServerCN, caPEM, s.DisplayTimezone)
+	// v2.86-PR12.21:读 user.MobileConfigOpts,空 → nil → 用 cert 默认值。
+	// v2.86-PR12.22:三层合并 builtin + admin defaults + user overlay。
+	//
+	// 防御性:用户 overlay JSON 损坏 → 返回 500 而不是悄悄用 builtin(iOS 装了 profile
+	// 才知道错就更糟)。admin defaults JSON 损坏 resolveEffectiveOpts 内部 log + 降级 builtin。
+	if u.MobileConfigOpts != "" {
+		if _, err := cert.DecodeMobileConfigOpts(u.MobileConfigOpts); err != nil {
+			s.Logger.Error("decode mobileconfig opts", "user_id", id, "err", err)
+			http.Error(w, fmt.Sprintf("mobileconfig 配置损坏,请联系管理员: %v", err),
+				http.StatusInternalServerError)
+			return
+		}
+	}
+	opts := s.resolveEffectiveOpts(u.MobileConfigOpts)
+	out, err := cert.RenderMobileconfig(u.Username, u.Password, serverAddr, s.ServerCN, caPEM, s.DisplayTimezone, opts)
 	if err != nil {
 		s.Logger.Error("render mobileconfig", "err", err)
 		http.Error(w, "render mobileconfig failed", http.StatusInternalServerError)
@@ -145,7 +203,17 @@ func (s *Server) handleInstallByToken(w http.ResponseWriter, r *http.Request) {
 	}
 	// v2-76+：EAP-MSCHAPv2 模式，AuthName/AuthPassword 直接写进 profile，iOS 不弹密码框。
 	// v2.85-PR3:透传 s.DisplayTimezone。
-	out, err := cert.RenderMobileconfig(u.Username, u.Password, serverAddr, s.ServerCN, caPEM, s.DisplayTimezone)
+	// v2.86-PR12.21:同上,读 user overlay。
+	// v2.86-PR12.22:三层合并 builtin + admin defaults + user overlay。
+	if u.MobileConfigOpts != "" {
+		if _, err := cert.DecodeMobileConfigOpts(u.MobileConfigOpts); err != nil {
+			s.Logger.Error("install: decode mobileconfig opts", "user_id", userID, "err", err)
+			http.Error(w, "mobileconfig 配置损坏", http.StatusInternalServerError)
+			return
+		}
+	}
+	opts := s.resolveEffectiveOpts(u.MobileConfigOpts)
+	out, err := cert.RenderMobileconfig(u.Username, u.Password, serverAddr, s.ServerCN, caPEM, s.DisplayTimezone, opts)
 	if err != nil {
 		s.Logger.Error("install: render mobileconfig", "err", err)
 		http.Error(w, "render mobileconfig failed", http.StatusInternalServerError)

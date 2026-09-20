@@ -107,5 +107,24 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("exec %q: %w", q[:40]+"...", err)
 		}
 	}
+
+	// v2.86-PR12.21:每用户 mobileconfig 覆盖项。
+	// ALTER TABLE 用 IF NOT EXISTS 在 modernc/sqlite 不支持,先查列名再加。
+	// 列存 JSON 字符串,空 = 用 cert 默认值。
+	// 参考:https://sqlite.org/lang_altertable.html#otheralter
+	// 必须在 stmts 循环之后跑:全新 DB 下 users 表还没建,ALTER 会失败
+	var hasMobileOpts int
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_table_info('users') WHERE name = 'mobileconfig_opts'`,
+	).Scan(&hasMobileOpts); err != nil {
+		return fmt.Errorf("check mobileconfig_opts column: %w", err)
+	}
+	if hasMobileOpts == 0 {
+		if _, err := s.DB.ExecContext(ctx,
+			`ALTER TABLE users ADD COLUMN mobileconfig_opts TEXT NOT NULL DEFAULT ''`,
+		); err != nil {
+			return fmt.Errorf("add mobileconfig_opts column: %w", err)
+		}
+	}
 	return nil
 }
