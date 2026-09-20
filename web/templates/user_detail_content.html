@@ -1,17 +1,24 @@
 {{/*
-  用户详情内容 - v2.86-PR12.19 重构
+  用户详情内容 - v2.86-PR12.20 重构 (UICraft critique-driven)
 
-  - mobileconfig 按 OS 分类(iOS/macOS / Android 原生 / strongSwan / CA 证书)
-    使用 .os-tabs (用户上次选的 tab 用 localStorage 记忆,layout.html 已加 script)
-  - 状态徽章用 .badge
+  PR12.20 改动:
+    - OS tabs 加 hint 二行 (iOS/macOS 最简 / Android 11+ ... / 旧版 / Linux 命令行 / CA 证书)
+    - 删除按钮跳双确认页 (无浏览器 confirm())
+    - reset-password / disable 保留单步 POST, confirm 文案统一 (确认 X?后果 Y, 无法撤销)
+    - Android strongSwan / Linux sswan 也加 QR 卡 (统一性)
+    - 表格 tbody 内 th/td 顺序修正 (用 tbody only)
+
+  历史:
+    - v2.86-PR12.19: 5 个 OS tabs + mobileconfig 按系统切换
 */}}
-<hgroup>
-  <h1>用户：{{.User.Username}}</h1>
+
+<hgroup class="mb-0">
+  <h1>{{.User.Username}}</h1>
   <p>ID #{{.User.ID}}</p>
 </hgroup>
 
 {{if .Flash}}<div class="banner-ok alert-success">{{.Flash}}</div>{{end}}
-{{if .NewPassword}}<div class="banner-warn alert-warn">{{.NewPasswordLabel}}<code>{{.NewPassword}}</code></div>{{end}}
+{{if .NewPassword}}<div class="banner-warn alert-warn">用户密码已重置:<code>{{.NewPassword}}</code><small>(仅显示这一次,请记录后再关闭)</small></div>{{end}}
 {{if .Error}}<div class="banner-danger alert-danger">{{.Error}}</div>{{end}}
 
 <article>
@@ -34,15 +41,33 @@
   </table>
 </article>
 
-<h3>客户端配置</h3>
+<h3 class="mt-4">客户端配置</h3>
 <article>
+  {{/* v2.86-PR12.20: 5 个 OS tab, 每个 label + hint 解释 */}}
   <div class="os-tabs">
-    <button type="button" data-os-key="apple">iOS / macOS</button>
-    <button type="button" data-os-key="android-native">Android 原生 (11+)</button>
-    <button type="button" data-os-key="android-app">Android strongSwan</button>
-    <button type="button" data-os-key="linux">Linux strongSwan</button>
-    <button type="button" data-os-key="ca">CA 证书</button>
+    <button type="button" data-os-key="apple">
+      <span>iOS / macOS</span>
+      <span class="tab-hint">扫码最简</span>
+    </button>
+    <button type="button" data-os-key="android-native">
+      <span>Android 11+ 原生</span>
+      <span class="tab-hint">无需 app</span>
+    </button>
+    <button type="button" data-os-key="android-app">
+      <span>Android strongSwan</span>
+      <span class="tab-hint">旧版 / 进阶</span>
+    </button>
+    <button type="button" data-os-key="linux">
+      <span>Linux</span>
+      <span class="tab-hint">命令行</span>
+    </button>
+    <button type="button" data-os-key="ca">
+      <span>CA 证书</span>
+      <span class="tab-hint">手动验证</span>
+    </button>
   </div>
+
+  {{/* v2.86-PR12.20: 所有有配置文件下载的 OS panel 都加 QR 卡 (iOS / strongSwan / Linux) */}}
 
   <div class="os-panel" data-os-key="apple">
     <div class="row" style="align-items: flex-start; gap: var(--ikev2-rhythm-5);">
@@ -73,7 +98,7 @@
     <div class="stack-tight">
       <p><strong>strongSwan Android app:</strong>用于旧版 Android 或需要更精细控制。</p>
       <a href="/users/{{.User.ID}}/sswan" role="button">下载 .sswan 配置</a>
-      <p class="text-sm text-muted">导入 strongSwan app → 添加 profile → 选择 .sswan 文件。</p>
+      <p class="text-sm text-muted">导入 strongSwan app → 添加 profile → 选择 .sswan 文件。<small>(不含密码 — app 需手动输入)</small></p>
     </div>
   </div>
 
@@ -94,15 +119,16 @@
   </div>
 </article>
 
-<h3>操作</h3>
+<h3 class="mt-4">操作</h3>
 <article>
   <div class="row">
-    <form method="POST" action="/users/{{.User.ID}}/reset-password" onsubmit="return confirm('确认重置密码？')">
+    {{/* v2.86-PR12.20: confirm 文案统一 - "后果?无法撤销" */}}
+    <form method="POST" action="/users/{{.User.ID}}/reset-password" onsubmit="return confirm('确认重置密码?当前正在连接的客户端会立即掉线,且原密码无法恢复。')">
       <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-      <button type="submit" class="secondary">重置密码 (生成新 12 位)</button>
+      <button type="submit" class="secondary">重置密码</button>
     </form>
     {{if .User.Enabled}}
-      <form method="POST" action="/users/{{.User.ID}}/disable" onsubmit="return confirm('确认停用?正在连接的客户端会被踢下线')">
+      <form method="POST" action="/users/{{.User.ID}}/disable" onsubmit="return confirm('确认停用?正在连接的客户端会被踢下线,无法撤销。')">
         <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
         <button type="submit" class="secondary">停用</button>
       </form>
@@ -112,8 +138,9 @@
         <button type="submit">启用</button>
       </form>
     {{end}}
+    {{/* v2.86-PR12.20: 删除改为跳双确认页 (无浏览器 confirm) */}}
     <a href="/users/{{.User.ID}}/delete" role="button" class="contrast">删除</a>
   </div>
 </article>
 
-<p><a href="/users">← 返回用户列表</a></p>
+<p class="mt-4"><a href="/users">← 返回用户列表</a></p>

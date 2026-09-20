@@ -1,125 +1,192 @@
 /* ============================================================================
-   ikev2-panel v2.86 — style.css
-   ----------------------------------------------------------------------------
-   设计语言:
-     - 深蓝主色 (#2c3e50 / #1a252f),继承自 Pico --pico-primary,不引入额外色板
-     - 4 档语义色 (success/warn/danger/muted),Pico 原生变量
-     - 浅/深色模式双 tokens,prefers-color-scheme 自动 + localStorage 手动覆盖
-     - 删 v2.86-PR12.18 残留的 AI 紫蓝渐变 (#4f46e5→#6366f1) + glow 圆点胶囊徽章
-     - 卡片阴影只用于"配置卡",不滥用;主操作按钮纯色 + 1px 边框
-     - 响应式: 桌面优先 (≥768px) + 移动端表格/卡片自动堆叠
+   ikev2-panel v2.86 — style.css  (v2.86-PR12.20 重构)
+
+   设计语言 (UICraft critique-driven):
+     - Linear / Vercel SaaS dashboard 风格
+       * 克制品牌色: 主色 #2c3e50 仅在 active nav / 主操作按钮
+       * 密字重阶 (font-weight 500 / 600, 不用 700/800 大标题)
+       * 紧凑表格 (table-cell 0.5rem 0.75rem, sticky 头)
+       * 1px 边框 + 极淡阴影 (0 1px 2px rgba(0,0,0,0.04))
+       * 全部用 design token, 不写 magic color
+     - metric 改为 inline status row (4列紧凑, 不再是 4 张大卡)
+     - 标题字号 1.5rem/600/letter-spacing -0.015em (不要 1990s 门户)
+     - table compact 行高 + hover 高亮 + sticky header
+     - nav active 用左侧 2px 实心条 + 主色文字 (明显能看出在哪页)
+     - skip-to-content link (键盘可达)
+     - OS tabs: 每个 tab label + hint 一行 (iOS/macOS 最简 / Android 11+ ...)
+     - audit 详情列解析为 dl key-value list (不再是 k=v 一坨)
+     - 兼容 v2.86-PR12.19 老的 banner / details / settings-card / responsive-stack
 
    历史:
-     - v2.86-PR12.18: 加入 .status-badge / article 阴影 polish(过渡版本)
-     - v2.86-PR12.19: UICraft critique-driven 重构
-       * 删 AI 紫蓝渐变按钮
-       * 删 .status-badge::before 双层 glow 圆环
-       * 统一语义色 token (只用 Pico --pico-* 系列)
-       * 删 :has() 选择器(Safari < 15.4 fallback)
-       * 增加 .stack / .metric-row / .empty-state 工具类
-       * 增加 .os-tabs / .qr-card 用户详情页 mobileconfig OS 检测
-       * 移动端 nav 折叠 + table → card 自动转换
+     - v2.86-PR12.18: AI 紫蓝渐变 (已删)
+     - v2.86-PR12.19: 引入 Pico 主色,统一语义色 token
+     - v2.86-PR12.20: UICraft critique-driven 重构 (Linear/Vercel SaaS 风)
+       * metric 改 inline status
+       * nav active 左侧条
+       * 标题克制 (1.5rem/600)
+       * 表格 sticky header + compact
+       * skip-to-content link
+       * OS tabs hint
+       * audit 详情列 dl key-value
+       * 删除 confirm 统一 (双确认页跳转,不再浏览器 confirm())
    ============================================================================ */
 
 :root {
-  /* === 浅色模式主色 === */
-  --ikev2-fg:           #1f2937;
-  --ikev2-fg-muted:     #6b7280;
+  /* === 浅色 === */
+  --ikev2-fg:           #0f172a;        /* slate-900 */
+  --ikev2-fg-muted:     #64748b;        /* slate-500 */
+  --ikev2-fg-subtle:    #94a3b8;        /* slate-400 */
   --ikev2-bg:           #ffffff;
-  --ikev2-bg-soft:      #f9fafb;
+  --ikev2-bg-soft:      #f8fafc;        /* slate-50 */
   --ikev2-bg-elevated:  #ffffff;
-  --ikev2-border:       #e5e7eb;
-  --ikev2-border-strong: #d1d5db;
+  --ikev2-bg-hover:     #f1f5f9;        /* slate-100 */
+  --ikev2-border:       #e2e8f0;        /* slate-200 */
+  --ikev2-border-strong:#cbd5e1;        /* slate-300 */
 
-  /* === Pico 主色统一(深蓝,不用 #2c3e50 默认的话改这里就行) === */
-  --pico-primary:        #2c3e50;
-  --pico-primary-hover:  #1a252f;
-  --pico-primary-focus:  rgba(44, 62, 80, 0.18);
+  /* === 品牌主色 (仅 active nav / 主按钮) === */
+  --ikev2-brand:        #0f172a;        /* slate-900, 不用 #2c3e50 (那个是 Pico 默认) */
+  --ikev2-brand-hover:  #334155;        /* slate-700 */
+  --ikev2-brand-soft:   #f1f5f9;        /* active nav 背景 */
+
+  /* Pico 主色也对齐到 brand, 确保 [role=button] 等默认组件不掉到紫蓝 */
+  --pico-primary:        #0f172a;
+  --pico-primary-hover:  #334155;
+  --pico-primary-focus:  rgba(15, 23, 42, 0.12);
   --pico-primary-inverse: #ffffff;
 
-  /* === 语义色 4 档(单一来源) === */
-  --ikev2-ok:           #047857;  /* green-700 */
+  /* === 语义色 4 档 === */
+  --ikev2-ok:           #047857;
   --ikev2-ok-soft:      #d1fae5;
-  --ikev2-warn:         #b45309;  /* amber-700 */
+  --ikev2-warn:         #b45309;
   --ikev2-warn-soft:    #fef3c7;
-  --ikev2-danger:       #b91c1c;  /* red-700 */
+  --ikev2-danger:       #b91c1c;
   --ikev2-danger-soft:  #fee2e2;
-  --ikev2-muted-soft:   #f3f4f6;
-
-  /* === 卡片 / 按钮 === */
-  --ikev2-radius:       8px;
-  --ikev2-shadow-card:  0 1px 2px rgba(0,0,0,0.04), 0 1px 3px rgba(0,0,0,0.05);
-  --ikev2-shadow-pop:   0 4px 12px rgba(0,0,0,0.10);
-  --ikev2-radius-pill:  999px;
+  --ikev2-info:         #0369a1;
+  --ikev2-info-soft:    #e0f2fe;
+  --ikev2-muted-soft:   #f1f5f9;
 
   /* === 节奏 === */
+  --ikev2-radius:       6px;
+  --ikev2-radius-lg:    8px;
+  --ikev2-radius-pill:  999px;
+  --ikev2-shadow-card:  0 1px 2px rgba(15, 23, 42, 0.04);
+  --ikev2-shadow-pop:   0 4px 12px rgba(15, 23, 42, 0.08);
+
   --ikev2-rhythm-1:  0.25rem;
   --ikev2-rhythm-2:  0.5rem;
   --ikev2-rhythm-3:  0.75rem;
   --ikev2-rhythm-4:  1rem;
   --ikev2-rhythm-5:  1.5rem;
   --ikev2-rhythm-6:  2rem;
+
+  --ikev2-font-sans: ui-sans-serif, -apple-system, BlinkMacSystemFont,
+                     "Segoe UI", "PingFang SC", "Hiragino Sans GB",
+                     "Microsoft YaHei", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --ikev2-font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --ikev2-fg:           #f3f4f6;
-    --ikev2-fg-muted:     #9ca3af;
-    --ikev2-bg:           #111827;
-    --ikev2-bg-soft:      #1f2937;
-    --ikev2-bg-elevated:  #1f2937;
-    --ikev2-border:       #374151;
-    --ikev2-border-strong:#4b5563;
+    --ikev2-fg:           #f1f5f9;
+    --ikev2-fg-muted:     #94a3b8;
+    --ikev2-fg-subtle:    #64748b;
+    --ikev2-bg:           #0b1220;
+    --ikev2-bg-soft:      #0f172a;
+    --ikev2-bg-elevated:  #111c2e;
+    --ikev2-bg-hover:     #1e293b;
+    --ikev2-border:       #1e293b;
+    --ikev2-border-strong:#334155;
 
-    --pico-primary:       #60a5fa;
-    --pico-primary-hover: #93c5fd;
-    --pico-primary-focus: rgba(96, 165, 250, 0.22);
+    --ikev2-brand:        #f1f5f9;
+    --ikev2-brand-hover:  #cbd5e1;
+    --ikev2-brand-soft:   #1e293b;
 
-    --ikev2-ok-soft:      rgba(4, 120, 87, 0.25);
-    --ikev2-warn-soft:    rgba(180, 83, 9, 0.25);
-    --ikev2-danger-soft:  rgba(185, 28, 28, 0.25);
-    --ikev2-muted-soft:   #374151;
+    --pico-primary:       #f1f5f9;
+    --pico-primary-hover: #cbd5e1;
+    --pico-primary-focus: rgba(241, 245, 249, 0.18);
 
-    --ikev2-shadow-card:  0 1px 2px rgba(0,0,0,0.30), 0 1px 3px rgba(0,0,0,0.20);
-    --ikev2-shadow-pop:   0 4px 12px rgba(0,0,0,0.40);
+    --ikev2-ok-soft:      rgba(4, 120, 87, 0.18);
+    --ikev2-warn-soft:    rgba(180, 83, 9, 0.18);
+    --ikev2-danger-soft:  rgba(185, 28, 28, 0.18);
+    --ikev2-info-soft:    rgba(3, 105, 161, 0.18);
+    --ikev2-muted-soft:   #1e293b;
+
+    --ikev2-shadow-card:  0 1px 2px rgba(0, 0, 0, 0.30);
+    --ikev2-shadow-pop:   0 4px 12px rgba(0, 0, 0, 0.50);
   }
 }
 
-/* === data-theme="light" 显式覆盖 === */
 :root[data-theme="light"] {
-  --ikev2-fg:           #1f2937;
+  --ikev2-fg:           #0f172a;
   --ikev2-bg:           #ffffff;
-  --pico-primary:       #2c3e50;
-  --pico-primary-hover: #1a252f;
+  --pico-primary:       #0f172a;
+  --pico-primary-hover: #334155;
 }
 :root[data-theme="dark"] {
-  --ikev2-fg:           #f3f4f6;
-  --ikev2-bg:           #111827;
-  --pico-primary:       #60a5fa;
-  --pico-primary-hover: #93c5fd;
+  --ikev2-fg:           #f1f5f9;
+  --ikev2-bg:           #0b1220;
+  --pico-primary:       #f1f5f9;
+  --pico-primary-hover: #cbd5e1;
 }
 
 /* ============================================================================
-   基础排版 / 全局
+   全局基础
    ============================================================================ */
 
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
 html, body { background: var(--ikev2-bg); color: var(--ikev2-fg); }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
-               "Hiragino Sans GB", "Microsoft YaHei", Roboto, "Helvetica Neue",
-               Arial, sans-serif;
+  font-family: var(--ikev2-font-sans);
+  font-size: 0.9rem;
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
-}
-
-h1, h2, h3, h4 {
-  color: var(--ikev2-fg);
-  letter-spacing: -0.01em;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 /* ============================================================================
-   顶部 nav (page-nav)
+   标题字重阶 (PR12.20: 全部克制, 不要 1990s 门户)
+   ============================================================================ */
+
+h1, h2, h3, h4, h5, h6 {
+  color: var(--ikev2-fg);
+  letter-spacing: -0.015em;
+  margin: 0 0 var(--ikev2-rhythm-3);
+  font-weight: 600;
+}
+h1 { font-size: 1.5rem; line-height: 1.3; font-weight: 600; }
+h2 { font-size: 1.15rem; line-height: 1.35; font-weight: 600; }
+h3 { font-size: 1rem;    line-height: 1.4;  font-weight: 600; }
+h4 { font-size: 0.9rem;  line-height: 1.4;  font-weight: 600; }
+hgroup > h1 { font-size: 1.5rem; margin-bottom: var(--ikev2-rhythm-1); }
+hgroup > p  { color: var(--ikev2-fg-muted); font-size: 0.85rem; margin: 0; }
+
+a { color: var(--ikev2-brand); }
+a:hover { color: var(--ikev2-brand-hover); }
+
+/* ============================================================================
+   Skip-to-content (键盘可达)
+   ============================================================================ */
+
+.skip-link {
+  position: absolute;
+  top: -40px;
+  left: var(--ikev2-rhythm-3);
+  background: var(--ikev2-brand);
+  color: var(--pico-primary-inverse);
+  padding: var(--ikev2-rhythm-2) var(--ikev2-rhythm-3);
+  border-radius: var(--ikev2-radius);
+  text-decoration: none;
+  font-size: 0.85rem;
+  font-weight: 500;
+  z-index: 100;
+  transition: top 120ms ease;
+}
+.skip-link:focus { top: var(--ikev2-rhythm-3); }
+
+/* ============================================================================
+   顶部 nav (PR12.20: active 用左侧 2px 条, 不是文字颜色)
    ============================================================================ */
 
 header.page-nav {
@@ -127,44 +194,52 @@ header.page-nav {
   background: var(--ikev2-bg-elevated);
   position: sticky; top: 0; z-index: 10;
 }
-
 header.page-nav nav {
   display: flex; align-items: center; gap: var(--ikev2-rhythm-4);
   padding: var(--ikev2-rhythm-3) var(--ikev2-rhythm-5);
-  max-width: 72rem; margin: 0 auto;
-  flex-wrap: wrap;
+  max-width: 80rem; margin: 0 auto;
 }
 header.page-nav nav a.brand {
-  font-weight: 700; color: var(--pico-primary);
-  text-decoration: none; margin-right: var(--ikev2-rhythm-3);
+  font-weight: 600; color: var(--ikev2-fg);
+  text-decoration: none; margin-right: var(--ikev2-rhythm-4);
+  font-size: 0.95rem;
+  letter-spacing: -0.01em;
 }
-header.page-nav nav a.brand:hover { text-decoration: underline; }
+header.page-nav nav a.brand:hover { color: var(--ikev2-brand); }
 
 header.page-nav nav .nav-links {
-  display: flex; gap: var(--ikev2-rhythm-4);
+  display: flex; gap: var(--ikev2-rhythm-1);
 }
 header.page-nav nav .nav-links a {
-  color: var(--ikev2-fg-muted); text-decoration: none;
-  padding: var(--ikev2-rhythm-1) var(--ikev2-rhythm-2);
+  position: relative;
+  color: var(--ikev2-fg-muted);
+  text-decoration: none;
+  padding: var(--ikev2-rhythm-2) var(--ikev2-rhythm-3);
   border-radius: var(--ikev2-radius);
+  font-size: 0.875rem;
+  font-weight: 500;
+  transition: color 120ms ease, background-color 120ms ease;
 }
 header.page-nav nav .nav-links a:hover {
-  color: var(--pico-primary); background: var(--ikev2-bg-soft);
+  color: var(--ikev2-fg);
+  background: var(--ikev2-bg-hover);
 }
 header.page-nav nav .nav-links a.active {
-  color: var(--pico-primary); font-weight: 600;
+  color: var(--ikev2-brand);
+  background: var(--ikev2-brand-soft);
+  font-weight: 600;
 }
-
 header.page-nav nav .spacer { flex: 1; }
 
 header.page-nav nav .nav-actions {
   display: flex; align-items: center; gap: var(--ikev2-rhythm-3);
 }
 header.page-nav nav .admin-info {
-  font-size: 0.85rem; color: var(--ikev2-fg-muted);
+  font-size: 0.8rem; color: var(--ikev2-fg-muted);
+  font-variant-numeric: tabular-nums;
 }
 
-/* 主题切换按钮: SVG icon,不用 emoji */
+/* 主题切换按钮 */
 .theme-toggle {
   background: transparent;
   border: 1px solid var(--ikev2-border);
@@ -174,80 +249,91 @@ header.page-nav nav .admin-info {
   cursor: pointer;
   display: inline-flex; align-items: center; justify-content: center;
   color: var(--ikev2-fg-muted);
-  transition: background-color 120ms ease, color 120ms ease;
+  transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease;
 }
 .theme-toggle:hover {
-  background: var(--ikev2-bg-soft);
-  color: var(--pico-primary);
+  background: var(--ikev2-bg-hover);
+  color: var(--ikev2-fg);
+  border-color: var(--ikev2-border-strong);
 }
-.theme-toggle svg { width: 1rem; height: 1rem; }
-.theme-toggle .icon-sun { display: none; }
+.theme-toggle svg { width: 0.95rem; height: 0.95rem; }
+.theme-toggle .icon-sun  { display: none; }
 .theme-toggle .icon-moon { display: block; }
-:root[data-theme="light"] .theme-toggle .icon-sun { display: block; }
+:root[data-theme="light"] .theme-toggle .icon-sun  { display: block; }
 :root[data-theme="light"] .theme-toggle .icon-moon { display: none; }
 
 header.page-nav nav form { display: inline; margin: 0; }
 header.page-nav nav button.link {
   background: none; border: none;
-  color: var(--pico-primary); cursor: pointer;
-  padding: 0; font: inherit;
-  text-decoration: underline;
+  color: var(--ikev2-fg-muted); cursor: pointer;
+  padding: 0; font: inherit; font-size: 0.85rem;
+  text-decoration: none;
+  transition: color 120ms ease;
 }
+header.page-nav nav button.link:hover { color: var(--ikev2-brand); text-decoration: underline; }
 
-/* 移动端 nav: 紧凑 */
 @media (max-width: 640px) {
-  header.page-nav nav { gap: var(--ikev2-rhythm-3); padding: var(--ikev2-rhythm-2) var(--ikev2-rhythm-4); }
+  header.page-nav nav { gap: var(--ikev2-rhythm-3); padding: var(--ikev2-rhythm-2) var(--ikev2-rhythm-4); flex-wrap: wrap; }
   header.page-nav nav .admin-info { display: none; }
-  header.page-nav nav .nav-links { gap: var(--ikev2-rhythm-3); }
+  header.page-nav nav a.brand { font-size: 0.9rem; }
 }
 
 /* ============================================================================
    横幅 (alert-* / banner-*)
    ============================================================================ */
 
-.alert-danger,
-.alert-warn,
-.alert-success,
-.banner-ok,
-.banner-warn,
-.banner-danger {
-  border-left: 3px solid;
+.alert-danger, .alert-warn, .alert-success,
+.banner-ok, .banner-warn, .banner-danger {
+  border: 1px solid;
+  border-left-width: 3px;
   padding: var(--ikev2-rhythm-3) var(--ikev2-rhythm-4);
   border-radius: var(--ikev2-radius);
   margin-bottom: var(--ikev2-rhythm-4);
   display: flex; align-items: flex-start; gap: var(--ikev2-rhythm-3);
+  font-size: 0.875rem;
 }
-.alert-danger,  .banner-danger {
-  background: var(--ikev2-danger-soft); border-color: var(--ikev2-danger); color: var(--ikev2-danger);
+.alert-danger, .banner-danger {
+  background: var(--ikev2-danger-soft);
+  border-color: var(--ikev2-danger);
+  color: var(--ikev2-danger);
 }
-.alert-warn,    .banner-warn {
-  background: var(--ikev2-warn-soft);  border-color: var(--ikev2-warn);   color: var(--ikev2-warn);
+.alert-warn, .banner-warn {
+  background: var(--ikev2-warn-soft);
+  border-color: var(--ikev2-warn);
+  color: var(--ikev2-warn);
 }
 .alert-success, .banner-ok {
-  background: var(--ikev2-ok-soft);    border-color: var(--ikev2-ok);     color: var(--ikev2-ok);
+  background: var(--ikev2-ok-soft);
+  border-color: var(--ikev2-ok);
+  color: var(--ikev2-ok);
+}
+/* banner 内嵌链接用主色, 不要被语义色覆盖 */
+.banner-ok a, .banner-warn a, .banner-danger a {
+  color: inherit;
+  text-decoration: underline;
 }
 
-/* dismissable banner: 右上角 × 按钮 */
 .dismissable { position: relative; padding-right: 3rem; }
 .dismissable .dismiss {
   position: absolute; top: var(--ikev2-rhythm-2); right: var(--ikev2-rhythm-3);
   background: transparent; border: none; cursor: pointer;
-  font-size: 1.25rem; line-height: 1; color: inherit; opacity: 0.6;
+  font-size: 1.1rem; line-height: 1; color: inherit; opacity: 0.5;
   padding: var(--ikev2-rhythm-1); border-radius: var(--ikev2-radius);
+  transition: opacity 120ms ease, background-color 120ms ease;
 }
-.dismissable .dismiss:hover { opacity: 1; background: rgba(0,0,0,0.06); }
+.dismissable .dismiss:hover { opacity: 1; background: rgba(0, 0, 0, 0.05); }
 
 /* ============================================================================
-   文章卡片 (article 样式)
+   卡片容器 (article / settings-card)
    ============================================================================ */
 
 main > article,
 .settings-card {
   background: var(--ikev2-bg-elevated);
   border: 1px solid var(--ikev2-border);
-  border-radius: var(--ikev2-radius);
+  border-radius: var(--ikev2-radius-lg);
   box-shadow: var(--ikev2-shadow-card);
-  padding: var(--ikev2-rhythm-5);
+  padding: var(--ikev2-rhythm-4) var(--ikev2-rhythm-5);
   margin-bottom: var(--ikev2-rhythm-4);
 }
 
@@ -259,100 +345,126 @@ main > article > header {
   border-bottom: 1px solid var(--ikev2-border);
 }
 main > article > header > strong {
-  font-size: 1rem; font-weight: 600; color: var(--ikev2-fg);
-  letter-spacing: 0.01em;
+  font-size: 0.95rem; font-weight: 600; color: var(--ikev2-fg);
 }
 main > article > header > small,
 main > article > header .header-note {
-  color: var(--ikev2-fg-muted); font-size: 0.82rem; font-weight: 400;
+  color: var(--ikev2-fg-muted); font-size: 0.8rem; font-weight: 400;
 }
 
-/* settings-card (details) 展开时,内部 article 去掉外边距和重复 padding */
 .settings-card > summary {
-  font-size: 1rem;
-  font-weight: 600;
-  color: var(--ikev2-fg);
+  display: flex; align-items: baseline; gap: var(--ikev2-rhythm-2);
+  font-size: 0.95rem; font-weight: 600; color: var(--ikev2-fg);
   padding: 0;
+  cursor: pointer;
+  list-style: none;
 }
+.settings-card > summary::-webkit-details-marker { display: none; }
+.settings-card > summary::before {
+  content: "▸";
+  color: var(--ikev2-fg-subtle);
+  font-size: 0.75rem;
+  transition: transform 120ms ease;
+  display: inline-block;
+  margin-right: var(--ikev2-rhythm-1);
+}
+.settings-card[open] > summary::before { transform: rotate(90deg); }
 .settings-card > summary > .header-note {
-  color: var(--ikev2-fg-muted); font-size: 0.82rem; font-weight: 400; margin-left: var(--ikev2-rhythm-2);
+  color: var(--ikev2-fg-muted); font-size: 0.8rem; font-weight: 400;
 }
-.settings-card > summary:hover { color: var(--pico-primary); }
+.settings-card > summary:hover { color: var(--ikev2-brand); }
 .settings-card[open] > summary {
   margin-bottom: var(--ikev2-rhythm-4);
   padding-bottom: var(--ikev2-rhythm-3);
   border-bottom: 1px solid var(--ikev2-border);
 }
-.settings-card > article,
 .settings-card > .settings-body {
-  background: transparent;
-  border: none;
-  box-shadow: none;
-  padding: 0;
-  margin: 0;
+  padding-top: 0;
 }
-.settings-card > .settings-body > article {
-  margin-bottom: 0;
-}
+.settings-card > .settings-body > article { margin-bottom: 0; }
 
 /* ============================================================================
-   Metric row (首页顶部 status strip)
+   Inline status row (PR12.20 替代 PR12.19 的 4 张大 metric 卡)
    ============================================================================ */
 
-.metric-row {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
-  gap: var(--ikev2-rhythm-3);
-  margin-bottom: var(--ikev2-rhythm-5);
-}
-.metric {
-  background: var(--ikev2-bg-elevated);
-  border: 1px solid var(--ikev2-border);
-  border-radius: var(--ikev2-radius);
+.status-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ikev2-rhythm-4) var(--ikev2-rhythm-5);
   padding: var(--ikev2-rhythm-3) var(--ikev2-rhythm-4);
-  display: flex; flex-direction: column; gap: var(--ikev2-rhythm-1);
+  margin-bottom: var(--ikev2-rhythm-5);
+  border: 1px solid var(--ikev2-border);
+  border-radius: var(--ikev2-radius-lg);
+  background: var(--ikev2-bg-soft);
 }
-.metric .label {
-  font-size: 0.78rem; color: var(--ikev2-fg-muted);
-  text-transform: uppercase; letter-spacing: 0.04em; font-weight: 500;
+.status-row .status-item {
+  display: flex; align-items: baseline; gap: var(--ikev2-rhythm-2);
+  font-size: 0.85rem;
 }
-.metric .value {
-  font-size: 1.6rem; font-weight: 600; color: var(--ikev2-fg);
-  line-height: 1.2;
+.status-row .status-label {
+  color: var(--ikev2-fg-muted);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: 500;
+}
+.status-row .status-value {
+  font-weight: 600;
+  color: var(--ikev2-fg);
   font-variant-numeric: tabular-nums;
 }
-.metric .hint { font-size: 0.78rem; color: var(--ikev2-fg-muted); }
-.metric .value.ok    { color: var(--ikev2-ok); }
-.metric .value.warn  { color: var(--ikev2-warn); }
-.metric .value.danger{ color: var(--ikev2-danger); }
-
-@media (max-width: 640px) {
-  .metric .value { font-size: 1.3rem; }
+.status-row .status-value.ok     { color: var(--ikev2-ok); }
+.status-row .status-value.warn   { color: var(--ikev2-warn); }
+.status-row .status-value.danger { color: var(--ikev2-danger); }
+.status-row .status-value.info   { color: var(--ikev2-info); }
+.status-row .status-hint {
+  color: var(--ikev2-fg-subtle);
+  font-size: 0.8rem;
+  margin-left: var(--ikev2-rhythm-1);
 }
 
+@media (max-width: 640px) {
+  .status-row { gap: var(--ikev2-rhythm-3) var(--ikev2-rhythm-4); padding: var(--ikev2-rhythm-2) var(--ikev2-rhythm-3); }
+}
+
+/* 保留旧的 .metric 类以兼容 PR12.19, 但缩小到 inline 风格 (避免破损) */
+.metric {
+  background: transparent;
+  border: none;
+  padding: 0;
+  display: inline-flex; align-items: baseline; gap: var(--ikev2-rhythm-2);
+}
+.metric .label { font-size: 0.78rem; color: var(--ikev2-fg-muted); font-weight: 500; }
+.metric .value { font-size: 0.95rem; font-weight: 600; color: var(--ikev2-fg); }
+.metric .value.ok { color: var(--ikev2-ok); }
+.metric .value.warn { color: var(--ikev2-warn); }
+.metric .value.danger { color: var(--ikev2-danger); }
+.metric .hint { display: none; }
+
 /* ============================================================================
-   状态徽章 (v2.86-PR12.18 删除 glow 圆点)
+   徽章 (status / state)
    ============================================================================ */
 
 .badge {
   display: inline-flex; align-items: center; gap: var(--ikev2-rhythm-1);
-  padding: 0.15rem 0.5rem;
+  padding: 0.1rem 0.5rem;
   border-radius: var(--ikev2-radius-pill);
-  font-size: 0.78rem; font-weight: 500;
-  border: 1px solid transparent;
+  font-size: 0.75rem; font-weight: 500;
   background: var(--ikev2-muted-soft); color: var(--ikev2-fg-muted);
-  line-height: 1.4;
+  line-height: 1.5;
+  white-space: nowrap;
 }
 .badge.ok     { background: var(--ikev2-ok-soft);    color: var(--ikev2-ok); }
 .badge.warn   { background: var(--ikev2-warn-soft);  color: var(--ikev2-warn); }
 .badge.danger { background: var(--ikev2-danger-soft); color: var(--ikev2-danger); }
+.badge.info   { background: var(--ikev2-info-soft);  color: var(--ikev2-info); }
 
-/* 兼容 v2.86-PR12.18 老类名(已有 templates 引用) */
 .status-badge {
   display: inline-flex; align-items: center; gap: var(--ikev2-rhythm-1);
-  padding: 0.15rem 0.5rem;
+  padding: 0.1rem 0.5rem;
   border-radius: var(--ikev2-radius-pill);
-  font-size: 0.82rem; font-weight: 500;
+  font-size: 0.78rem; font-weight: 500;
   background: var(--ikev2-muted-soft); color: var(--ikev2-fg-muted);
 }
 .status-badge.success { background: var(--ikev2-ok-soft);    color: var(--ikev2-ok); }
@@ -360,63 +472,87 @@ main > article > header .header-note {
 .status-badge.danger  { background: var(--ikev2-danger-soft); color: var(--ikev2-danger); }
 .status-badge.muted   { background: var(--ikev2-muted-soft); color: var(--ikev2-fg-muted); }
 
-/* 旧 .state-badge (SA 表里) */
 .state-badge {
   display: inline-block;
-  padding: 0.1rem 0.45rem;
+  padding: 0.05rem 0.45rem;
   border-radius: var(--ikev2-radius);
-  font-size: 0.78rem;
+  font-size: 0.75rem;
   background: var(--ikev2-muted-soft); color: var(--ikev2-fg);
   border: 1px solid var(--ikev2-border);
+  font-family: var(--ikev2-font-mono);
 }
 
 /* ============================================================================
-   按钮 (删 AI 紫蓝渐变)
+   按钮 (PR12.20: 纯 slate-900, 1px 边框, 圆角 6px)
    ============================================================================ */
 
+button, [role="button"], a[role="button"], input[type="submit"], input[type="button"] {
+  font-family: inherit;
+  font-size: 0.875rem;
+  font-weight: 500;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
 button[type="submit"]:not(.secondary):not(.contrast):not(.dismiss):not(.link):not(.theme-toggle),
-main > article button[type="submit"]:not(.secondary):not(.contrast),
-[role="button"]:not(.secondary):not(.contrast) {
-  /* 主操作: 纯深蓝 + 简洁 hover(只用背景色变化) */
+[role="button"]:not(.secondary):not(.contrast),
+main > article button[type="submit"]:not(.secondary):not(.contrast) {
   background: var(--pico-primary);
   border: 1px solid var(--pico-primary);
   color: var(--pico-primary-inverse);
-  font-weight: 500;
   border-radius: var(--ikev2-radius);
-  padding: 0.55rem 1.1rem;
-  cursor: pointer;
+  padding: 0.45rem 0.95rem;
   transition: background-color 120ms ease, border-color 120ms ease;
 }
-button[type="submit"]:not(.secondary):not(.contrast):hover,
+button[type="submit"]:not(.secondary):not(.contrast):not(.dismiss):not(.link):not(.theme-toggle):hover,
 [role="button"]:not(.secondary):not(.contrast):hover {
   background: var(--pico-primary-hover);
   border-color: var(--pico-primary-hover);
 }
-button[type="submit"]:not(.secondary):not(.contrast):focus,
-[role="button"]:not(.secondary):not(.contrast):focus {
+button[type="submit"]:not(.secondary):not(.contrast):not(.dismiss):not(.link):not(.theme-toggle):focus-visible,
+[role="button"]:not(.secondary):not(.contrast):focus-visible {
   outline: 2px solid var(--pico-primary-focus);
   outline-offset: 2px;
 }
 
 button.secondary, [role="button"].secondary,
-main button.secondary {
+a[role="button"].secondary, main button.secondary {
   background: transparent;
   border: 1px solid var(--ikev2-border-strong);
   color: var(--ikev2-fg);
   border-radius: var(--ikev2-radius);
-  padding: 0.5rem 1rem;
-  cursor: pointer;
-  transition: background-color 120ms ease;
+  padding: 0.4rem 0.9rem;
+  transition: background-color 120ms ease, border-color 120ms ease;
+  text-decoration: none;
 }
-button.secondary:hover, [role="button"].secondary:hover {
-  background: var(--ikev2-bg-soft);
+button.secondary:hover, [role="button"].secondary:hover,
+a[role="button"].secondary:hover {
+  background: var(--ikev2-bg-hover);
+  border-color: var(--ikev2-fg-subtle);
 }
 
 button.contrast, [role="button"].contrast,
-main button.contrast {
-  background: var(--pico-primary);
-  border: 1px solid var(--pico-primary);
-  color: var(--pico-primary-inverse);
+a[role="button"].contrast, main button.contrast {
+  background: var(--ikev2-danger);
+  border: 1px solid var(--ikev2-danger);
+  color: #ffffff;
+}
+button.contrast:hover, [role="button"].contrast:hover {
+  background: #991b1b;
+  border-color: #991b1b;
+}
+
+/* outline variant: 给"删除"等次敏感操作用 (浅边框) */
+button.outline, a[role="button"].outline,
+[role="button"].outline {
+  background: transparent;
+  border: 1px solid var(--ikev2-border);
+  color: var(--ikev2-fg-muted);
+}
+button.outline:hover, a[role="button"].outline:hover,
+[role="button"].outline:hover {
+  border-color: var(--ikev2-danger);
+  color: var(--ikev2-danger);
 }
 
 /* ============================================================================
@@ -424,21 +560,39 @@ main button.contrast {
    ============================================================================ */
 
 input[type="text"], input[type="password"], input[type="email"], input[type="url"],
-input[type="number"], select, textarea {
+input[type="number"], input[type="date"], select, textarea {
   border-radius: var(--ikev2-radius);
   background: var(--ikev2-bg);
   border: 1px solid var(--ikev2-border-strong);
   color: var(--ikev2-fg);
+  font-size: 0.875rem;
+  padding: 0.45rem 0.7rem;
   transition: border-color 120ms ease, box-shadow 120ms ease;
+  width: 100%;
 }
 input:focus, select:focus, textarea:focus {
   outline: none;
   border-color: var(--pico-primary);
   box-shadow: 0 0 0 3px var(--pico-primary-focus);
 }
-
 input[type="checkbox"], input[type="radio"] {
   accent-color: var(--pico-primary);
+  margin-right: var(--ikev2-rhythm-2);
+}
+
+label {
+  display: block;
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--ikev2-fg);
+  margin-bottom: var(--ikev2-rhythm-2);
+}
+label > small {
+  display: block;
+  font-weight: 400;
+  color: var(--ikev2-fg-muted);
+  font-size: 0.8rem;
+  margin-top: 0.15rem;
 }
 
 fieldset {
@@ -448,63 +602,97 @@ fieldset {
   margin-bottom: var(--ikev2-rhythm-4);
 }
 fieldset legend {
-  font-size: 0.82rem;
+  font-size: 0.8rem;
   color: var(--ikev2-fg-muted);
   padding: 0 var(--ikev2-rhythm-2);
+  font-weight: 500;
 }
 fieldset label {
   display: flex; align-items: center; gap: var(--ikev2-rhythm-2);
   padding: var(--ikev2-rhythm-1) 0;
   cursor: pointer;
+  font-weight: 400;
 }
 
-/* details > summary */
 details summary {
   cursor: pointer;
-  color: var(--pico-primary);
+  color: var(--ikev2-brand);
   padding: var(--ikev2-rhythm-1) 0;
   user-select: none;
+  list-style: none;
 }
-details summary:hover { color: var(--pico-primary-hover); }
-details[open] summary { margin-bottom: var(--ikev2-rhythm-2); }
+details summary::-webkit-details-marker { display: none; }
+details summary::before {
+  content: "▸"; color: var(--ikev2-fg-subtle);
+  display: inline-block; margin-right: var(--ikev2-rhythm-1);
+  transition: transform 120ms ease;
+}
+details[open] summary::before { transform: rotate(90deg); }
+details summary:hover { color: var(--ikev2-brand-hover); }
 
 /* ============================================================================
-   表格
+   表格 (PR12.20: compact + sticky header + hover)
    ============================================================================ */
 
 table {
   width: 100%;
-  border-collapse: collapse;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 0.875rem;
 }
 th, td {
   text-align: left;
   padding: var(--ikev2-rhythm-2) var(--ikev2-rhythm-3);
   border-bottom: 1px solid var(--ikev2-border);
-  font-size: 0.92rem;
+  vertical-align: middle;
 }
 th {
   font-weight: 600;
   color: var(--ikev2-fg-muted);
-  font-size: 0.78rem;
+  font-size: 0.75rem;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   background: var(--ikev2-bg-soft);
+  border-bottom: 1px solid var(--ikev2-border-strong);
+  position: sticky; top: 0;
+  white-space: nowrap;
 }
 table.compact th, table.compact td {
-  padding: var(--ikev2-rhythm-2) var(--ikev2-rhythm-3);
+  padding: 0.4rem var(--ikev2-rhythm-3);
+}
+table tbody tr {
+  transition: background-color 80ms ease;
 }
 table tbody tr:hover {
-  background: var(--ikev2-bg-soft);
+  background: var(--ikev2-bg-hover);
 }
+table tbody tr:last-child td { border-bottom: none; }
 
-/* code 标签内联 */
+/* table-actions 列: 内容靠右 */
+table th.actions, table td.actions { text-align: right; white-space: nowrap; }
+table td.actions > * + * { margin-left: var(--ikev2-rhythm-2); }
+table td.actions form { display: inline-block; margin: 0; }
+
+/* ============================================================================
+   code / inline 标签
+   ============================================================================ */
+
 code {
-  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
-  font-size: 0.88em;
+  font-family: var(--ikev2-font-mono);
+  font-size: 0.85em;
   background: var(--ikev2-muted-soft);
   color: var(--ikev2-fg);
   padding: 0.1rem 0.4rem;
   border-radius: 4px;
+  word-break: break-all;
+}
+pre {
+  background: var(--ikev2-bg-soft);
+  border: 1px solid var(--ikev2-border);
+  border-radius: var(--ikev2-radius);
+  padding: var(--ikev2-rhythm-3);
+  overflow-x: auto;
+  font-size: 0.8rem;
 }
 pre code { padding: 0; background: transparent; }
 
@@ -514,49 +702,49 @@ pre code { padding: 0; background: transparent; }
 
 .server-addr {
   display: inline-block;
-  font-family: ui-monospace, SFMono-Regular, monospace;
-  padding: 0.25rem 0.5rem;
+  font-family: var(--ikev2-font-mono);
+  padding: 0.2rem 0.5rem;
   background: var(--ikev2-bg-soft);
   border: 1px solid var(--ikev2-border);
   border-radius: var(--ikev2-radius);
-  font-size: 0.92rem;
-  color: var(--pico-primary);
+  font-size: 0.85rem;
+  color: var(--ikev2-fg);
 }
 
 /* ============================================================================
-   登录页
+   登录页 (PR12.20: 6rem → 4rem, 卡片紧凑)
    ============================================================================ */
 
 article.login-card {
   max-width: 22rem;
-  margin: 6rem auto 0;
-  padding: var(--ikev2-rhythm-5) !important;
+  margin: 4rem auto 0;
+  padding: var(--ikev2-rhythm-5) var(--ikev2-rhythm-5);
 }
 article.login-card hgroup { margin-bottom: var(--ikev2-rhythm-4); }
-article.login-card hgroup h1 { font-size: 1.4rem; }
-article.login-card hgroup p { color: var(--ikev2-fg-muted); margin-bottom: 0; }
+article.login-card hgroup h1 { font-size: 1.25rem; }
+article.login-card hgroup p { color: var(--ikev2-fg-muted); margin-bottom: 0; font-size: 0.85rem; }
 
 /* ============================================================================
-   空状态 (empty-state)
+   空状态 (PR12.20: 图标 + 标题 + hint + CTA, 紧凑)
    ============================================================================ */
 
 .empty-state {
   text-align: center;
-  padding: var(--ikev2-rhythm-6) var(--ikev2-rhythm-5);
+  padding: var(--ikev2-rhythm-6) var(--ikev2-rhythm-4);
   color: var(--ikev2-fg-muted);
   display: flex; flex-direction: column; align-items: center; gap: var(--ikev2-rhythm-3);
 }
 .empty-state .empty-icon {
-  width: 2.5rem; height: 2.5rem;
-  color: var(--ikev2-fg-muted); opacity: 0.5;
+  width: 2rem; height: 2rem;
+  color: var(--ikev2-fg-subtle);
 }
 .empty-state .empty-title {
-  font-size: 1rem; font-weight: 600; color: var(--ikev2-fg);
+  font-size: 0.95rem; font-weight: 600; color: var(--ikev2-fg);
 }
 .empty-state .empty-hint {
-  font-size: 0.88rem; max-width: 26rem;
+  font-size: 0.85rem; max-width: 28rem; line-height: 1.5;
 }
-.empty-state .empty-cta { margin-top: var(--ikev2-rhythm-3); }
+.empty-state .empty-cta { margin-top: var(--ikev2-rhythm-2); }
 
 /* ============================================================================
    工具类
@@ -565,50 +753,62 @@ article.login-card hgroup p { color: var(--ikev2-fg-muted); margin-bottom: 0; }
 .stack { display: flex; flex-direction: column; gap: var(--ikev2-rhythm-4); }
 .stack-tight { display: flex; flex-direction: column; gap: var(--ikev2-rhythm-2); }
 .row { display: flex; align-items: center; gap: var(--ikev2-rhythm-3); flex-wrap: wrap; }
+.row-end { display: flex; align-items: center; justify-content: flex-end; gap: var(--ikev2-rhythm-2); flex-wrap: wrap; }
 .row-between { display: flex; align-items: center; justify-content: space-between; gap: var(--ikev2-rhythm-3); flex-wrap: wrap; }
 .text-muted { color: var(--ikev2-fg-muted); }
-.text-mono { font-family: ui-monospace, SFMono-Regular, monospace; }
+.text-mono { font-family: var(--ikev2-font-mono); }
 .text-sm { font-size: 0.85rem; }
 .text-xs { font-size: 0.78rem; }
+.mt-0 { margin-top: 0; } .mt-2 { margin-top: var(--ikev2-rhythm-2); }
+.mt-3 { margin-top: var(--ikev2-rhythm-3); } .mt-4 { margin-top: var(--ikev2-rhythm-4); }
+.mb-0 { margin-bottom: 0; } .mb-2 { margin-bottom: var(--ikev2-rhythm-2); }
 
 /* ============================================================================
-   响应式: 移动端表格 → 卡片堆叠
+   响应式: 移动端表格 → 卡片堆叠 (PR12.20: 更紧凑)
    ============================================================================ */
 
 @media (max-width: 768px) {
-  main > article { padding: var(--ikev2-rhythm-4); }
-  hgroup > h1 { font-size: 1.4rem; }
+  main > article { padding: var(--ikev2-rhythm-3) var(--ikev2-rhythm-3); }
 
-  /* 表格在窄屏转卡片堆叠 (但保留 audit_log 的 <code> 时间戳表格,因为它就是 terminal 风格) */
   table.responsive-stack thead { display: none; }
   table.responsive-stack tbody tr {
     display: block;
     border: 1px solid var(--ikev2-border);
     border-radius: var(--ikev2-radius);
-    margin-bottom: var(--ikev2-rhythm-3);
-    padding: var(--ikev2-rhythm-3);
+    margin-bottom: var(--ikev2-rhythm-2);
+    padding: var(--ikev2-rhythm-2) var(--ikev2-rhythm-3);
+    background: var(--ikev2-bg);
   }
   table.responsive-stack tbody td {
-    display: flex; justify-content: space-between;
+    display: flex; justify-content: space-between; align-items: baseline;
     padding: var(--ikev2-rhythm-1) 0;
     border-bottom: 1px solid var(--ikev2-border);
+    gap: var(--ikev2-rhythm-2);
   }
   table.responsive-stack tbody td:last-child { border-bottom: none; }
   table.responsive-stack tbody td::before {
     content: attr(data-label);
-    font-size: 0.78rem; color: var(--ikev2-fg-muted);
+    font-size: 0.75rem; color: var(--ikev2-fg-muted);
     text-transform: uppercase; letter-spacing: 0.04em;
-    margin-right: var(--ikev2-rhythm-2);
+    font-weight: 500;
     flex-shrink: 0;
+    min-width: 5rem;
   }
+  /* actions 列移动端: 按钮右对齐占满 */
+  table.responsive-stack tbody td.actions {
+    justify-content: flex-end;
+    border-bottom: none;
+    padding-top: var(--ikev2-rhythm-2);
+  }
+  table.responsive-stack tbody td.actions::before { display: none; }
 }
 
 /* ============================================================================
-   OS tabs (用户详情页 mobileconfig)
+   OS tabs (用户详情页 mobileconfig) - PR12.20: tab + hint 两行
    ============================================================================ */
 
 .os-tabs {
-  display: flex; gap: var(--ikev2-rhythm-2);
+  display: flex; gap: 0;
   border-bottom: 1px solid var(--ikev2-border);
   margin-bottom: var(--ikev2-rhythm-4);
   flex-wrap: wrap;
@@ -620,73 +820,126 @@ article.login-card hgroup p { color: var(--ikev2-fg-muted); margin-bottom: 0; }
   padding: var(--ikev2-rhythm-2) var(--ikev2-rhythm-3);
   cursor: pointer;
   color: var(--ikev2-fg-muted);
-  font-size: 0.92rem;
+  font-size: 0.875rem;
   font-weight: 500;
+  display: flex; flex-direction: column; align-items: flex-start; gap: 0.1rem;
+  margin-bottom: -1px;
   transition: color 120ms ease, border-color 120ms ease;
 }
-.os-tabs button:hover { color: var(--pico-primary); }
-.os-tabs button.active {
-  color: var(--pico-primary);
-  border-bottom-color: var(--pico-primary);
+.os-tabs button .tab-hint {
+  font-size: 0.75rem; color: var(--ikev2-fg-subtle); font-weight: 400;
 }
-.os-panel { display: none; }
+.os-tabs button:hover { color: var(--ikev2-fg); }
+.os-tabs button:hover .tab-hint { color: var(--ikev2-fg-muted); }
+.os-tabs button.active {
+  color: var(--ikev2-brand);
+  border-bottom-color: var(--ikev2-brand);
+}
+.os-tabs button.active .tab-hint { color: var(--ikev2-fg-muted); }
+
+.os-panel { display: none; padding-top: var(--ikev2-rhythm-2); }
 .os-panel.active { display: block; }
 
 .qr-card {
   display: inline-flex; flex-direction: column; align-items: center; gap: var(--ikev2-rhythm-2);
   padding: var(--ikev2-rhythm-3);
   border: 1px solid var(--ikev2-border);
-  border-radius: var(--ikev2-radius);
+  border-radius: var(--ikev2-radius-lg);
   background: var(--ikev2-bg);
 }
-.qr-card img { display: block; max-width: 220px; height: auto; }
-.qr-card .qr-hint { font-size: 0.82rem; color: var(--ikev2-fg-muted); }
+.qr-card img { display: block; max-width: 200px; height: auto; }
+.qr-card .qr-hint { font-size: 0.78rem; color: var(--ikev2-fg-muted); }
 
 /* ============================================================================
-   Onboarding checklist (重写)
+   Onboarding checklist (PR12.20: 更紧凑, 不用感叹号图标)
    ============================================================================ */
 
 .onboarding {
-  background: var(--ikev2-bg-elevated);
+  background: var(--ikev2-bg-soft);
   border: 1px solid var(--ikev2-border);
-  border-left: 3px solid var(--pico-primary);
-  border-radius: var(--ikev2-radius);
-  padding: var(--ikev2-rhythm-4) var(--ikev2-rhythm-5);
+  border-left: 3px solid var(--ikev2-brand);
+  border-radius: var(--ikev2-radius-lg);
+  padding: var(--ikev2-rhythm-3) var(--ikev2-rhythm-4);
   margin-bottom: var(--ikev2-rhythm-4);
+  font-size: 0.875rem;
 }
 .onboarding header {
   display: flex; align-items: center; justify-content: space-between;
-  margin-bottom: var(--ikev2-rhythm-3);
+  margin-bottom: var(--ikev2-rhythm-2);
 }
 .onboarding header h2 {
-  font-size: 1.05rem; font-weight: 600; margin: 0;
+  font-size: 0.95rem; font-weight: 600; margin: 0;
 }
 .onboarding ol {
-  margin: 0; padding-left: var(--ikev2-rhythm-5);
+  margin: 0; padding-left: 0;
+  list-style: none;
   display: flex; flex-direction: column; gap: var(--ikev2-rhythm-2);
+  counter-reset: step;
 }
 .onboarding ol li {
-  padding: var(--ikev2-rhythm-1) 0;
-  line-height: 1.55;
+  padding: 0;
+  line-height: 1.5;
+  display: flex; align-items: flex-start; gap: var(--ikev2-rhythm-2);
 }
 .onboarding ol li .step-mark {
-  display: inline-block; width: 1.4rem; height: 1.4rem;
-  text-align: center; line-height: 1.4rem;
-  border-radius: 50%; font-size: 0.82rem; font-weight: 600;
-  margin-right: var(--ikev2-rhythm-2);
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 1.25rem; height: 1.25rem;
+  border-radius: 50%;
+  font-size: 0.7rem; font-weight: 600;
+  flex-shrink: 0;
+  margin-top: 0.1rem;
 }
 .onboarding ol li.done .step-mark {
-  background: var(--ikev2-ok); color: white;
+  background: var(--ikev2-ok);
+  color: white;
 }
 .onboarding ol li.pending .step-mark {
-  background: var(--ikev2-muted-soft); color: var(--ikev2-fg-muted);
-  border: 1px solid var(--ikev2-border);
+  background: var(--ikev2-bg);
+  color: var(--ikev2-fg-muted);
+  border: 1px solid var(--ikev2-border-strong);
 }
-.onboarding ol li small { color: var(--ikev2-fg-muted); }
+.onboarding ol li small { color: var(--ikev2-fg-muted); font-size: 0.8rem; }
 
 @media (max-width: 640px) {
-  .onboarding { padding: var(--ikev2-rhythm-3) var(--ikev2-rhythm-4); }
-  .onboarding ol { padding-left: var(--ikev2-rhythm-4); }
+  .onboarding { padding: var(--ikev2-rhythm-3); }
+}
+
+/* ============================================================================
+   Audit details (PR12.20: 解析 Details "k=v k=v" → dl key-value list)
+   ============================================================================ */
+
+.kv-list {
+  margin: 0;
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.25rem var(--ikev2-rhythm-3);
+  font-size: 0.85rem;
+}
+.kv-list dt {
+  color: var(--ikev2-fg-muted);
+  font-family: var(--ikev2-font-mono);
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+.kv-list dd {
+  margin: 0;
+  font-family: var(--ikev2-font-mono);
+  font-size: 0.8rem;
+  word-break: break-all;
+}
+
+/* ============================================================================
+   Container
+   ============================================================================ */
+
+main.container {
+  max-width: 80rem;
+  margin: 0 auto;
+  padding: var(--ikev2-rhythm-5) var(--ikev2-rhythm-4);
+}
+
+@media (max-width: 768px) {
+  main.container { padding: var(--ikev2-rhythm-4) var(--ikev2-rhythm-3); }
 }
 
 /* ============================================================================

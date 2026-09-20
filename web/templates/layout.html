@@ -1,5 +1,5 @@
 {{/*
-  web/templates/layout.html (v2.86-PR12.19 重构)
+  web/templates/layout.html (v2.86-PR12.20 重构)
 
   采用"两段渲染"模式:
     1. handlers 先 ExecuteTemplate(buf, "<page>_content.html", data)
@@ -7,12 +7,15 @@
     2. 把 string 包装成 template.HTML,塞到 data.BodyHTML
     3. 再 ExecuteTemplate(buf, "layout", data) 渲染外壳
 
+  v2.86-PR12.20 改动 (UICraft critique-driven):
+    - 加 skip-link (键盘可达): <a href="#main" class="skip-link">
+    - main 加 id="main" tabindex="-1 (Skip target)
+
   v2.86-PR12.19 改动 (UICraft critique-driven):
     - nav 结构改为 .nav-links + .nav-actions, 加 .active class 支持
     - 主题切换按钮: 🌓 emoji → 内联 SVG 太阳/月亮 (icon-sun / icon-moon)
     - 加 data-page 属性给 body (用于 active nav 标记)
     - 加 dismissable script (.dismissable .dismiss 按钮点击移除)
-    - 加 onbeforeunload 风格: 不, 改用 localStorage 让 banner 状态持久
     - 加 OS tabs 切换 script (用户详情页 mobileconfig 按系统)
 */}}
 
@@ -98,7 +101,8 @@
   </head>
   <body data-page="{{.PageKey}}">
     {{template "nav" .}}
-    <main class="container">
+    <a href="#main" class="skip-link">跳转到主内容</a>
+    <main class="container" id="main" tabindex="-1">
       {{.BodyHTML}}
     </main>
   </body>

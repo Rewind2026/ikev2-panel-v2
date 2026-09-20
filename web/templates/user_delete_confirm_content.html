@@ -1,26 +1,48 @@
 {{/*
-  v2.85-PR8(U10):用户删除确认页(双确认第一步)。
-  GET /users/{id}/delete → 渲染此页 → 用户点"确认删除" → POST /users/{id}/delete/confirm
+  用户删除双确认页 - v2.86-PR12.20 重构 (UICraft critique-driven)
+
+  v2.86-PR12.20 改动:
+    - 列 4 个不可撤销副作用 (DB / swanctl conf / active SA / 审计)
+    - 取消按钮放左边, 确认放右边 (破坏性操作在末端)
+    - 确认按钮文案"确认删除 xxx (不可撤销)" 醒目
+    - 无浏览器 confirm() — 整个页面就是 confirm
 */}}
+
 <hgroup>
   <h1>确认删除用户</h1>
+  <p>这一步是双确认的第二步</p>
 </hgroup>
 
-<article class="alert-danger">
-  <strong>⚠️ 确定删除用户 <code>{{.User.Username}}</code>?</strong>
-  <p>此操作<strong>不可撤销</strong>:</p>
-  <ul>
-    <li>DB 用户记录永久删除</li>
-    <li>/etc/swanctl/conf.d/{{.User.Username}}.conf 删除 + ReloadAll</li>
-    <li>/var/lib/ikev2-panel/limits/{{.User.Username}} 删除</li>
-    <li>活跃 SA 被强制 terminate</li>
-  </ul>
+<article>
+  <div class="banner-danger alert-danger">
+    <strong>⚠ 此操作不可撤销</strong>
+    <p>删除用户 <code>{{.User.Username}}</code> 会产生以下副作用:</p>
+    <ul style="margin: var(--ikev2-rhythm-2) 0 0; padding-left: var(--ikev2-rhythm-5);">
+      <li>数据库中此用户的记录永久删除</li>
+      <li>强删 swanctl 配置 <code>/etc/swanctl/conf.d/{{.User.Username}}.conf</code> 并触发 reload</li>
+      <li>删除限速文件 <code>/var/lib/ikev2-panel/limits/{{.User.Username}}</code></li>
+      <li>正在连接的 SA 被强制下线</li>
+      <li>审计日志保留删除事件,但用户记录消失</li>
+    </ul>
+  </div>
 
-  <form method="POST" action="/users/{{.User.ID}}/delete/confirm">
-    <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-    <button type="submit" class="contrast">确认删除(不可撤销)</button>
+  <table class="compact" style="margin-top: var(--ikev2-rhythm-4);">
+    <tbody>
+      <tr><th>用户名</th><td><code>{{.User.Username}}</code></td></tr>
+      <tr><th>ID</th><td>{{.User.ID}}</td></tr>
+      <tr><th>当前状态</th><td>
+        {{if .User.Enabled}}<span class="badge ok">启用</span>
+        {{else}}<span class="badge danger">停用</span>{{end}}
+      </td></tr>
+      <tr><th>备注</th><td>{{.User.Note}}</td></tr>
+    </tbody>
+  </table>
+
+  <div class="row mt-4" style="justify-content: space-between;">
     <a href="/users/{{.User.ID}}" role="button" class="secondary">取消</a>
-  </form>
+    <form method="POST" action="/users/{{.User.ID}}/delete/confirm">
+      <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+      <button type="submit" class="contrast">确认删除 ({{.User.Username}})</button>
+    </form>
+  </div>
 </article>
-
-<p><a href="/users/{{.User.ID}}">← 返回用户详情</a></p>

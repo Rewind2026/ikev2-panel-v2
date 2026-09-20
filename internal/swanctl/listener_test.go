@@ -13,11 +13,25 @@ import (
 )
 
 // helper:构造一个 vici.Event 带指定字段
+//
+// v2.86-PR12.18: 真实 payload 结构是 nested —
+//   top-level: { "up": "yes", "ikev2-rw": *vici.Message{uniqueid:..., remote-host:...} }
+// 之前 PR15 假设 flat (顶层 unique/remote) 是错的,本 helper 现在构造 nested.
 func newEvent(name string, kv map[string]any) vici.Event {
 	msg := vici.NewMessage()
-	for k, v := range kv {
-		_ = msg.Set(k, v)
+	// 顶层 up 字段 (是 string)
+	if up, ok := kv["up"].(string); ok {
+		_ = msg.Set("up", up)
 	}
+	// 剩余字段塞进 nested ikev2-rw Message
+	nested := vici.NewMessage()
+	for k, v := range kv {
+		if k == "up" {
+			continue
+		}
+		_ = nested.Set(k, v)
+	}
+	_ = msg.Set("ikev2-rw", nested)
 	return vici.Event{
 		Name:    name,
 		Message: msg,
@@ -32,9 +46,9 @@ func TestHandleEvent_UpEvent(t *testing.T) {
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	ev := newEvent("ike-updown", map[string]any{
-		"up":     "yes",
-		"unique": "12345",
-		"remote": "203.0.113.5",
+		"up":          "yes",
+		"uniqueid":    "12345",
+		"remote-host": "203.0.113.5",
 	})
 	listener.handleEvent(ev)
 
@@ -57,8 +71,8 @@ func TestHandleEvent_DownEvent(t *testing.T) {
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	ev := newEvent("ike-updown", map[string]any{
-		"unique": "67890",
-		"remote": "2001:db8::1",
+		"uniqueid":    "67890",
+		"remote-host": "2001:db8::1",
 	})
 	listener.handleEvent(ev)
 
@@ -81,8 +95,8 @@ func TestHandleEvent_MissingUp(t *testing.T) {
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	ev := newEvent("ike-updown", map[string]any{
-		"unique": "111",
-		"remote": "10.0.0.1",
+		"uniqueid":    "111",
+		"remote-host": "10.0.0.1",
 	})
 	listener.handleEvent(ev)
 	if got.Type != SADeleted {

@@ -125,7 +125,7 @@ func TestPR8_E2E_OnboardingChecklist(t *testing.T) {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	html := string(body)
-	if !strings.Contains(html, "5 步搞定首次部署") {
+	if !strings.Contains(html, "首次部署引导") {
 		t.Errorf("U05: onboarding checklist missing (TotalUsers=0):\n%s", firstLines(html, 100))
 	}
 	if !strings.Contains(html, `id="aliyun-card"`) {

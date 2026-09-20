@@ -1,17 +1,25 @@
 {{/*
-  用户列表内容 - v2.86-PR12.19 重构
+  用户列表内容 - v2.86-PR12.20 重构 (UICraft critique-driven)
 
-  - 表格加 responsive-stack (移动端堆叠)
-  - 空状态改为 empty-state 推动行动
-  - 状态徽章用 .badge 不用 .state-badge
+  PR12.20 改动:
+    - 删除按钮改为跳双确认页 /users/{id}/delete (无浏览器 confirm)
+    - 行 actions 集中到最后一列 (.actions 列)
+    - 空状态 empty-state 保留 (PR12.19 已写)
+    - 表格加 responsive-stack (移动端堆叠)
+
+  历史:
+    - v2.86-PR12.19: responsive-stack + 空状态
 */}}
-<hgroup>
-  <h1>用户管理</h1>
-  <p><a href="/users/new" role="button">+ 新增用户</a></p>
-</hgroup>
+<div class="row-between">
+  <hgroup class="mb-0">
+    <h1>用户管理</h1>
+    <p>{{len .Users}} 个账号</p>
+  </hgroup>
+  <a href="/users/new" role="button">+ 新增用户</a>
+</div>
 
 {{if .Flash}}<div class="banner-ok alert-success">{{.Flash}}</div>{{end}}
-{{if .NewPassword}}<div class="banner-warn alert-warn">{{.NewPasswordLabel}}<code>{{.NewPassword}}</code></div>{{end}}
+{{if .NewPassword}}<div class="banner-warn alert-warn">用户密码已生成:<code>{{.NewPassword}}</code><small>(仅显示这一次,请记录后再关闭)</small></div>{{end}}
 
 {{if .Users}}
 <article>
@@ -20,7 +28,7 @@
       <tr>
         <th>ID</th><th>用户名</th><th>状态</th><th>限速</th>
         <th>过期</th><th>累计流量</th><th>最后活跃</th>
-        <th>备注</th><th>操作</th>
+        <th>备注</th><th class="actions">操作</th>
       </tr>
     </thead>
     <tbody>
@@ -37,7 +45,10 @@
         <td data-label="累计流量">↓ {{formatBytes .BytesInTotal}} / ↑ {{formatBytes .BytesOutTotal}}</td>
         <td data-label="最后活跃">{{if eq .LastUsedAt 0}}<span class="text-muted">从未</span>{{else}}{{formatTime .LastUsedAt}}{{end}}</td>
         <td data-label="备注">{{.Note}}</td>
-        <td data-label="操作"><a href="/users/{{.ID}}/delete" role="button" class="secondary outline">删除</a></td>
+        <td data-label="操作" class="actions">
+          {{/* v2.86-PR12.20: 删除走双确认页 (GET /users/{id}/delete), 不再用浏览器 confirm() */}}
+          <a href="/users/{{.ID}}/delete" role="button" class="outline">删除</a>
+        </td>
       </tr>
     {{end}}
     </tbody>

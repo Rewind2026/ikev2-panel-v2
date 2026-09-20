@@ -88,6 +88,14 @@ func LoadTemplates(templatesDir string, displayTZ string) (*template.Template, e
 			}
 			return time.Unix(0, nano).In(loc).Format("2006-01-02 15:04:05.000 MST")
 		},
+		// v2.86-PR12.20:parseAuditDetails 解析 "k=v k=v" 串为 [{K,V}, ...] 切片,
+		// 供 audit_content.html 渲染 dl.kv-list 使用。
+		//
+		// 设计: Details 串可能包含空格分隔的 k=v, 但 v 里也可能含空格 (e.g. error msg).
+		// 简化策略: 按空格 split 后, 第一个 token 用第一个 '=' 分 k 和 v; 后续 token 视为裸
+		// value 拼到上一个 token 的 v 上 (空格分隔).
+		// 这样对 `username=rewind,speed=10` (逗号分隔) 也兼容 — split by space 即可.
+		"parseAuditDetails": parseAuditDetails,
 		// pageContent 把 page 拼成 "<page>_content"（P1-B layout 路由用）
 		// 注意：Go html/template 不允许在 {{template}} 指令里直接用
 		//   {{template (printf "%s_content" .Page) .}}
@@ -281,4 +289,44 @@ func setBodyHTML(data interface{}, body []byte) error {
 	}
 
 	return fmt.Errorf("data has no BodyHTML field (neither top-level nor in embedded PageMeta)")
+}
+
+// parseAuditDetails 把 audit Details 字段的 "k=v k=v ..." 格式字符串解析成 [{K,V}, ...] 切片。
+//
+// 例子:
+//
+//	"unique=1 remote=2408:... eap_id=rewind vip=[10.10.0.1]"
+//	  → [{K:"unique", V:"1"}, {K:"remote", V:"2408:..."}, {K:"eap_id", V:"rewind"}, {K:"vip", V:"[10.10.0.1]"}]
+//
+// 策略: 按空格 split, 每个 token 看是否含 '=' — 有就当作 k=v 解析 (k = 第一个 '=' 左边,
+// v = 第一个 '=' 右边整段); 否则追加到上一个 token 的 v (空格拼接, 兼容带空格的 value).
+//
+// v2.86-PR12.20:给 audit 详情列用, 取代 PR12.19 的 "k=v k=v" 一坨字符串. 模板里配合
+// <dl class="kv-list">{{range parseAuditDetails .Details}}<dt>{{.K}}</dt><dd>{{.V}}</dd>{{end}}</dl>.
+func parseAuditDetails(s string) []KV {
+	if s == "" {
+		return nil
+	}
+	tokens := strings.Fields(s)
+	out := make([]KV, 0, len(tokens))
+	for _, tok := range tokens {
+		if i := strings.IndexByte(tok, '='); i >= 0 {
+			out = append(out, KV{K: tok[:i], V: tok[i+1:]})
+		} else if n := len(out); n > 0 {
+			// 追加到上一个 token 的 value
+			out[n-1].V += " " + tok
+		} else {
+			// 没有前导 token 的裸 token (畸形)
+			out = append(out, KV{K: "?", V: tok})
+		}
+	}
+	return out
+}
+
+// KV parseAuditDetails 返回的 key-value 对。
+//
+// v2.86-PR12.20:放在 templates.go, 仅模板层使用
+type KV struct {
+	K string
+	V string
 }

@@ -1,26 +1,40 @@
 {{/*
-  v2.85-PR8(U11) 操作日志只读页 — v2.86-PR12.19 重构
+  v2.85-PR8(U11) 操作日志只读页 - v2.86-PR12.20 重构 (UICraft critique-driven)
 
-  - 空状态改为 empty-state 推动行动
+  PR12.20 改动:
+    - 详情列从一坨 k=v 字符串 → dl.kv-list (双列 key/value, 等宽字体)
+    - 时间列改用 formatUnixNano (已有)
+    - 空状态保留 (empty-state 推动行动)
+
+  历史:
+    - v2.86-PR12.19: empty-state
 */}}
 <hgroup>
   <h1>操作日志</h1>
-  <p>最近 100 条</p>
+  <p>最近 {{len .Events}} 条</p>
 </hgroup>
 
 {{if .Events}}
 <article>
-  <table class="compact">
+  <table class="compact responsive-stack">
     <thead>
       <tr><th>时间</th><th>操作者</th><th>事件</th><th>详情</th></tr>
     </thead>
     <tbody>
     {{range .Events}}
       <tr>
-        <td><code>{{formatUnixNano .Timestamp}}</code></td>
-        <td>{{.Actor}}</td>
-        <td><code>{{.Event}}</code></td>
-        <td><code>{{.Details}}</code></td>
+        <td data-label="时间"><code>{{formatUnixNano .Timestamp}}</code></td>
+        <td data-label="操作者">{{.Actor}}</td>
+        <td data-label="事件"><code>{{.Event}}</code></td>
+        <td data-label="详情">
+          {{/* v2.86-PR12.20: k=v 串 → dl.kv-list (双列 key/value) */}}
+          {{$kv := parseAuditDetails .Details}}
+          {{if $kv}}
+              <dl class="kv-list">
+              {{range $kv}}<dt>{{.K}}</dt><dd>{{.V}}</dd>{{end}}
+              </dl>
+            {{else}}<span class="text-muted">—</span>{{end}}
+        </td>
       </tr>
     {{end}}
     </tbody>
@@ -42,4 +56,4 @@
 </article>
 {{end}}
 
-<p><a href="/">← 返回首页</a></p>
+<p class="mt-4"><a href="/">← 返回首页</a></p>

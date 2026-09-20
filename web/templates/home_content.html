@@ -1,35 +1,36 @@
 {{/*
-  首页内容 - v2.86-PR12.19 重构 (UICraft critique-driven)
+  首页内容 - v2.86-PR12.20 重构 (UICraft critique-driven)
 
-  主要改动:
-    - 顶部 metric row: 用户数 / 活跃隧道 / 证书 / DDNS 状态 (single dominant)
-    - onboarding checklist: dismissable + 重写为 4 步 done/pending 标记
-    - 证书/凭证/DDNS 三张卡收进 <details> 默认折叠,不再抢占首屏
-    - 配置卡内部 background 装饰色全部移除,用 design token
-    - banner 改为 dismissable,支持用户关闭默认密码横幅
-    - 空状态 empty-state (无活跃连接 / 无用户)
+  PR12.20 改动:
+    - 顶部 metric-row → .status-row (4列紧凑 inline status)
+    - onboarding 移除开发者命令 (`rm /data/...`), 改为指向 SECURITY 文档
+    - 标题 h1 克制为 1.5rem/600 (P0-3)
+    - 三张配置卡保持 details 折叠, 不抢占首屏
+    - 活跃连接空状态保留 (empty-state SVG + CTA)
+
+  历史:
+    - v2.86-PR12.19: 顶部 metric row + dismissable onboarding + 配置卡折叠
 */}}
 
 {{if .LEWarning}}<div class="banner-danger alert-danger">{{.LEWarning}}</div>{{end}}
 
-{{/* v2.86-PR12.19: 默认密码横幅 dismissable */}}
+{{/* v2.86-PR12.20: 默认密码提示改人话, 指向 SECURITY doc (PR12.18 残留 `rm` 命令已删除) */}}
 {{if .IsDefaultPassword}}
 <div class="banner-warn alert-warn dismissable" data-dismiss-key="default-password">
   <div>
-    <strong>你仍在使用默认管理员密码</strong><br>
-    <small>请通过 SSH 进入容器,运行 <code>rm /data/panel-state/INITIAL_ADMIN_PASSWORD.txt</code> 后手动改密。
-       admin 改密功能后续版本加入。</small>
+    <strong>你仍在使用默认管理员密码</strong> — 出于安全考虑,请尽快修改。
+    <small>详见 <a href="/docs/SECURITY.md" target="_blank" rel="noopener">SECURITY 文档</a>。</small>
   </div>
   <button type="button" class="dismiss" aria-label="关闭" title="关闭">×</button>
 </div>
 {{end}}
 
-{{/* v2.86-PR12.19: DDNS 失败 / 凭证未配置 banner — 同样 dismissable */}}
+{{/* v2.86-PR12.20: DDNS 失败 / 凭证未配置 banner — 同样 dismissable */}}
 {{if and .DDNSConfigured .DDNSFailed}}
 <div class="banner-danger alert-danger dismissable" data-dismiss-key="ddns-failed">
   <div>
-    <strong>DDNS 同步失败</strong>：{{.DDNSLastError}}<br>
-    <small>最后一次同步：{{.DDNSLastTime}}</small>
+    <strong>DDNS 同步失败</strong>:{{.DDNSLastError}}
+    <small>最近一次同步:{{.DDNSLastTime}}</small>
   </div>
   <button type="button" class="dismiss" aria-label="关闭" title="关闭">×</button>
 </div>
@@ -45,7 +46,7 @@
 </div>
 {{end}}
 
-{{/* v2.86-PR12.19: onboarding 重写为 4 步清单 + done/pending 状态 + dismissable */}}
+{{/* v2.86-PR12.20: onboarding 改人话, 不暴露开发者命令 */}}
 {{if eq .TotalUsers 0}}
 <aside class="onboarding dismissable" data-dismiss-key="onboarding">
   <header>
@@ -55,60 +56,69 @@
   <ol>
     <li class="done">
       <span class="step-mark">✓</span>
-      <strong>服务器地址：</strong><code class="server-addr">{{.ServerAddr}}</code>
+      <span>
+        <strong>服务器地址</strong>
+        <code class="server-addr">{{.ServerAddr}}</code>
+      </span>
     </li>
     <li class="{{if .AliyunConfigured}}done{{else}}pending{{end}}">
       <span class="step-mark">{{if .AliyunConfigured}}✓{{else}}1{{end}}</span>
-      <a href="#aliyun-card">填写阿里云凭证</a>
-      <small>(LE 自动签发 + DDNS 都依赖)</small>
+      <span>
+        <a href="#aliyun-card">填写阿里云凭证</a>
+        <small>(LE 自动签发 + DDNS 都依赖)</small>
+      </span>
     </li>
     <li class="pending">
       <span class="step-mark">2</span>
-      <a href="/users/new">创建第一个 VPN 用户</a>
+      <span>
+        <a href="/users/new">创建第一个 VPN 用户</a>
+      </span>
     </li>
     <li class="pending">
       <span class="step-mark">3</span>
-      放防火墙 UDP 500 / 4500
-      <small>(云服务商安全组 + 主机 firewall;详见 <a href="/docs/TROUBLESHOOTING.md" target="_blank" rel="noopener">TROUBLESHOOTING</a>)</small>
+      <span>
+        放防火墙 UDP 500 / 4500
+        <small>(云服务商安全组 + 主机 firewall,详见 <a href="/docs/TROUBLESHOOTING.md" target="_blank" rel="noopener">TROUBLESHOOTING</a>)</small>
+      </span>
     </li>
   </ol>
 </aside>
 {{end}}
 
-{{/* v2.86-PR12.19: 顶部 metric row (single dominant — 用户进首页第一眼看到的) */}}
+{{/* v2.86-PR12.20: 顶部 status row (inline status, 不再是 4 张大卡) */}}
 <hgroup>
   <h1>欢迎，{{.AdminUsername}}</h1>
-  <p>服务器地址：<code class="server-addr">{{.ServerAddr}}</code></p>
+  <p>服务器地址:<code class="server-addr">{{.ServerAddr}}</code></p>
 </hgroup>
 
-<div class="metric-row">
-  <div class="metric">
-    <span class="label">VPN 用户</span>
-    <span class="value">{{.TotalUsers}}</span>
-    <span class="hint">已启用的账号</span>
+<div class="status-row">
+  <div class="status-item">
+    <span class="status-label">VPN 用户</span>
+    <span class="status-value">{{.TotalUsers}}</span>
+    <span class="status-hint">已启用账号</span>
   </div>
-  <div class="metric">
-    <span class="label">活跃隧道</span>
-    <span class="value {{if gt .TotalActive 0}}ok{{end}}">{{.TotalActive}}</span>
-    <span class="hint">{{if gt .TotalActive 0}}正在传输{{else}}无连接{{end}}</span>
+  <div class="status-item">
+    <span class="status-label">活跃隧道</span>
+    <span class="status-value {{if gt .TotalActive 0}}ok{{end}}">{{.TotalActive}}</span>
+    <span class="status-hint">{{if gt .TotalActive 0}}正在传输{{else}}无连接{{end}}</span>
   </div>
-  <div class="metric">
-    <span class="label">证书</span>
-    <span class="value {{if eq .CertMode "letsencrypt"}}ok{{end}}">
+  <div class="status-item">
+    <span class="status-label">证书</span>
+    <span class="status-value {{if eq .CertMode "letsencrypt"}}ok{{end}}">
       {{if eq .CertMode "letsencrypt"}}LE{{else}}自签{{end}}
     </span>
-    <span class="hint">{{if .CertDomain}}{{.CertDomain}}{{else}}未配置域名{{end}}</span>
+    <span class="status-hint">{{if .CertDomain}}{{.CertDomain}}{{else}}未配置域名{{end}}</span>
   </div>
-  <div class="metric">
-    <span class="label">DDNS</span>
-    <span class="value {{if .DDNSFailed}}danger{{else if .DDNSEnabled}}ok{{end}}">
+  <div class="status-item">
+    <span class="status-label">DDNS</span>
+    <span class="status-value {{if .DDNSFailed}}danger{{else if .DDNSEnabled}}ok{{end}}">
       {{if not .DDNSConfigured}}—{{else if .DDNSFailed}}失败{{else if .DDNSEnabled}}运行中{{else}}已关闭{{end}}
     </span>
-    <span class="hint">{{if .DDNSLastTime}}{{.DDNSLastTime}}{{else}}尚未同步{{end}}</span>
+    <span class="status-hint">{{if .DDNSLastTime}}{{.DDNSLastTime}}{{else}}尚未同步{{end}}</span>
   </div>
 </div>
 
-{{/* v2.86-PR12.19: 三张配置卡收进 <details> 默认折叠,不再抢占首屏 */}}
+{{/* v2.86-PR12.20: 三张配置卡收进 <details> 默认折叠 */}}
 
 <details class="settings-card" id="cert-card">
   <summary><strong>证书配置</strong> <small class="header-note">(自签 vs Let's Encrypt 自动签发)</small></summary>
@@ -127,7 +137,7 @@
 </details>
 {{end}}
 
-{{/* v2.86-PR12.19: 活跃连接 (空状态推到视觉中心) */}}
+{{/* v2.86-PR12.20: 活跃连接 (空状态推到视觉中心) */}}
 <h3>活跃连接 ({{.TotalActive}})</h3>
 {{if .SAsUnavailable}}
   <article><p class="text-muted">⚠️ SA 列表暂不可用 (swanctl 响应超时),刷新重试</p></article>
@@ -156,7 +166,7 @@
       <path d="M5 12.55a11 11 0 0 1 14.08 0M1.42 9a16 16 0 0 1 21.16 0M8.53 16.11a6 6 0 0 1 6.95 0M12 20h.01"/>
     </svg>
     <div class="empty-title">无活跃连接</div>
-    <div class="empty-hint">客户端首次连接三步: 扫码下载配置 → 安装描述文件 → 启用 VPN 开关</div>
+    <div class="empty-hint">客户端首次连接三步:扫码下载配置 → 安装描述文件 → 启用 VPN 开关</div>
     <a href="/users" class="empty-cta" role="button">查看用户配置</a>
   </div>
 </article>
@@ -171,16 +181,16 @@
 <div class="settings-body">
   {{if .CertConfigured}}
     <p>
-      状态：<span class="badge {{if eq .CertMode "letsencrypt"}}ok{{else}}warn{{end}}">
+      状态:<span class="badge {{if eq .CertMode "letsencrypt"}}ok{{else}}warn{{end}}">
         {{if eq .CertMode "letsencrypt"}}Let's Encrypt 自动签发{{else}}自签证书{{end}}
       </span>
       {{if eq .CertMode "letsencrypt"}}
-        {{if .CertDomain}}<br><small>域名：<code>{{.CertDomain}}</code></small>{{end}}
-        {{if .CertServerCN}}<br><small>Server CN：<code>{{.CertServerCN}}</code></small>{{end}}
-        {{if .CertACMEEmail}}<br><small>ACME 邮箱：<code>{{.CertACMEEmail}}</code></small>{{end}}
+        {{if .CertDomain}}<br><small>域名:<code>{{.CertDomain}}</code></small>{{end}}
+        {{if .CertServerCN}}<br><small>Server CN:<code>{{.CertServerCN}}</code></small>{{end}}
+        {{if .CertACMEEmail}}<br><small>ACME 邮箱:<code>{{.CertACMEEmail}}</code></small>{{end}}
       {{end}}
       <br>
-      <small>配置来源：<code>{{.CertSource}}</code>
+      <small>配置来源:<code>{{.CertSource}}</code>
         {{if eq .CertSource "panelstate"}}(需 <code>docker compose restart</code> 生效){{end}}
       </small>
     </p>
@@ -200,18 +210,21 @@
       <label>ACME 注册邮箱 (可选)
         <input type="email" name="acme_email" placeholder="admin@example.com" value="{{.CertACMEEmail}}">
       </label>
-      <p class="text-sm" style="color: var(--ikev2-warn);">⚠️ 保存后必须 <code>docker compose restart</code> 才能生效</p>
+      <p class="text-sm" style="color: var(--ikev2-warn);">⚠️ 保存后必须重启容器才能生效</p>
       <div class="row">
         <button type="submit">保存证书配置</button>
-        <a href="/api/cert/clear" role="button" class="secondary" data-method="POST">清除证书配置</a>
+        <form method="POST" action="/api/cert/clear" style="display: inline;">
+          <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+          <button type="submit" class="secondary">清除证书配置</button>
+        </form>
       </div>
     </form>
   {{else}}
     <p>
-      状态：<span class="badge {{if eq .CertMode "letsencrypt"}}ok{{else}}warn{{end}}">
+      状态:<span class="badge {{if eq .CertMode "letsencrypt"}}ok{{else}}warn{{end}}">
         {{if eq .CertMode "letsencrypt"}}Let's Encrypt (env 配置){{else}}自签证书 (env 配置){{end}}
       </span>
-      {{if .CertDomain}}<br><small>域名：<code>{{.CertDomain}}</code></small>{{end}}
+      {{if .CertDomain}}<br><small>域名:<code>{{.CertDomain}}</code></small>{{end}}
     </p>
     <form method="POST" action="/api/cert/save">
       <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
@@ -223,7 +236,7 @@
       <label>域名 (LE 模式必填)<input type="text" name="domain" placeholder="vpn.example.com" value="{{.CertDomain}}"></label>
       <label>Server CN<input type="text" name="server_cn" placeholder="留空 = 用域名" value="{{.CertServerCN}}"></label>
       <label>ACME 邮箱 (可选)<input type="email" name="acme_email" placeholder="admin@example.com" value="{{.CertACMEEmail}}"></label>
-      <p class="text-sm" style="color: var(--ikev2-warn);">⚠️ 保存后必须 <code>docker compose restart</code></p>
+      <p class="text-sm" style="color: var(--ikev2-warn);">⚠️ 保存后必须重启容器</p>
       <button type="submit">保存证书配置</button>
     </form>
     <p class="text-sm text-muted">
@@ -238,10 +251,10 @@
 <div class="settings-body">
   {{if .AliyunConfigured}}
     <p>
-      状态：<span class="badge ok">已配置</span>
+      状态:<span class="badge ok">已配置</span>
       <small>(KeyID: <code>{{.AliyunKeyIDMasked}}</code>)</small>
       <br>
-      <small>生效来源：<code>{{.AliyunKeySource}}</code>
+      <small>生效来源:<code>{{.AliyunKeySource}}</code>
         {{if eq .AliyunKeySource "panelstate"}}(面板填的){{end}}
       </small>
     </p>
@@ -250,16 +263,19 @@
       <label>AccessKey ID<input type="text" name="key_id" placeholder="LTAI5t..." required></label>
       <label>AccessKey Secret<input type="password" name="key_secret" placeholder="(覆盖现有凭证)" required></label>
       <label><input type="checkbox" name="confirm" value="yes" required>
-        <small>我已确认要保存,保存后需 <code>docker compose restart</code> 才影响 acme.sh 续签 (DDNS 立即生效)</small>
+        <small>我已确认要保存,保存后需重启容器才影响 acme.sh 续签 (DDNS 立即生效)</small>
       </label>
       <div class="row">
         <button type="submit">保存</button>
-        <a href="/api/aliyun/clear" role="button" class="secondary" data-method="POST">清除凭证</a>
+        <form method="POST" action="/api/aliyun/clear" style="display: inline;">
+          <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+          <button type="submit" class="secondary">清除凭证</button>
+        </form>
       </div>
     </form>
   {{else}}
     <p>
-      状态：<span class="badge danger">未配置</span>
+      状态:<span class="badge danger">未配置</span>
       <small>(LE 签发 + DDNS 同步均不可用)</small>
     </p>
     <form method="POST" action="/api/aliyun/save">
@@ -273,7 +289,7 @@
     </form>
     <p class="text-sm text-muted">
       阿里云控制台 → RAM 访问控制 → 用户 → 创建 AccessKey。
-      最小权限: <code>alidns:DescribeDomainRecords</code> + <code>alidns:UpdateDomainRecord</code>。
+      最小权限:<code>alidns:DescribeDomainRecords</code> + <code>alidns:UpdateDomainRecord</code>。
     </p>
   {{end}}
 </div>
@@ -283,7 +299,7 @@
 <div class="settings-body">
   {{if .DDNSEnabled}}
     <p>
-      状态：<span class="badge ok">已启用</span>
+      状态:<span class="badge ok">已启用</span>
       <small>(节流 60s, IP 变时自动同步)</small>
     </p>
     <fieldset>
@@ -298,19 +314,19 @@
     </fieldset>
 
     {{if eq .DDNSFamily "dual"}}
-      <p>当前 IPv4：<code>{{if .DDNSV4IP}}{{.DDNSV4IP}}{{else}}<em>(探测失败/未启用)</em>{{end}}</code>
+      <p>当前 IPv4:<code>{{if .DDNSV4IP}}{{.DDNSV4IP}}{{else}}<em>(探测失败/未启用)</em>{{end}}</code>
         {{if .DDNSV4Error}}<br><small style="color: var(--ikev2-danger);">⚠️ {{.DDNSV4Error}}</small>{{end}}</p>
-      <p>当前 IPv6：<code>{{if .DDNSV6IP}}{{.DDNSV6IP}}{{else}}<em>(探测失败/未启用)</em>{{end}}</code>
+      <p>当前 IPv6:<code>{{if .DDNSV6IP}}{{.DDNSV6IP}}{{else}}<em>(探测失败/未启用)</em>{{end}}</code>
         {{if .DDNSV6Error}}<br><small style="color: var(--ikev2-danger);">⚠️ {{.DDNSV6Error}}</small>{{end}}</p>
     {{else if eq .DDNSFamily "v4"}}
-      <p>当前 IPv4：<code>{{if .DDNSV4IP}}{{.DDNSV4IP}}{{else}}<em>(探测失败)</em>{{end}}</code>
+      <p>当前 IPv4:<code>{{if .DDNSV4IP}}{{.DDNSV4IP}}{{else}}<em>(探测失败)</em>{{end}}</code>
         {{if .DDNSV4Error}}<br><small style="color: var(--ikev2-danger);">⚠️ {{.DDNSV4Error}}</small>{{end}}</p>
     {{else}}
-      <p>当前 IPv6：<code>{{if .DDNSV6IP}}{{.DDNSV6IP}}{{else}}<em>(探测失败)</em>{{end}}</code>
+      <p>当前 IPv6:<code>{{if .DDNSV6IP}}{{.DDNSV6IP}}{{else}}<em>(探测失败)</em>{{end}}</code>
         {{if .DDNSV6Error}}<br><small style="color: var(--ikev2-danger);">⚠️ {{.DDNSV6Error}}</small>{{end}}</p>
     {{end}}
 
-    <p>最近同步：
+    <p>最近同步:
       {{if .DDNSLastTime}}
         <code>{{.DDNSLastTime}}</code>
         {{if .DDNSFailed}}<span class="badge danger">(失败)</span>{{else}}<span class="badge ok">(成功)</span>{{end}}
@@ -322,7 +338,7 @@
       <button type="submit" class="secondary">关闭 DDNS</button>
     </form>
   {{else}}
-    <p>状态：<span class="badge warn">已关闭</span> <small>(动态 IP 不会同步,客户端可能连不上)</small></p>
+    <p>状态:<span class="badge warn">已关闭</span> <small>(动态 IP 不会同步,客户端可能连不上)</small></p>
     <form method="POST" action="/api/ddns/toggle">
       <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
       <input type="hidden" name="enabled" value="true">
