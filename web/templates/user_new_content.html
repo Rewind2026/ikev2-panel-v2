@@ -1,33 +1,41 @@
 {{/*
-  新增用户表单内容 - P1-B + Pico v2
+  新增用户表单内容 - v2.86-PR12.21 (Visual-first 表单)
+  PR12.21 改动:
+    - hgroup → page-header (一致化)
+    - 错误用 banner-danger (PR12.20 沿用)
 */}}
-<hgroup>
-  <h1>新增用户</h1>
-  <p>创建一个新的 VPN 用户</p>
-</hgroup>
+<header class="page-header">
+  <hgroup>
+    <h1>新增用户</h1>
+    <p>创建一个新的 VPN 用户</p>
+  </hgroup>
+  <div class="page-meta">
+    <a href="/users" role="button" class="secondary">← 返回列表</a>
+  </div>
+</header>
 
-{{if .Error}}<div class="alert-danger"><strong>{{.Error}}</strong></div>{{end}}
+{{if .Error}}<div class="banner-danger alert-danger">{{.Error}}</div>{{end}}
 
 <form method="POST" action="/users">
   <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-  <label>用户名（3-32 位 [a-z0-9_-]）
+  <label>用户名(3-32 位 [a-z0-9_-])
     <input name="username" value="{{.Username}}" required autofocus>
   </label>
-  <label>备注（≤200 字）
+  <label>备注(≤200 字)
     <input name="note" value="{{.Note}}" maxlength="200">
   </label>
-  <label>限速 Mbps（0 = 不限速，默认 10）
+  <label>限速 Mbps(0 = 不限速,默认 10)
     <input name="speed_limit_mbps" type="number" min="0" max="1000" value="{{.SpeedLimit}}">
   </label>
-  <label>过期时间（YYYY-MM-DD，留空 = 永不过期）
+  <label>过期时间(YYYY-MM-DD,留空 = 永不过期)
     <input name="expires_at" type="text" placeholder="2026-12-31" value="{{.ExpiresAt}}">
   </label>
   <label>
     <input type="checkbox" name="enabled" value="1" {{if .Enabled}}checked{{end}}>
     立即启用
   </label>
-  <div role="group">
-    <button type="submit" class="contrast">创建（自动生成 12 位密码）</button>
-    <a href="/users" role="button" class="secondary outline">取消</a>
+  <div class="row mt-4">
+    <button type="submit">创建(自动生成 12 位密码)</button>
+    <a href="/users" role="button" class="secondary">取消</a>
   </div>
 </form>

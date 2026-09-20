@@ -14,6 +14,7 @@ import (
 	"github.com/yourname/ikev2-panel-v2/internal/cert"
 	"github.com/yourname/ikev2-panel-v2/internal/limit"
 	"github.com/yourname/ikev2-panel-v2/internal/panelstate"
+	"github.com/yourname/ikev2-panel-v2/internal/store"
 	"github.com/yourname/ikev2-panel-v2/internal/swanctl"
 )
 
@@ -58,6 +59,11 @@ type homeData struct {
 
 	// v2.85-PR2:默认密码横幅(/data/panel-state/INITIAL_ADMIN_PASSWORD.txt 存在 → 提示改密码)
 	IsDefaultPassword bool
+
+	// v2.86-PR12.21:Visual-first topology dashboard
+	TopologyClients []TopologyClient   // 渲染服务器↔用户拓扑图
+	RecentEvents    []store.AuditEvent // 首页底部 timeline (最近 8 条)
+	NowUnix         int64              // 用于用户详情页过期判断
 }
 
 func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
@@ -127,6 +133,10 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 		CertACMEEmail:     certCfg.acmeEmail,
 		CertSource:        certCfg.source,
 		IsDefaultPassword: isDefaultPassword,
+		// v2.86-PR12.21:Visual-first topology
+		TopologyClients: buildHomeTopology(r.Context(), s, activeSAs),
+		RecentEvents:    loadRecentAudit(r.Context(), s, 8),
+		NowUnix:         time.Now().Unix(),
 	}
 
 	s.RenderPage(w, "home", data)
@@ -391,3 +401,75 @@ func itoa(n int) string {
 
 // ensure limit/swanctl/cert are referenced even if unused in some configs
 var _ = limit.New
+
+// buildHomeTopology v2.86-PR12.21: 把 DB 用户列表 + swanctl 活跃 SA 合并成 topology 客户端节点。
+//
+// 行为:
+//   - 列出所有 enabled 用户 (limit 50 个, 超过会渲染 "+N 更多" 占位)
+//   - 活跃 SA (activeSAs) 按 RemoteID 匹配 → online=true, 填 BytesIn/BytesOut
+//   - 离线用户 (last_used=0 或 不在 activeSAs) → online=false
+//
+// 失败 (DB 不可用) → 返回 nil (模板渲染空 topology)。
+func buildHomeTopology(ctx context.Context, s *Server, activeSAs []swanctl.SA) []TopologyClient {
+	if s.Store == nil {
+		return nil
+	}
+	users, err := s.Store.ListUsers(ctx)
+	if err != nil {
+		return nil
+	}
+
+	// 按 username → SA bytes 索引
+	saBytes := make(map[string]struct {
+		in, out int64
+	}, len(activeSAs))
+	for _, sa := range activeSAs {
+		if sa.RemoteID == "" {
+			continue
+		}
+		var totalIn, totalOut int64
+		for _, ch := range sa.Children {
+			totalIn += ch.BytesIn
+			totalOut += ch.BytesOut
+		}
+		saBytes[sa.RemoteID] = struct {
+			in, out int64
+		}{totalIn, totalOut}
+	}
+
+	out := make([]TopologyClient, 0, len(users))
+	for _, u := range users {
+		if !u.Enabled {
+			continue
+		}
+		c := TopologyClient{
+			ID:   u.ID,
+			Name: u.Username,
+			Href: fmt.Sprintf("/users/%d", u.ID),
+		}
+		if sa, ok := saBytes[u.Username]; ok {
+			c.Online = true
+			c.BytesIn = sa.in
+			c.BytesOut = sa.out
+		}
+		out = append(out, c)
+		if len(out) >= 50 {
+			break
+		}
+	}
+	return out
+}
+
+// loadRecentAudit v2.86-PR12.21: 取最近 N 条 audit 用于首页 timeline。
+//
+// 失败 → 返回 nil (timeline 自动隐藏)。
+func loadRecentAudit(ctx context.Context, s *Server, n int) []store.AuditEvent {
+	if s.Store == nil || n <= 0 {
+		return nil
+	}
+	events, err := s.Store.ListAudit(ctx, n)
+	if err != nil {
+		return nil
+	}
+	return events
+}

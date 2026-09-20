@@ -3,6 +3,7 @@ package web
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"net/http"
@@ -10,9 +11,16 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/yourname/ikev2-panel-v2/internal/store"
 )
+
+// storeUser 别名,避免在模板 helper 里写完整 store.User (handler 用 *store.User)
+// jsonOneClient 接受 *store.User。
+type storeUser = store.User
 
 // LoadTemplates 从 templatesDir 加载全部 *.html，并解析 layout 共享片段。
 //
@@ -101,6 +109,11 @@ func LoadTemplates(templatesDir string, displayTZ string) (*template.Template, e
 		//   {{template (printf "%s_content" .Page) .}}
 		// 所以这里用 FuncMap 包装一层。
 		"pageContent": pageContent,
+		// v2.86-PR12.21: 拓扑 JSON 序列化器 (Go html/template 不能直接序列化 slice 到 data-clients attr)
+		"jsonTopologyClients": jsonTopologyClients,
+		"jsonOneClient":       jsonOneClient,
+		// v2.86-PR12.21: audit 严重性映射 (timeline-dot class),基于 event name 启发式
+		"auditSeverity": auditSeverity,
 	})
 
 	if _, err := t.ParseFiles(paths...); err != nil {
@@ -196,6 +209,16 @@ type PageMeta struct {
 
 	// v2.86-PR12.19:nav active 标记的短 key (e.g. "home" / "users" / "audit" / "login")
 	PageKey string
+
+	// v2.86-PR12.21:TopBar breadcrumb (e.g. [{首页, /}, {用户, /users}, {alice, ""}])
+	// Href="" 表示当前页 (不可点击)。所有 page 都用,省略时不渲染。
+	Breadcrumb []Breadcrumb
+}
+
+// Breadcrumb v2.86-PR12.21:TopBar 面包屑一项。
+type Breadcrumb struct {
+	Label string
+	Href  string
 }
 
 // RenderPage 渲染完整页面（两段渲染模式 P1-B 最终方案）：
@@ -329,4 +352,102 @@ func parseAuditDetails(s string) []KV {
 type KV struct {
 	K string
 	V string
+}
+
+// TopologyClient v2.86-PR12.21: 拓扑画布客户端节点数据 (渲染成 SVG)。
+//
+// 用于模板 data-clients JSON attr。Home 传所有 enabled 用户 + 活跃 SA,
+// UserDetail 只传当前用户 (data-focus-user)。
+type TopologyClient struct {
+	ID       int64  `json:"id,omitempty"`
+	Name     string `json:"name"`
+	Online   bool   `json:"online"`
+	BytesIn  int64  `json:"bytesIn,omitempty"`
+	BytesOut int64  `json:"bytesOut,omitempty"`
+	Href     string `json:"href,omitempty"`
+}
+
+// jsonTopologyClients 把客户端 slice 序列化为 JSON 字符串,嵌入 SVG data attr。
+//
+// 用 encoding/json 而不是 template.HTMLEscape,因为 data-clients 是 attribute value
+// (包在 '' 或 "" 里),template 会自己处理 outer quote escaping。
+//
+// v2.86-PR12.21
+func jsonTopologyClients(clients []TopologyClient) (template.JS, error) {
+	if len(clients) == 0 {
+		return template.JS("[]"), nil
+	}
+	b, err := jsonMarshalIndent(clients)
+	if err != nil {
+		return template.JS("[]"), err
+	}
+	return template.JS(b), nil
+}
+
+// jsonOneClient 单个用户转 JSON (UserDetail 页用)。
+//
+// v2.86-PR12.21
+func jsonOneClient(u *storeUser) (template.JS, error) {
+	if u == nil {
+		return template.JS("{}"), nil
+	}
+	online := u.Enabled && u.LastUsedAt > 0
+	c := TopologyClient{
+		ID:       u.ID,
+		Name:     u.Username,
+		Online:   online,
+		BytesIn:  u.BytesInTotal,
+		BytesOut: u.BytesOutTotal,
+		Href:     "/users/" + strconv.FormatInt(u.ID, 10),
+	}
+	b, err := jsonMarshalIndent([]TopologyClient{c})
+	if err != nil {
+		return template.JS("[]"), err
+	}
+	return template.JS(b), nil
+}
+
+// jsonMarshalIndent 缩进序列化 (前端 console.log 友好)。
+func jsonMarshalIndent(v interface{}) (string, error) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "", err
+	}
+	var out bytes.Buffer
+	if err := json.Indent(&out, b, "", "  "); err != nil {
+		return string(b), nil // fallback 不缩进
+	}
+	return out.String(), nil
+}
+
+// auditSeverity v2.86-PR12.21: 把 audit event 映射到 timeline-dot class。
+//
+// 启发式 (event 名包含关键字):
+//   - "delete" / "disable" / "fail"        → danger
+//   - "update" / "reset" / "save" / "toggle" → warn
+//   - "create" / "enable"                  → ok
+//   - 其它 (system listener / 通用)         → info
+//
+// 让 audit log 时间线一眼看出严重性。
+func auditSeverity(event string) string {
+	e := strings.ToLower(event)
+	switch {
+	case strings.Contains(e, "delete"),
+		strings.Contains(e, "disable"),
+		strings.Contains(e, "fail"),
+		strings.Contains(e, "error"):
+		return "danger"
+	case strings.Contains(e, "update"),
+		strings.Contains(e, "reset"),
+		strings.Contains(e, "save"),
+		strings.Contains(e, "toggle"),
+		strings.Contains(e, "expire"):
+		return "warn"
+	case strings.Contains(e, "create"),
+		strings.Contains(e, "enable"),
+		strings.Contains(e, "up"):
+		return "ok"
+	default:
+		return "info"
+	}
 }

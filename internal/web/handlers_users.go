@@ -43,6 +43,11 @@ type userDetailData struct {
 	NewPassword string // 重置密码后一次性显示
 	Flash       string
 	Error       string
+
+	// v2.86-PR12.21:Visual-first topology + breadcrumb
+	ServerAddr string
+	NowUnix    int64
+	Breadcrumb []Breadcrumb
 }
 
 // handleUsersList GET /users
@@ -257,10 +262,13 @@ func (s *Server) handleUserDetail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.RenderPage(w, "user_detail", userDetailData{
-		PageMeta:    PageMeta{Page: "user_detail", Title: u.Username, PageKey: "users", AdminUsername: admin.Username, CSRFToken: csrfTokenOf(sess)},
+		PageMeta:    PageMeta{Page: "user_detail", Title: u.Username, PageKey: "users", AdminUsername: admin.Username, CSRFToken: csrfTokenOf(sess),
+			Breadcrumb: []Breadcrumb{{Label: "用户", Href: "/users"}, {Label: u.Username}}},
 		User:        u,
 		NewPassword: newPassword,
 		Flash:       msg,
+		ServerAddr:  s.ServerAddr,
+		NowUnix:     time.Now().Unix(),
 	})
 }
 

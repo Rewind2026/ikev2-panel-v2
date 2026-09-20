@@ -1,22 +1,16 @@
 {{/*
-  web/templates/layout.html (v2.86-PR12.20 重构)
+  web/templates/layout.html (v2.86-PR12.21 Visual-First Topology)
 
-  采用"两段渲染"模式:
+  采用"两段渲染"模式 (P1-B pattern):
     1. handlers 先 ExecuteTemplate(buf, "<page>_content.html", data)
-       渲染子模板到 buffer,得到 string
     2. 把 string 包装成 template.HTML,塞到 data.BodyHTML
     3. 再 ExecuteTemplate(buf, "layout", data) 渲染外壳
 
-  v2.86-PR12.20 改动 (UICraft critique-driven):
-    - 加 skip-link (键盘可达): <a href="#main" class="skip-link">
-    - main 加 id="main" tabindex="-1 (Skip target)
-
-  v2.86-PR12.19 改动 (UICraft critique-driven):
-    - nav 结构改为 .nav-links + .nav-actions, 加 .active class 支持
-    - 主题切换按钮: 🌓 emoji → 内联 SVG 太阳/月亮 (icon-sun / icon-moon)
-    - 加 data-page 属性给 body (用于 active nav 标记)
-    - 加 dismissable script (.dismissable .dismiss 按钮点击移除)
-    - 加 OS tabs 切换 script (用户详情页 mobileconfig 按系统)
+  v2.86-PR12.21 改动 (Topology / TopBar):
+    - TopBar 重做: 28px brand-mark + 56px sticky + breadcrumb + 3 nav-links + user avatar + theme toggle
+    - nav 改 topbar-nav (active 用 brand-soft 背景, 不是左侧 2px 条)
+    - 加 copy-to-clipboard 通用 handler (.copy-btn)
+    - 保留 skip-link / dismissable / theme toggle / OS tabs scripts
 */}}
 
 {{define "layout"}}<!DOCTYPE html>
@@ -28,8 +22,7 @@
     <link rel="stylesheet" href="/static/css/pico.min.css">
     <link rel="stylesheet" href="/static/style.css">
     <script>
-      // v2.86-PR12.19: 浅/深色模式切换 (Pico v2 data-theme + localStorage 持久化)
-      // 加载顺序: 先读偏好 → 再加载 CSS,避免页面"白闪"再变暗
+      // 浅/深色模式切换 (Pico v2 data-theme + localStorage 持久化)
       (function () {
         var stored = null;
         try { stored = localStorage.getItem("ikev2-theme"); } catch (e) {}
@@ -40,10 +33,9 @@
         document.documentElement.setAttribute("data-theme", stored);
       })();
 
-      // v2.86-PR12.19: 当前页 active nav 标记
       document.addEventListener("DOMContentLoaded", function () {
         var page = document.body.getAttribute("data-page") || "";
-        document.querySelectorAll(".nav-links a[data-page-key]").forEach(function (a) {
+        document.querySelectorAll(".topbar-nav a[data-page-key]").forEach(function (a) {
           if (a.getAttribute("data-page-key") === page) a.classList.add("active");
         });
 
@@ -57,7 +49,7 @@
           });
         });
 
-        // v2.86-PR12.19: dismissable banner (.dismissable .dismiss 点击 → 移除 + localStorage)
+        // dismissable banner
         document.querySelectorAll(".dismissable").forEach(function (el) {
           var key = el.getAttribute("data-dismiss-key");
           if (key) {
@@ -72,7 +64,7 @@
           }
         });
 
-        // v2.86-PR12.19: OS tabs (用户详情页 mobileconfig 按系统切换)
+        // OS tabs
         document.querySelectorAll(".os-tabs").forEach(function (tabs) {
           var stored = null;
           try { stored = localStorage.getItem("ikev2-os-tab"); } catch (e) {}
@@ -96,43 +88,86 @@
             });
           });
         });
+
+        // v2.86-PR12.21: copy-btn 通用 handler (.copy-btn data-copy-target="#id" 或 data-copy-text="...")
+        document.querySelectorAll(".copy-btn").forEach(function (btn) {
+          btn.addEventListener("click", function (e) {
+            e.preventDefault();
+            var target = btn.getAttribute("data-copy-target");
+            var text = btn.getAttribute("data-copy-text");
+            if (target) {
+              var el = document.querySelector(target);
+              if (el) text = el.value || el.textContent || el.innerText;
+            }
+            if (!text) return;
+            try {
+              navigator.clipboard.writeText(text).then(function () {
+                var orig = btn.textContent;
+                btn.textContent = "已复制 ✓";
+                setTimeout(function () { btn.textContent = orig; }, 1500);
+              });
+            } catch (err) {
+              // fallback: temp textarea
+              var t = document.createElement("textarea");
+              t.value = text; document.body.appendChild(t);
+              t.select(); document.execCommand("copy"); t.remove();
+            }
+          });
+        });
       });
     </script>
+    <script src="/static/js/topology.js" defer></script>
   </head>
-  <body data-page="{{.PageKey}}">
-    {{template "nav" .}}
+  <body data-page="{{.PageKey}}" {{if eq .PageKey "login"}}class="login-page"{{end}}>
+    {{template "topbar" .}}
     <a href="#main" class="skip-link">跳转到主内容</a>
-    <main class="container" id="main" tabindex="-1">
+    <main id="main" tabindex="-1">
       {{.BodyHTML}}
     </main>
   </body>
 </html>
 {{end}}
 
-{{define "nav"}}{{if .AdminUsername}}<header class="page-nav">
-  <nav>
-    <a href="/" class="brand" data-page-key="home">IKEv2 Panel</a>
-    <span class="nav-links">
-      <a href="/" data-page-key="home">首页</a>
-      <a href="/users" data-page-key="users">用户</a>
-      <a href="/audit" data-page-key="audit">日志</a>
-    </span>
-    <span class="spacer"></span>
-    <span class="nav-actions">
-      <span class="admin-info">{{.AdminUsername}}</span>
-      <button type="button" class="theme-toggle" aria-label="切换深色 / 浅色模式" title="切换深色 / 浅色模式">
-        <svg class="icon-moon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
-        </svg>
-        <svg class="icon-sun" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <circle cx="12" cy="12" r="4"/>
-          <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/>
-        </svg>
-      </button>
-      <form method="POST" action="/logout">
-        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-        <button type="submit" class="link">登出</button>
-      </form>
-    </span>
+{{/* v2.86-PR12.21: TopBar — 56px sticky, brand-mark + breadcrumb + 3 nav + user + theme + logout
+     - 同时定义 "topbar" 和 "nav" 两个 alias (老测试 + 新代码都用得到) */}}
+{{define "topbar"}}{{if .AdminUsername}}<header class="topbar">
+  <a href="/" class="topbar-brand" aria-label="IKEv2 Panel 首页">
+    <span class="topbar-brand-mark">I</span>
+    <span>IKEv2 Panel</span>
+  </a>
+  {{if .Breadcrumb}}
+  <span class="topbar-breadcrumb">
+    {{range $i, $c := .Breadcrumb}}
+      {{if $i}}<span class="sep">/</span>{{end}}
+      {{if $c.Href}}<a href="{{$c.Href}}">{{$c.Label}}</a>{{else}}<span class="crumb-current">{{$c.Label}}</span>{{end}}
+    {{end}}
+  </span>
+  {{end}}
+  <nav class="topbar-nav" aria-label="主导航">
+    <a href="/" data-page-key="home">首页</a>
+    <a href="/users" data-page-key="users">用户</a>
+    <a href="/audit" data-page-key="audit">日志</a>
   </nav>
+  <div class="topbar-right">
+    <span class="topbar-user">
+      <span class="topbar-user-avatar" aria-hidden="true">{{slice .AdminUsername 0 1}}</span>
+      <span>{{.AdminUsername}}</span>
+    </span>
+    <button type="button" class="theme-toggle" aria-label="切换深色 / 浅色模式" title="切换主题">
+      <svg class="icon-moon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+      </svg>
+      <svg class="icon-sun" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="4"/>
+        <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/>
+      </svg>
+    </button>
+    <form method="POST" action="/logout" class="topbar-logout-form">
+      <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+      <button type="submit" class="topbar-logout">登出</button>
+    </form>
+  </div>
 </header>{{end}}{{end}}
+
+{{/* v2.86-PR12.21: nav 别名 (向后兼容 — 老代码 / 老测试期望 "nav" 存在) */}}
+{{define "nav"}}{{template "topbar" .}}{{end}}

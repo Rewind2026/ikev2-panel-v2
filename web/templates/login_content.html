@@ -1,11 +1,12 @@
 {{/*
-  登录页内容 - v2.86-PR12.19 (沿用 P1-B + Pico v2)
+  登录页内容 - v2.86-PR12.21 (dark gradient bg + centered card)
+
   注意: login 时无 AdminUsername,所以 layout 内的 nav 不会显示
 */}}
 <article class="login-card">
   <hgroup>
     <h1>管理员登录</h1>
-    <p>IKEv2 Panel 控制台</p>
+    <p class="login-sub">管理员控制台</p>
   </hgroup>
   {{if .Error}}<div class="banner-danger alert-danger">{{.Error}}</div>{{end}}
   <form method="POST" action="/login">

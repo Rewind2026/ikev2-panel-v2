@@ -1,146 +1,211 @@
 {{/*
-  用户详情内容 - v2.86-PR12.20 重构 (UICraft critique-driven)
+  用户详情内容 - v2.86-PR12.21 重构 (Topology focus)
 
-  PR12.20 改动:
-    - OS tabs 加 hint 二行 (iOS/macOS 最简 / Android 11+ ... / 旧版 / Linux 命令行 / CA 证书)
-    - 删除按钮跳双确认页 (无浏览器 confirm())
-    - reset-password / disable 保留单步 POST, confirm 文案统一 (确认 X?后果 Y, 无法撤销)
-    - Android strongSwan / Linux sswan 也加 QR 卡 (统一性)
-    - 表格 tbody 内 th/td 顺序修正 (用 tbody only)
+  PR12.21 改动 (从 8 行 key-value 表 → 拓扑 + SideStats):
+    - 顶部 page-header: 用户名 + ID + enable badge
+    - 主舞台: Topology (data-focus-user 高亮此用户, 单个 user node + server)
+    - 侧栏: SideStats (8 行 key-value → 4 行垂直 stat: 状态/限速/过期/流量/创建/活跃 — 但合并到 6 行紧凑)
+    - OS Tabs 保留 (5 个 mobileconfig / strongSwan / linux / android-native / ca)
+    - Operations 行保留 (重置密码 / 停用 / 删除)
 
   历史:
-    - v2.86-PR12.19: 5 个 OS tabs + mobileconfig 按系统切换
+    - v2.86-PR12.20: 5 OS tabs + hint 二行
+    - v2.86-PR12.19: 5 OS tabs
 */}}
 
-<hgroup class="mb-0">
-  <h1>{{.User.Username}}</h1>
-  <p>ID #{{.User.ID}}</p>
-</hgroup>
+<header class="page-header">
+  <hgroup>
+    <h1>{{.User.Username}}</h1>
+    <p>ID #{{.User.ID}}{{if .User.Note}} · {{.User.Note}}{{end}}</p>
+  </hgroup>
+  <div class="page-meta">
+    {{if .User.Enabled}}<span class="badge ok">启用</span>{{else}}<span class="badge danger">停用</span>{{end}}
+    {{if gt .User.SpeedLimitMbps 0}}<span class="badge">{{.User.SpeedLimitMbps}} Mbps</span>{{end}}
+  </div>
+</header>
 
-{{if .Flash}}<div class="banner-ok alert-success">{{.Flash}}</div>{{end}}
-{{if .NewPassword}}<div class="banner-warn alert-warn">用户密码已重置:<code>{{.NewPassword}}</code><small>(仅显示这一次,请记录后再关闭)</small></div>{{end}}
+{{if .Flash}}<div class="banner-warn alert-warn">{{.Flash}}</div>{{end}}
+{{if .NewPassword}}
+<div class="banner-warn alert-warn">
+  <div>
+    <strong>用户密码已重置:</strong><code>{{.NewPassword}}</code>
+    <small>(仅显示这一次,请记录后再关闭)</small>
+  </div>
+</div>
+{{end}}
 {{if .Error}}<div class="banner-danger alert-danger">{{.Error}}</div>{{end}}
 
-<article>
-  <table class="compact">
-    <tbody>
-      <tr>
-        <th>状态</th>
-        <td>
-          {{if .User.Enabled}}<span class="badge ok">启用</span>
-          {{else}}<span class="badge danger">停用</span>{{end}}
-        </td>
-      </tr>
-      <tr><th>限速</th><td>{{if eq .User.SpeedLimitMbps 0}}不限{{else}}{{.User.SpeedLimitMbps}} Mbps{{end}}</td></tr>
-      <tr><th>过期</th><td>{{if eq .User.ExpiresAt 0}}永不过期{{else}}{{formatTime .User.ExpiresAt}}{{end}}</td></tr>
-      <tr><th>流量</th><td>↓ {{formatBytes .User.BytesInTotal}} / ↑ {{formatBytes .User.BytesOutTotal}}</td></tr>
-      <tr><th>创建于</th><td>{{formatTime .User.CreatedAt}}</td></tr>
-      <tr><th>最后活跃</th><td>{{if eq .User.LastUsedAt 0}}<span class="text-muted">从未</span>{{else}}{{formatTime .User.LastUsedAt}}{{end}}</td></tr>
-      <tr><th>备注</th><td>{{.User.Note}}</td></tr>
-    </tbody>
-  </table>
-</article>
+{{/* v2.86-PR12.21: dashboard-grid 主舞台 = topology(此用户聚焦) + 侧栏 = side-stats */}}
+<div class="dashboard-grid">
+  <div class="dashboard-main">
 
-<h3 class="mt-4">客户端配置</h3>
-<article>
-  {{/* v2.86-PR12.20: 5 个 OS tab, 每个 label + hint 解释 */}}
-  <div class="os-tabs">
-    <button type="button" data-os-key="apple">
-      <span>iOS / macOS</span>
-      <span class="tab-hint">扫码最简</span>
-    </button>
-    <button type="button" data-os-key="android-native">
-      <span>Android 11+ 原生</span>
-      <span class="tab-hint">无需 app</span>
-    </button>
-    <button type="button" data-os-key="android-app">
-      <span>Android strongSwan</span>
-      <span class="tab-hint">旧版 / 进阶</span>
-    </button>
-    <button type="button" data-os-key="linux">
-      <span>Linux</span>
-      <span class="tab-hint">命令行</span>
-    </button>
-    <button type="button" data-os-key="ca">
-      <span>CA 证书</span>
-      <span class="tab-hint">手动验证</span>
-    </button>
-  </div>
+    {{/* 拓扑画布 (此用户聚焦) */}}
+    <div class="topology"
+         data-server-addr="{{.ServerAddr}}"
+         data-server-state="{{if .User.Enabled}}ok{{else}}warn{{end}}"
+         data-clients='[{{jsonOneClient .User}}]'
+         data-focus-user="{{.User.Username}}"
+         data-height="280">
+    </div>
 
-  {{/* v2.86-PR12.20: 所有有配置文件下载的 OS panel 都加 QR 卡 (iOS / strongSwan / Linux) */}}
-
-  <div class="os-panel" data-os-key="apple">
-    <div class="row" style="align-items: flex-start; gap: var(--ikev2-rhythm-5);">
-      <div class="stack-tight">
-        <p><strong>iOS / macOS 推荐:</strong>下载后用 Safari 打开,设置 → 通用 → VPN 与设备管理 → 安装描述文件。</p>
-        <a href="/users/{{.User.ID}}/mobileconfig" role="button">下载 .mobileconfig</a>
+    {{/* 客户端配置 */}}
+    <h3 class="mt-5">客户端配置</h3>
+    <article>
+      <div class="os-tabs">
+        <button type="button" data-os-key="apple">
+          <span>iOS / macOS</span>
+          <span class="os-hint">扫码最简</span>
+        </button>
+        <button type="button" data-os-key="android-native">
+          <span>Android 11+ 原生</span>
+          <span class="os-hint">无需 app</span>
+        </button>
+        <button type="button" data-os-key="android-app">
+          <span>Android strongSwan</span>
+          <span class="os-hint">旧版 / 进阶</span>
+        </button>
+        <button type="button" data-os-key="linux">
+          <span>Linux</span>
+          <span class="os-hint">命令行</span>
+        </button>
+        <button type="button" data-os-key="ca">
+          <span>CA 证书</span>
+          <span class="os-hint">手动验证</span>
+        </button>
       </div>
-      <div class="qr-card">
-        <img src="/users/{{.User.ID}}/mobileconfig.qr.png" alt="mobileconfig QR">
-        <span class="qr-hint">扫码下载</span>
+
+      <div class="os-panel" data-os-key="apple">
+        <div class="qr-card">
+          <div class="qr-img"><img src="/users/{{.User.ID}}/mobileconfig.qr.png" alt="mobileconfig QR"></div>
+          <div class="qr-info">
+            <div class="qr-title">iOS / macOS</div>
+            <p class="text-sm">用 Safari 打开链接 → 设置 → 通用 → VPN 与设备管理 → 安装描述文件。</p>
+            <a href="/users/{{.User.ID}}/mobileconfig" role="button">下载 .mobileconfig</a>
+          </div>
+        </div>
+      </div>
+
+      <div class="os-panel" data-os-key="android-native">
+        <h3>Android 11+ 系统原生</h3>
+        <p>无需第三方 app。</p>
+        <ol style="padding-left: var(--ikev2-rhythm-5); margin: 0;">
+          <li>设置 → 网络和互联网 → VPN → 添加 VPN</li>
+          <li>类型选 <strong>IKEv2/IPsec MSCHAPv2</strong></li>
+          <li>按 <a href="/users/{{.User.ID}}/android">此处参数</a> 填入 server / CN / 用户名 / 密码</li>
+          <li>保存 → 连接</li>
+        </ol>
+      </div>
+
+      <div class="os-panel" data-os-key="android-app">
+        <h3>Android strongSwan app</h3>
+        <p>用于旧版 Android 或需要更精细控制。</p>
+        <a href="/users/{{.User.ID}}/sswan" role="button">下载 .sswan 配置</a>
+        <p class="text-sm text-muted">导入 strongSwan app → 添加 profile → 选择 .sswan 文件。<small>(不含密码 — app 需手动输入)</small></p>
+      </div>
+
+      <div class="os-panel" data-os-key="linux">
+        <h3>Linux strongSwan</h3>
+        <p>命令行客户端配置。</p>
+        <a href="/users/{{.User.ID}}/sswan" role="button">下载 .sswan 配置</a>
+        <div class="terminal-card">
+          <div class="term-header">
+            <span class="term-title">Install</span>
+            <button type="button" class="copy-btn" data-copy-text="sudo cp {{.User.Username}}.conf /etc/swanctl/conf.d/&#10;sudo swanctl --load-all&#10;sudo swanctl -i {{.User.Username}}">复制</button>
+          </div>
+          <pre><code><span class="term-comment"># 1. 复制到 swanctl 配置目录</span>
+<span class="term-prompt">$</span> sudo cp {{.User.Username}}.conf /etc/swanctl/conf.d/
+<span class="term-comment"># 2. 加载所有配置</span>
+<span class="term-prompt">$</span> sudo swanctl --load-all
+<span class="term-comment"># 3. 启动连接</span>
+<span class="term-prompt">$</span> sudo swanctl -i {{.User.Username}}</code></pre>
+        </div>
+      </div>
+
+      <div class="os-panel" data-os-key="ca">
+        <h3>CA 证书</h3>
+        <p>Android 原生 / strongSwan app / Linux 客户端都要先装 CA 证书才能验证服务器身份。</p>
+        <a href="/ca.cert.pem" role="button">下载 ca.cert.pem</a>
+        <p class="text-sm text-muted">Android 需要单独安装 CA 证书;iOS / macOS 已通过 .mobileconfig 自动安装。</p>
+      </div>
+    </article>
+
+    {{/* 操作 */}}
+    <h3 class="mt-5">操作</h3>
+    <article>
+      <div class="row">
+        <form method="POST" action="/users/{{.User.ID}}/reset-password" onsubmit="return confirm('确认重置密码?当前正在连接的客户端会立即掉线,且原密码无法恢复。')">
+          <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+          <button type="submit" class="secondary">重置密码</button>
+        </form>
+        {{if .User.Enabled}}
+          <form method="POST" action="/users/{{.User.ID}}/disable" onsubmit="return confirm('确认停用?正在连接的客户端会被踢下线,无法撤销。')">
+            <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+            <button type="submit" class="secondary">停用</button>
+          </form>
+        {{else}}
+          <form method="POST" action="/users/{{.User.ID}}/enable">
+            <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+            <button type="submit">启用</button>
+          </form>
+        {{end}}
+        <a href="/users/{{.User.ID}}/delete" role="button" class="contrast">删除</a>
+      </div>
+    </article>
+
+  </div>
+
+  <aside class="dashboard-side">
+
+    {{/* v2.86-PR12.21: SideStats 6 行 (状态/限速/过期/流量/创建/最后活跃 + 备注) */}}
+    <div class="side-stats">
+      <div class="side-stat">
+        <span class="side-stat-label">状态</span>
+        <span class="side-stat-value {{if .User.Enabled}}ok{{else}}danger{{end}}">
+          {{if .User.Enabled}}● 启用{{else}}○ 停用{{end}}
+        </span>
+      </div>
+      <div class="side-stat">
+        <span class="side-stat-label">限速</span>
+        <span class="side-stat-value">
+          {{if eq .User.SpeedLimitMbps 0}}<span class="text-muted">不限</span>{{else}}{{.User.SpeedLimitMbps}} Mbps{{end}}
+        </span>
+      </div>
+      <div class="side-stat">
+        <span class="side-stat-label">过期</span>
+        <span class="side-stat-value {{if and (gt .User.ExpiresAt 0) (lt .User.ExpiresAt .NowUnix)}}danger{{end}}">
+          {{if eq .User.ExpiresAt 0}}<span class="text-muted">永不过期</span>{{else}}{{formatTime .User.ExpiresAt}}{{end}}
+        </span>
+      </div>
+      <div class="side-stat">
+        <span class="side-stat-label">↓ 入站</span>
+        <span class="side-stat-value">{{formatBytes .User.BytesInTotal}}</span>
+      </div>
+      <div class="side-stat">
+        <span class="side-stat-label">↑ 出站</span>
+        <span class="side-stat-value">{{formatBytes .User.BytesOutTotal}}</span>
+      </div>
+      <div class="side-stat">
+        <span class="side-stat-label">创建于</span>
+        <span class="side-stat-value text-muted">{{formatTime .User.CreatedAt}}</span>
+      </div>
+      <div class="side-stat">
+        <span class="side-stat-label">最后活跃</span>
+        <span class="side-stat-value text-muted">
+          {{if eq .User.LastUsedAt 0}}从未{{else}}{{formatTime .User.LastUsedAt}}{{end}}
+        </span>
       </div>
     </div>
-  </div>
 
-  <div class="os-panel" data-os-key="android-native">
-    <div class="stack-tight">
-      <p><strong>Android 11+ 系统原生支持:</strong>无需第三方 app。</p>
-      <ol style="padding-left: var(--ikev2-rhythm-5); margin: 0;">
-        <li>设置 → 网络和互联网 → VPN → 添加 VPN</li>
-        <li>类型选 <strong>IKEv2/IPsec MSCHAPv2</strong></li>
-        <li>按 <a href="/users/{{.User.ID}}/android">此处参数</a> 填入 server / CN / 用户名 / 密码</li>
-        <li>保存 → 连接</li>
-      </ol>
+    {{if .User.Note}}
+    <div class="side-stats">
+      <div class="side-stat" style="flex-direction: column; align-items: flex-start; gap: 0.25rem;">
+        <span class="side-stat-label">备注</span>
+        <span style="font-size: 0.875rem; color: var(--ikev2-fg);">{{.User.Note}}</span>
+      </div>
     </div>
-  </div>
-
-  <div class="os-panel" data-os-key="android-app">
-    <div class="stack-tight">
-      <p><strong>strongSwan Android app:</strong>用于旧版 Android 或需要更精细控制。</p>
-      <a href="/users/{{.User.ID}}/sswan" role="button">下载 .sswan 配置</a>
-      <p class="text-sm text-muted">导入 strongSwan app → 添加 profile → 选择 .sswan 文件。<small>(不含密码 — app 需手动输入)</small></p>
-    </div>
-  </div>
-
-  <div class="os-panel" data-os-key="linux">
-    <div class="stack-tight">
-      <p><strong>Linux strongSwan:</strong>命令行客户端配置。</p>
-      <a href="/users/{{.User.ID}}/sswan" role="button">下载 .sswan 配置</a>
-      <p class="text-sm text-muted">复制到 <code>/etc/swanctl/conf.d/{{.User.Username}}.conf</code> → <code>swanctl --load-all</code> → <code>swanctl -i {{.User.Username}}</code>。</p>
-    </div>
-  </div>
-
-  <div class="os-panel" data-os-key="ca">
-    <div class="stack-tight">
-      <p><strong>CA 证书:</strong>Android 原生 / strongSwan app / Linux 客户端都要先装 CA 证书才能验证服务器身份。</p>
-      <a href="/ca.cert.pem" role="button">下载 ca.cert.pem</a>
-      <p class="text-sm text-muted">Android 需要单独安装 CA 证书;iOS / macOS 已通过 .mobileconfig 自动安装。</p>
-    </div>
-  </div>
-</article>
-
-<h3 class="mt-4">操作</h3>
-<article>
-  <div class="row">
-    {{/* v2.86-PR12.20: confirm 文案统一 - "后果?无法撤销" */}}
-    <form method="POST" action="/users/{{.User.ID}}/reset-password" onsubmit="return confirm('确认重置密码?当前正在连接的客户端会立即掉线,且原密码无法恢复。')">
-      <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-      <button type="submit" class="secondary">重置密码</button>
-    </form>
-    {{if .User.Enabled}}
-      <form method="POST" action="/users/{{.User.ID}}/disable" onsubmit="return confirm('确认停用?正在连接的客户端会被踢下线,无法撤销。')">
-        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-        <button type="submit" class="secondary">停用</button>
-      </form>
-    {{else}}
-      <form method="POST" action="/users/{{.User.ID}}/enable">
-        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-        <button type="submit">启用</button>
-      </form>
     {{end}}
-    {{/* v2.86-PR12.20: 删除改为跳双确认页 (无浏览器 confirm) */}}
-    <a href="/users/{{.User.ID}}/delete" role="button" class="contrast">删除</a>
-  </div>
-</article>
+
+  </aside>
+</div>
 
 <p class="mt-4"><a href="/users">← 返回用户列表</a></p>

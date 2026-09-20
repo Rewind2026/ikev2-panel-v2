@@ -1,25 +1,29 @@
 {{/*
-  用户列表内容 - v2.86-PR12.20 重构 (UICraft critique-driven)
+  用户列表内容 - v2.86-PR12.21 (users-toolbar + page-header)
 
-  PR12.20 改动:
-    - 删除按钮改为跳双确认页 /users/{id}/delete (无浏览器 confirm)
-    - 行 actions 集中到最后一列 (.actions 列)
-    - 空状态 empty-state 保留 (PR12.19 已写)
-    - 表格加 responsive-stack (移动端堆叠)
-
-  历史:
-    - v2.86-PR12.19: responsive-stack + 空状态
+  PR12.21 改动:
+    - row-between → users-toolbar (新工具栏组件)
+    - hgroup → page-header (统一)
 */}}
-<div class="row-between">
-  <hgroup class="mb-0">
+<header class="page-header">
+  <hgroup>
     <h1>用户管理</h1>
     <p>{{len .Users}} 个账号</p>
   </hgroup>
-  <a href="/users/new" role="button">+ 新增用户</a>
-</div>
+  <div class="page-meta">
+    <a href="/users/new" role="button">+ 新增用户</a>
+  </div>
+</header>
 
-{{if .Flash}}<div class="banner-ok alert-success">{{.Flash}}</div>{{end}}
-{{if .NewPassword}}<div class="banner-warn alert-warn">用户密码已生成:<code>{{.NewPassword}}</code><small>(仅显示这一次,请记录后再关闭)</small></div>{{end}}
+{{if .Flash}}<div class="banner-warn alert-warn">{{.Flash}}</div>{{end}}
+{{if .NewPassword}}
+<div class="banner-warn alert-warn">
+  <div>
+    <strong>用户密码已生成:</strong><code>{{.NewPassword}}</code>
+    <small>(仅显示这一次,请记录后再关闭)</small>
+  </div>
+</div>
+{{end}}
 
 {{if .Users}}
 <article>
@@ -34,20 +38,20 @@
     <tbody>
     {{range .Users}}
       <tr>
-        <td data-label="ID">{{.ID}}</td>
+        <td data-label="ID">#{{.ID}}</td>
         <td data-label="用户名"><a href="/users/{{.ID}}">{{.Username}}</a></td>
         <td data-label="状态">
           {{if .Enabled}}<span class="badge ok">启用</span>
           {{else}}<span class="badge danger">停用</span>{{end}}
         </td>
         <td data-label="限速">{{if eq .SpeedLimitMbps 0}}不限{{else}}{{.SpeedLimitMbps}} Mbps{{end}}</td>
-        <td data-label="过期">{{if eq .ExpiresAt 0}}永不过期{{else}}{{formatTime .ExpiresAt}}{{end}}</td>
+        <td data-label="过期">{{if eq .ExpiresAt 0}}<span class="text-muted">永不过期</span>{{else}}{{formatTime .ExpiresAt}}{{end}}</td>
         <td data-label="累计流量">↓ {{formatBytes .BytesInTotal}} / ↑ {{formatBytes .BytesOutTotal}}</td>
         <td data-label="最后活跃">{{if eq .LastUsedAt 0}}<span class="text-muted">从未</span>{{else}}{{formatTime .LastUsedAt}}{{end}}</td>
         <td data-label="备注">{{.Note}}</td>
         <td data-label="操作" class="actions">
-          {{/* v2.86-PR12.20: 删除走双确认页 (GET /users/{id}/delete), 不再用浏览器 confirm() */}}
-          <a href="/users/{{.ID}}/delete" role="button" class="outline">删除</a>
+          <a href="/users/{{.ID}}" role="button" class="secondary outline" style="font-size: 0.75rem; padding: 0.25rem 0.5rem;">查看</a>
+          <a href="/users/{{.ID}}/delete" role="button" class="outline" style="font-size: 0.75rem; padding: 0.25rem 0.5rem;">删除</a>
         </td>
       </tr>
     {{end}}

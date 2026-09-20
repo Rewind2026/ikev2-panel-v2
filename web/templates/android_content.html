@@ -1,80 +1,76 @@
 {{/*
-  Android 原生客户端配置页内容 - P1-B + Pico v2
+  Android 原生客户端配置页 - v2.86-PR12.21 (TerminalCard + 步骤)
+
+  PR12.21 改动:
+    - 步骤用 dashboard-grid 左侧,参数 TerminalCard 右侧
+    - 复制按钮 .copy-btn (terminal-card 自动)
 */}}
-<hgroup>
-  <h1>Android 原生客户端配置</h1>
-  <p>用户：<strong>{{.User.Username}}</strong> | <a href="/users/{{.User.ID}}">返回用户详情</a></p>
-</hgroup>
+<header class="page-header">
+  <hgroup>
+    <h1>Android 原生客户端</h1>
+    <p>用户 {{.User.Username}} · IKEv2/IPsec MSCHAPv2</p>
+  </hgroup>
+  <div class="page-meta">
+    <a href="/users/{{.User.ID}}" role="button" class="secondary">← 返回用户详情</a>
+  </div>
+</header>
 
-{{if .Error}}<div class="alert-danger"><strong>{{.Error}}</strong></div>{{end}}
-{{if .Flash}}<div class="alert-success"><strong>{{.Flash}}</strong></div>{{end}}
+{{if .Error}}<div class="banner-danger alert-danger">{{.Error}}</div>{{end}}
+{{if .Flash}}<div class="banner-warn alert-warn">{{.Flash}}</div>{{end}}
 
-<h3>在 Android 上的操作步骤</h3>
-<ol>
-  <li>设置 → 网络和互联网 → <strong>VPN</strong> → 右上角 <strong>+</strong></li>
-  <li>类型选 <strong>"IKEv2/IPSec MSCHAPv2"</strong>（Android 11-15 默认第一个选项）</li>
-  <li>按下表填写（<strong>不需要</strong>任何预共享密钥 PSK）</li>
-  <li>保存 → 点连接 → 通知栏出现钥匙图标 = 连上</li>
-</ol>
+<div class="dashboard-grid">
+  <div class="dashboard-main">
 
-<h3>连接参数</h3>
-<figure>
-  <table class="compact striped">
-    <tbody>
-      <tr><th align="left">名称（自定义）</th><td><code>IKEv2 VPN</code> 任意文字</td></tr>
-      <tr>
-        <th align="left">服务器地址</th>
-        <td>
-          <input type="text" value="{{.ServerAddr}}" readonly
-                 style="font-family:monospace;width:280px"
-                 onclick="this.select()">
-        </td>
-      </tr>
-      <tr>
-        <th align="left">IPSec 标识符（IPsec identifier）</th>
-        <td>
-          <input type="text" value="{{.User.Username}}" readonly
-                 style="font-family:monospace;width:280px"
-                 onclick="this.select()">
-          <p style="color:var(--pico-muted-color);font-size:0.85em;margin:0.25rem 0 0">
-            EAP-MSCHAPv2 模式下填用户名（与 Username 同值）。
-            留空也行：AOSP 会默认用 Username 字段。
-            <br>
-            注意：与 iOS 的 <code>RemoteIdentifier</code>（填 server CN）不同——这里填的是 <strong>client 身份</strong>，
-            不是 server 身份。
-          </p>
-        </td>
-      </tr>
-      <tr><th align="left">用户名</th><td><code>{{.User.Username}}</code></td></tr>
-      <tr>
-        <th align="left">密码</th>
-        <td>
-          <code>{{.User.Password}}</code>
-          <small style="color:var(--pico-muted-color)">（iOS mobileconfig 同样使用这个密码）</small>
-        </td>
-      </tr>
-    </tbody>
-  </table>
-</figure>
+    <h3>Android 上的步骤</h3>
+    <article>
+      <ol style="padding-left: var(--ikev2-rhythm-5); line-height: 1.8;">
+        <li>设置 → <strong>网络和互联网</strong> → <strong>VPN</strong> → 右上角 <strong>+</strong></li>
+        <li>类型选 <strong>"IKEv2/IPSec MSCHAPv2"</strong>(Android 11-15 默认第一个选项)</li>
+        <li>按下表填写(<strong>不需要</strong>任何预共享密钥 PSK)</li>
+        <li>保存 → 点连接 → 通知栏出现钥匙图标 = 连上</li>
+      </ol>
+    </article>
 
-<h3>证书信任</h3>
-<article>
-  <p>Android 11+ 原生客户端 <strong>强烈建议</strong> 安装 CA 根证书（自签模式必须装，否则 server cert 校验会失败；LE 模式可跳过）：</p>
-  <ol>
-    <li>下载 <a href="/ca.cert.pem">ca.cert.pem</a></li>
-    <li>设置 → 安全 → 加密与凭据 → 安装证书 → <strong>CA 证书</strong></li>
-    <li>Android 7+ 会弹警告"网络流量可能被监视"——这是 CA 证书的通用提示，本面板自签 CA 受控可忽略</li>
-  </ol>
-</article>
+    <h3 class="mt-5">CA 证书信任</h3>
+    <article>
+      <p>Android 11+ 原生客户端 <strong>强烈建议</strong> 安装 CA 根证书(自签模式必须装,否则 server cert 校验会失败;LE 模式可跳过):</p>
+      <ol style="padding-left: var(--ikev2-rhythm-5); line-height: 1.8;">
+        <li>下载 <a href="/ca.cert.pem">ca.cert.pem</a></li>
+        <li>设置 → <strong>安全</strong> → <strong>加密与凭据</strong> → <strong>安装证书</strong> → <strong>CA 证书</strong></li>
+        <li>Android 7+ 会弹警告"网络流量可能被监视"——这是 CA 证书的通用提示,本面板自签 CA 受控可忽略</li>
+      </ol>
+    </article>
 
-<h3>为什么不用 strongSwan app？</h3>
-<article>
-  <p style="color:var(--pico-muted-color)">
-    Android 11+ 系统设置的 <code>IKEv2/IPSec MSCHAPv2</code> 选项原生支持 EAP-MSCHAPv2 + 证书认证
-    （AOSP 源码 <code>android.net.Ikev2VpnProfile.Builder.setAuthUsernamePassword</code>），
-    跟 iOS 17/18 的 mobileconfig 用同一套认证协议（<code>eap-mschapv2</code>）。
-    不装任何第三方 app 就能直接拨号。
-  </p>
-</article>
+  </div>
 
-<p><a href="/users/{{.User.ID}}">← 返回用户详情</a></p>
+  <aside class="dashboard-side">
+
+    <h3>连接参数</h3>
+    <div class="terminal-card">
+      <div class="term-header">
+        <span class="term-title">手动填入</span>
+      </div>
+<pre><code><span class="term-comment"># 名称(自定义)</span>
+<span class="term-key">name</span>     = IKEv2 VPN
+
+<span class="term-comment"># 服务器</span>
+<span class="term-key">server</span>   = {{.ServerAddr}}
+
+<span class="term-comment"># IPSec 标识符 = 用户名 (EAP-MSCHAPv2)</span>
+<span class="term-key">ipsec_id</span> = {{.User.Username}}
+
+<span class="term-comment"># 凭据</span>
+<span class="term-key">username</span> = {{.User.Username}}
+<span class="term-key">password</span> = {{.User.Password}}</code></pre>
+    </div>
+
+    <button type="button" class="copy-btn mt-2"
+            data-copy-text="name: IKEv2 VPN&#10;server: {{.ServerAddr}}&#10;ipsec_id: {{.User.Username}}&#10;username: {{.User.Username}}&#10;password: {{.User.Password}}"
+            style="width: 100%; justify-content: center;">
+      复制全部参数
+    </button>
+
+  </aside>
+</div>
+
+<p class="mt-4"><a href="/users/{{.User.ID}}">← 返回用户详情</a></p>

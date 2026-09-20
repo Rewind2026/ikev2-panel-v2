@@ -1,48 +1,76 @@
 {{/*
-  用户删除双确认页 - v2.86-PR12.20 重构 (UICraft critique-driven)
+  用户删除双确认页 - v2.86-PR12.21 (TerminalCard 副作用 + SideStats 用户信息)
 
-  v2.86-PR12.20 改动:
-    - 列 4 个不可撤销副作用 (DB / swanctl conf / active SA / 审计)
-    - 取消按钮放左边, 确认放右边 (破坏性操作在末端)
-    - 确认按钮文案"确认删除 xxx (不可撤销)" 醒目
-    - 无浏览器 confirm() — 整个页面就是 confirm
+  v2.86-PR12.21 改动:
+    - hgroup → page-header
+    - 4 个副作用放进 terminal-card (代码风, 让"破坏性命令"一眼看出)
+    - 用户信息用 side-stats 4 行紧凑(替代旧 table)
 */}}
 
-<hgroup>
-  <h1>确认删除用户</h1>
-  <p>这一步是双确认的第二步</p>
-</hgroup>
+<header class="page-header">
+  <hgroup>
+    <h1>确认删除用户</h1>
+    <p>这是双确认的第二步</p>
+  </hgroup>
+  <div class="page-meta">
+    <a href="/users/{{.User.ID}}" role="button" class="secondary">← 取消返回</a>
+  </div>
+</header>
 
-<article>
-  <div class="banner-danger alert-danger">
-    <strong>⚠ 此操作不可撤销</strong>
-    <p>删除用户 <code>{{.User.Username}}</code> 会产生以下副作用:</p>
-    <ul style="margin: var(--ikev2-rhythm-2) 0 0; padding-left: var(--ikev2-rhythm-5);">
-      <li>数据库中此用户的记录永久删除</li>
-      <li>强删 swanctl 配置 <code>/etc/swanctl/conf.d/{{.User.Username}}.conf</code> 并触发 reload</li>
-      <li>删除限速文件 <code>/var/lib/ikev2-panel/limits/{{.User.Username}}</code></li>
-      <li>正在连接的 SA 被强制下线</li>
-      <li>审计日志保留删除事件,但用户记录消失</li>
-    </ul>
+<div class="dashboard-grid">
+  <div class="dashboard-main">
+    <article>
+      <div class="banner-danger alert-danger">
+        <strong>⚠ 此操作不可撤销</strong>
+        <p>删除用户 <code>{{.User.Username}}</code> 会触发以下操作:</p>
+      </div>
+
+      <div class="terminal-card">
+        <div class="term-header">
+          <span class="term-title">副作用 (4 个,全部不可撤销)</span>
+        </div>
+<pre><code><span class="term-prompt">$</span> sqlite3 panel.db <span class="term-string">"DELETE FROM users WHERE id={{.User.ID }}"</span>
+<span class="term-prompt">$</span> rm /etc/swanctl/conf.d/<span class="term-string">{{.User.Username}}.conf</span>
+<span class="term-prompt">$</span> swanctl --load-all
+<span class="term-prompt">$</span> rm /var/lib/ikev2-panel/limits/<span class="term-string">{{.User.Username}}</span></code></pre>
+      </div>
+
+      <p class="text-sm text-muted">
+        <strong>注意:</strong>正在连接的 SA 会被强制下线;审计日志会保留删除记录,但 user 记录本身永久消失。
+      </p>
+
+      <div class="row mt-4" style="justify-content: space-between;">
+        <a href="/users/{{.User.ID}}" role="button" class="secondary">取消</a>
+        <form method="POST" action="/users/{{.User.ID}}/delete/confirm">
+          <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+          <button type="submit" class="contrast">确认删除 ({{.User.Username}})</button>
+        </form>
+      </div>
+    </article>
   </div>
 
-  <table class="compact" style="margin-top: var(--ikev2-rhythm-4);">
-    <tbody>
-      <tr><th>用户名</th><td><code>{{.User.Username}}</code></td></tr>
-      <tr><th>ID</th><td>{{.User.ID}}</td></tr>
-      <tr><th>当前状态</th><td>
-        {{if .User.Enabled}}<span class="badge ok">启用</span>
-        {{else}}<span class="badge danger">停用</span>{{end}}
-      </td></tr>
-      <tr><th>备注</th><td>{{.User.Note}}</td></tr>
-    </tbody>
-  </table>
-
-  <div class="row mt-4" style="justify-content: space-between;">
-    <a href="/users/{{.User.ID}}" role="button" class="secondary">取消</a>
-    <form method="POST" action="/users/{{.User.ID}}/delete/confirm">
-      <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-      <button type="submit" class="contrast">确认删除 ({{.User.Username}})</button>
-    </form>
-  </div>
-</article>
+  <aside class="dashboard-side">
+    <div class="side-stats">
+      <div class="side-stat">
+        <span class="side-stat-label">用户名</span>
+        <span class="side-stat-value"><code>{{.User.Username}}</code></span>
+      </div>
+      <div class="side-stat">
+        <span class="side-stat-label">ID</span>
+        <span class="side-stat-value">#{{.User.ID}}</span>
+      </div>
+      <div class="side-stat">
+        <span class="side-stat-label">当前状态</span>
+        <span class="side-stat-value {{if .User.Enabled}}ok{{else}}danger{{end}}">
+          {{if .User.Enabled}}● 启用{{else}}○ 停用{{end}}
+        </span>
+      </div>
+      {{if .User.Note}}
+      <div class="side-stat" style="flex-direction: column; align-items: flex-start; gap: 0.25rem;">
+        <span class="side-stat-label">备注</span>
+        <span style="font-size: 0.875rem;">{{.User.Note}}</span>
+      </div>
+      {{end}}
+    </div>
+  </aside>
+</div>

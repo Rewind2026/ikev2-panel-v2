@@ -1,45 +1,38 @@
 {{/*
-  v2.85-PR8(U11) 操作日志只读页 - v2.86-PR12.20 重构 (UICraft critique-driven)
+  v2.85-PR8(U11) 操作日志只读页 - v2.86-PR12.21 重构 (TimelineRow)
 
-  PR12.20 改动:
-    - 详情列从一坨 k=v 字符串 → dl.kv-list (双列 key/value, 等宽字体)
-    - 时间列改用 formatUnixNano (已有)
-    - 空状态保留 (empty-state 推动行动)
+  PR12.21 改动:
+    - 表 → TimelineRow 单列时间线 (行高 56px, PR12.20 的 4 列表行高 200px 太重)
+    - 详情列从 dl.kv-list (垂直 8 行) → 时间线同行 inline (紧凑)
+    - 严重性 → timeline-dot 颜色 (ok/warn/danger/info)
+    - 每行 hover 高亮 (timeline-row:hover)
 
   历史:
+    - v2.86-PR12.20: dl.kv-list (双列 key-value)
     - v2.86-PR12.19: empty-state
 */}}
-<hgroup>
-  <h1>操作日志</h1>
-  <p>最近 {{len .Events}} 条</p>
-</hgroup>
+<header class="page-header">
+  <hgroup>
+    <h1>操作日志</h1>
+    <p>最近 {{len .Events}} 条</p>
+  </hgroup>
+</header>
 
 {{if .Events}}
-<article>
-  <table class="compact responsive-stack">
-    <thead>
-      <tr><th>时间</th><th>操作者</th><th>事件</th><th>详情</th></tr>
-    </thead>
-    <tbody>
-    {{range .Events}}
-      <tr>
-        <td data-label="时间"><code>{{formatUnixNano .Timestamp}}</code></td>
-        <td data-label="操作者">{{.Actor}}</td>
-        <td data-label="事件"><code>{{.Event}}</code></td>
-        <td data-label="详情">
-          {{/* v2.86-PR12.20: k=v 串 → dl.kv-list (双列 key/value) */}}
-          {{$kv := parseAuditDetails .Details}}
-          {{if $kv}}
-              <dl class="kv-list">
-              {{range $kv}}<dt>{{.K}}</dt><dd>{{.V}}</dd>{{end}}
-              </dl>
-            {{else}}<span class="text-muted">—</span>{{end}}
-        </td>
-      </tr>
-    {{end}}
-    </tbody>
-  </table>
-</article>
+<div class="timeline">
+  {{range .Events}}
+  <div class="timeline-row">
+    <span class="timeline-dot {{auditSeverity .Event}}"></span>
+    <span class="timeline-time">{{formatUnixNano .Timestamp}}</span>
+    <span class="timeline-event"><code>{{.Event}}</code></span>
+    <span class="timeline-actor">{{.Actor}}</span>
+    <span class="timeline-detail">
+      {{$kv := parseAuditDetails .Details}}
+      {{range $kv}}<span class="kv-inline"><span class="k">{{.K}}</span>{{.V}}</span> {{end}}
+    </span>
+  </div>
+  {{end}}
+</div>
 {{else}}
 <article>
   <div class="empty-state">
