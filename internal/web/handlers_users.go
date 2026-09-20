@@ -67,7 +67,7 @@ func (s *Server) handleUsersList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.RenderPage(w, "users_list", usersListData{
-		PageMeta:    PageMeta{Page: "users_list", Title: "用户管理", AdminUsername: admin.Username, CSRFToken: csrfTokenOf(sess)},
+		PageMeta:    PageMeta{Page: "users_list", Title: "用户管理", PageKey: "users", AdminUsername: admin.Username, CSRFToken: csrfTokenOf(sess)},
 		Users:       users,
 		NewPassword: newPassword,
 		Flash:       msg,
@@ -79,7 +79,7 @@ func (s *Server) handleUserNew(w http.ResponseWriter, r *http.Request) {
 	admin, _ := AdminFrom(r.Context())
 	sess, _ := SessionFrom(r.Context())
 	s.RenderPage(w, "user_new", usersNewData{
-		PageMeta:   PageMeta{Page: "user_new", Title: "新增用户", AdminUsername: admin.Username, CSRFToken: csrfTokenOf(sess)},
+		PageMeta:   PageMeta{Page: "user_new", Title: "新增用户", PageKey: "users", AdminUsername: admin.Username, CSRFToken: csrfTokenOf(sess)},
 		Enabled:    true,
 		SpeedLimit: 10,
 	})
@@ -257,7 +257,7 @@ func (s *Server) handleUserDetail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.RenderPage(w, "user_detail", userDetailData{
-		PageMeta:    PageMeta{Page: "user_detail", Title: u.Username, AdminUsername: admin.Username, CSRFToken: csrfTokenOf(sess)},
+		PageMeta:    PageMeta{Page: "user_detail", Title: u.Username, PageKey: "users", AdminUsername: admin.Username, CSRFToken: csrfTokenOf(sess)},
 		User:        u,
 		NewPassword: newPassword,
 		Flash:       msg,
@@ -410,7 +410,7 @@ func (s *Server) handleUserDeleteConfirmPage(w http.ResponseWriter, r *http.Requ
 	admin, _ := AdminFrom(r.Context())
 	sess, _ := SessionFrom(r.Context())
 	s.RenderPage(w, "user_delete_confirm", userDeleteConfirmData{
-		PageMeta: PageMeta{Page: "user_delete_confirm", Title: "删除确认", AdminUsername: admin.Username, CSRFToken: csrfTokenOf(sess)},
+		PageMeta: PageMeta{Page: "user_delete_confirm", Title: "删除确认", PageKey: "users", AdminUsername: admin.Username, CSRFToken: csrfTokenOf(sess)},
 		User:     u,
 	})
 }

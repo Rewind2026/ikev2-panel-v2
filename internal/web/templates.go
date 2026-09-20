@@ -185,6 +185,9 @@ type PageMeta struct {
 	// 这样 layout/nav 模板里用 {{.AdminUsername}} 不会因为某个 page data 没这字段而报错。
 	AdminUsername string
 	CSRFToken     string
+
+	// v2.86-PR12.19:nav active 标记的短 key (e.g. "home" / "users" / "audit" / "login")
+	PageKey string
 }
 
 // RenderPage 渲染完整页面（两段渲染模式 P1-B 最终方案）：

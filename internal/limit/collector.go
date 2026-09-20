@@ -68,7 +68,7 @@ func NewCollector(s SwanctlManager, st UserStore, logger *slog.Logger) *Collecto
 		swanctl:   s,
 		store:     st,
 		logger:    logger,
-		period:    30 * time.Second, // v2.86-PR12.18 临时改 30s 验证,后续改回 5m
+		period:    5 * time.Minute, // v2.86-PR12.18 临时改 30s 验证,PR12.19 改回 5m
 		prevBytes: make(map[string][2]int64),
 	}
 }
@@ -136,11 +136,10 @@ func (c *Collector) collect(ctx context.Context) {
 		}
 		user := sa.RemoteID
 		if user == "" {
-			// v2.86-PR12.18 调试:RemoteID 空时 dump 整个 SA,排查 list-sas 与 ike-updown 的字段差异
-			c.logger.Info("collector: sa.RemoteID empty, dump",
-				"uniqueid", sa.UniqueID, "state", sa.IkeState,
-				"remote", sa.RemoteAddr, "remote_id_raw", sa.RemoteID,
-				"children", len(sa.Children))
+			// v2.86-PR12.18 fix 后正常情况不会到这里。理论上 list-sas parser bug
+			// 或字段格式变更时会再次发生,留 log 帮助下次定位。
+			c.logger.Debug("collector: sa.RemoteID empty, skip",
+				"uniqueid", sa.UniqueID, "state", sa.IkeState)
 			continue
 		}
 		for childName, child := range sa.Children {
@@ -196,6 +195,6 @@ func (c *Collector) collect(ctx context.Context) {
 			continue
 		}
 	}
-	c.logger.Info("collector: stats collected",
+	c.logger.Debug("collector: stats collected",
 		"users", len(deltaByUser), "sas", len(sas), "tracked_keys", len(c.prevBytes))
 }

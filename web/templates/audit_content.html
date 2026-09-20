@@ -1,35 +1,45 @@
 {{/*
-  v2.85-PR8(U11):操作日志只读页。
-  显示最近 100 条 audit_log。
+  v2.85-PR8(U11) 操作日志只读页 — v2.86-PR12.19 重构
+
+  - 空状态改为 empty-state 推动行动
 */}}
 <hgroup>
   <h1>操作日志</h1>
-  <p>最近 100 条(v2.85-PR8)</p>
+  <p>最近 100 条</p>
 </hgroup>
 
-{{if not .Events}}
+{{if .Events}}
 <article>
-  <p><em>暂无日志</em></p>
-  <p><small>用户创建 / 删除、阿里云凭证变更、DDNS 切换都会自动写入审计。详情见 <code>docs/TROUBLESHOOTING.md</code>。</small></p>
+  <table class="compact">
+    <thead>
+      <tr><th>时间</th><th>操作者</th><th>事件</th><th>详情</th></tr>
+    </thead>
+    <tbody>
+    {{range .Events}}
+      <tr>
+        <td><code>{{formatUnixNano .Timestamp}}</code></td>
+        <td>{{.Actor}}</td>
+        <td><code>{{.Event}}</code></td>
+        <td><code>{{.Details}}</code></td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
 </article>
 {{else}}
-<figure>
-<table class="compact striped">
-  <thead>
-    <tr><th>时间</th><th>操作者</th><th>事件</th><th>详情</th></tr>
-  </thead>
-  <tbody>
-  {{range .Events}}
-    <tr>
-      <td><code>{{formatUnixNano .Timestamp}}</code></td>
-      <td><code>{{.Actor}}</code></td>
-      <td><code>{{.Event}}</code></td>
-      <td><code>{{.Details}}</code></td>
-    </tr>
-  {{end}}
-  </tbody>
-</table>
-</figure>
+<article>
+  <div class="empty-state">
+    <svg class="empty-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+      <polyline points="14 2 14 8 20 8"/>
+      <line x1="9" y1="13" x2="15" y2="13"/>
+      <line x1="9" y1="17" x2="13" y2="17"/>
+    </svg>
+    <div class="empty-title">暂无日志</div>
+    <div class="empty-hint">用户创建 / 删除、阿里云凭证变更、DDNS 切换、SA 生命周期事件都会自动写入审计。
+       详情见 <a href="/docs/TROUBLESHOOTING.md" target="_blank" rel="noopener">TROUBLESHOOTING</a>。</div>
+  </div>
+</article>
 {{end}}
 
 <p><a href="/">← 返回首页</a></p>

@@ -1,18 +1,19 @@
 {{/*
-  web/templates/layout.html (P1-B 最终方案 v2)
+  web/templates/layout.html (v2.86-PR12.19 重构)
 
-  采用"两段渲染"模式：
+  采用"两段渲染"模式:
     1. handlers 先 ExecuteTemplate(buf, "<page>_content.html", data)
        渲染子模板到 buffer,得到 string
     2. 把 string 包装成 template.HTML,塞到 data.BodyHTML
     3. 再 ExecuteTemplate(buf, "layout", data) 渲染外壳
 
-  这样彻底避免 Go html/template 同名 define 覆盖问题
-  （每个子模板是独立的 .html 文件,独立渲染,不共享 define 命名空间）。
-
-  layout 内的 {{.BodyHTML}} 必须是 template.HTML 类型才能不被转义。
-  安全：所有页面都是 Go 后端 render 的,不含用户原始输入（mobileconfig/QR 走单独 handler）,
-  所以不需要 HTML 转义。
+  v2.86-PR12.19 改动 (UICraft critique-driven):
+    - nav 结构改为 .nav-links + .nav-actions, 加 .active class 支持
+    - 主题切换按钮: 🌓 emoji → 内联 SVG 太阳/月亮 (icon-sun / icon-moon)
+    - 加 data-page 属性给 body (用于 active nav 标记)
+    - 加 dismissable script (.dismissable .dismiss 按钮点击移除)
+    - 加 onbeforeunload 风格: 不, 改用 localStorage 让 banner 状态持久
+    - 加 OS tabs 切换 script (用户详情页 mobileconfig 按系统)
 */}}
 
 {{define "layout"}}<!DOCTYPE html>
@@ -24,53 +25,110 @@
     <link rel="stylesheet" href="/static/css/pico.min.css">
     <link rel="stylesheet" href="/static/style.css">
     <script>
-      // Dark mode 切换（Pico v2 用 data-theme 控制 + localStorage 保存偏好）.
-      // 加载顺序：先读偏好 → 再加载 CSS，避免页面"白闪"再变暗。
+      // v2.86-PR12.19: 浅/深色模式切换 (Pico v2 data-theme + localStorage 持久化)
+      // 加载顺序: 先读偏好 → 再加载 CSS,避免页面"白闪"再变暗
       (function () {
         var stored = null;
-        try { stored = localStorage.getItem("theme"); } catch (e) {}
+        try { stored = localStorage.getItem("ikev2-theme"); } catch (e) {}
         if (!stored) {
           stored = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches
             ? "dark" : "light";
         }
         document.documentElement.setAttribute("data-theme", stored);
       })();
-    </script>
-  </head>
-  <body>
-    {{template "nav" .}}
-    <main class="container">
-      {{.BodyHTML}}
-    </main>
-    <script>
-      // Theme 切换按钮绑定 — 跟 layout.html 的 .theme-toggle 配对。
+
+      // v2.86-PR12.19: 当前页 active nav 标记
       document.addEventListener("DOMContentLoaded", function () {
+        var page = document.body.getAttribute("data-page") || "";
+        document.querySelectorAll(".nav-links a[data-page-key]").forEach(function (a) {
+          if (a.getAttribute("data-page-key") === page) a.classList.add("active");
+        });
+
+        // 主题切换按钮
         document.querySelectorAll(".theme-toggle").forEach(function (btn) {
           btn.addEventListener("click", function () {
             var cur = document.documentElement.getAttribute("data-theme") || "light";
             var next = cur === "dark" ? "light" : "dark";
             document.documentElement.setAttribute("data-theme", next);
-            try { localStorage.setItem("theme", next); } catch (e) {}
+            try { localStorage.setItem("ikev2-theme", next); } catch (e) {}
+          });
+        });
+
+        // v2.86-PR12.19: dismissable banner (.dismissable .dismiss 点击 → 移除 + localStorage)
+        document.querySelectorAll(".dismissable").forEach(function (el) {
+          var key = el.getAttribute("data-dismiss-key");
+          if (key) {
+            try { if (localStorage.getItem("ikev2-dismiss-" + key) === "1") el.remove(); } catch (e) {}
+          }
+          var btn = el.querySelector(".dismiss");
+          if (btn) {
+            btn.addEventListener("click", function () {
+              if (key) { try { localStorage.setItem("ikev2-dismiss-" + key, "1"); } catch (e) {} }
+              el.remove();
+            });
+          }
+        });
+
+        // v2.86-PR12.19: OS tabs (用户详情页 mobileconfig 按系统切换)
+        document.querySelectorAll(".os-tabs").forEach(function (tabs) {
+          var stored = null;
+          try { stored = localStorage.getItem("ikev2-os-tab"); } catch (e) {}
+          var defaultKey = tabs.querySelector("button")?.getAttribute("data-os-key");
+          var activeKey = stored || defaultKey;
+          function activate(key) {
+            tabs.querySelectorAll("button").forEach(function (b) {
+              b.classList.toggle("active", b.getAttribute("data-os-key") === key);
+            });
+            var root = tabs.parentElement;
+            root.querySelectorAll(".os-panel").forEach(function (p) {
+              p.classList.toggle("active", p.getAttribute("data-os-key") === key);
+            });
+          }
+          if (activeKey) activate(activeKey);
+          tabs.querySelectorAll("button").forEach(function (btn) {
+            btn.addEventListener("click", function () {
+              var key = btn.getAttribute("data-os-key");
+              try { localStorage.setItem("ikev2-os-tab", key); } catch (e) {}
+              activate(key);
+            });
           });
         });
       });
     </script>
+  </head>
+  <body data-page="{{.PageKey}}">
+    {{template "nav" .}}
+    <main class="container">
+      {{.BodyHTML}}
+    </main>
   </body>
 </html>
 {{end}}
 
 {{define "nav"}}{{if .AdminUsername}}<header class="page-nav">
   <nav>
-    <a href="/"><strong>IKEv2 Panel</strong></a>
-    <a href="/">首页</a>
-    <a href="/users">用户</a>
-    <a href="/audit">日志</a>
+    <a href="/" class="brand" data-page-key="home">IKEv2 Panel</a>
+    <span class="nav-links">
+      <a href="/" data-page-key="home">首页</a>
+      <a href="/users" data-page-key="users">用户</a>
+      <a href="/audit" data-page-key="audit">日志</a>
+    </span>
     <span class="spacer"></span>
-    <button type="button" class="theme-toggle" aria-label="切换主题" title="切换主题">🌓</button>
-    <span class="admin-info">管理员：{{.AdminUsername}}</span>
-    <form method="POST" action="/logout">
-      <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-      <button type="submit" class="link">登出</button>
-    </form>
+    <span class="nav-actions">
+      <span class="admin-info">{{.AdminUsername}}</span>
+      <button type="button" class="theme-toggle" aria-label="切换深色 / 浅色模式" title="切换深色 / 浅色模式">
+        <svg class="icon-moon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+        </svg>
+        <svg class="icon-sun" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="4"/>
+          <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/>
+        </svg>
+      </button>
+      <form method="POST" action="/logout">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <button type="submit" class="link">登出</button>
+      </form>
+    </span>
   </nav>
 </header>{{end}}{{end}}

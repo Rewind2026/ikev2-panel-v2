@@ -32,7 +32,7 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.RenderPage(w, "audit", auditPageData{
-		PageMeta: PageMeta{Page: "audit", Title: "操作日志", AdminUsername: admin.Username, CSRFToken: csrfTokenOf(sess)},
+		PageMeta: PageMeta{Page: "audit", Title: "操作日志", PageKey: "audit", AdminUsername: admin.Username, CSRFToken: csrfTokenOf(sess)},
 		Events:   events,
 	})
 }

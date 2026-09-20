@@ -99,7 +99,7 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 	isDefaultPassword := loadIsDefaultPassword(s)
 
 	data := homeData{
-		PageMeta:          PageMeta{Page: "home", Title: "首页", AdminUsername: admin.Username, CSRFToken: csrfTokenOf(sess)},
+		PageMeta:          PageMeta{Page: "home", Title: "首页", PageKey: "home", AdminUsername: admin.Username, CSRFToken: csrfTokenOf(sess)},
 		TotalUsers:        total,
 		ActiveSAs:         activeSAs,
 		TotalActive:       totalActive,

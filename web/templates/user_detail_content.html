@@ -1,75 +1,119 @@
 {{/*
-  用户详情内容 - P1-B + Pico v2
+  用户详情内容 - v2.86-PR12.19 重构
+
+  - mobileconfig 按 OS 分类(iOS/macOS / Android 原生 / strongSwan / CA 证书)
+    使用 .os-tabs (用户上次选的 tab 用 localStorage 记忆,layout.html 已加 script)
+  - 状态徽章用 .badge
 */}}
 <hgroup>
   <h1>用户：{{.User.Username}}</h1>
   <p>ID #{{.User.ID}}</p>
 </hgroup>
 
-{{if .Flash}}<div class="alert-success"><strong>{{.Flash}}</strong></div>{{end}}
-{{if .NewPassword}}<div class="alert-warn"><strong>新密码（仅本次显示）：</strong><code>{{.NewPassword}}</code></div>{{end}}
-{{if .Error}}<div class="alert-danger"><strong>{{.Error}}</strong></div>{{end}}
+{{if .Flash}}<div class="banner-ok alert-success">{{.Flash}}</div>{{end}}
+{{if .NewPassword}}<div class="banner-warn alert-warn">{{.NewPasswordLabel}}<code>{{.NewPassword}}</code></div>{{end}}
+{{if .Error}}<div class="banner-danger alert-danger">{{.Error}}</div>{{end}}
 
-<figure>
-  <table class="compact striped">
+<article>
+  <table class="compact">
     <tbody>
-      <tr><th align="left">状态</th><td>
-        {{if .User.Enabled}}<span class="state-badge">启用</span>
-        {{else}}<span class="alert-danger" style="padding:0.15rem 0.5rem">停用</span>{{end}}
-      </td></tr>
-      <tr><th align="left">限速</th><td>{{if eq .User.SpeedLimitMbps 0}}不限{{else}}{{.User.SpeedLimitMbps}} Mbps{{end}}</td></tr>
-      <tr><th align="left">过期</th><td>{{if eq .User.ExpiresAt 0}}永不过期{{else}}{{formatTime .User.ExpiresAt}}{{end}}</td></tr>
-      <tr><th align="left">流量</th><td>↓ {{formatBytes .User.BytesInTotal}} / ↑ {{formatBytes .User.BytesOutTotal}}</td></tr>
-      <tr><th align="left">创建于</th><td>{{formatTime .User.CreatedAt}}</td></tr>
-      <tr><th align="left">最后活跃</th><td>{{if eq .User.LastUsedAt 0}}从未{{else}}{{formatTime .User.LastUsedAt}}{{end}}</td></tr>
-      <tr><th align="left">备注</th><td>{{.User.Note}}</td></tr>
+      <tr>
+        <th>状态</th>
+        <td>
+          {{if .User.Enabled}}<span class="badge ok">启用</span>
+          {{else}}<span class="badge danger">停用</span>{{end}}
+        </td>
+      </tr>
+      <tr><th>限速</th><td>{{if eq .User.SpeedLimitMbps 0}}不限{{else}}{{.User.SpeedLimitMbps}} Mbps{{end}}</td></tr>
+      <tr><th>过期</th><td>{{if eq .User.ExpiresAt 0}}永不过期{{else}}{{formatTime .User.ExpiresAt}}{{end}}</td></tr>
+      <tr><th>流量</th><td>↓ {{formatBytes .User.BytesInTotal}} / ↑ {{formatBytes .User.BytesOutTotal}}</td></tr>
+      <tr><th>创建于</th><td>{{formatTime .User.CreatedAt}}</td></tr>
+      <tr><th>最后活跃</th><td>{{if eq .User.LastUsedAt 0}}<span class="text-muted">从未</span>{{else}}{{formatTime .User.LastUsedAt}}{{end}}</td></tr>
+      <tr><th>备注</th><td>{{.User.Note}}</td></tr>
     </tbody>
   </table>
-</figure>
+</article>
 
 <h3>客户端配置</h3>
 <article>
-  <ul>
-    <li><strong>iOS / macOS：</strong>
-      <a href="/users/{{.User.ID}}/mobileconfig">下载 .mobileconfig</a>
-      或扫码：<br>
-      <img src="/users/{{.User.ID}}/mobileconfig.qr.png" alt="QR" width="200" height="200"
-           style="border:1px solid var(--pico-muted-border-color);padding:4px;background:#fff;margin-top:0.5rem">
-    </li>
-    <li><strong>Android 11+ 原生</strong>（无需第三方 app）：
-      <a href="/users/{{.User.ID}}/android">查看配置参数</a>
-      — Android 设置 → VPN → 添加 IKEv2/IPsec MSCHAPv2
-    </li>
-    <li><strong>strongSwan app</strong>（Android / Linux）：
-      <a href="/users/{{.User.ID}}/sswan">下载 .sswan 配置文件</a>
-    </li>
-    <li><strong>CA 证书</strong>（Android 单独需要）：
-      <a href="/ca.cert.pem">下载 ca.cert.pem</a>
-    </li>
-  </ul>
-  <p style="color:var(--pico-muted-color);font-size:0.9em">
-    <strong>iOS / macOS 提示：</strong>点击链接 → Safari 打开 → 设置 → 通用 → VPN 与设备管理 → 安装描述文件<br>
-    <strong>Android 原生提示：</strong>Android 11+ 系统设置 → VPN → 添加 → 选 "IKEv2/IPsec MSCHAPv2"（默认选项）→ 填 server/CN/用户名/密码 → 保存 → 连接。
-  </p>
+  <div class="os-tabs">
+    <button type="button" data-os-key="apple">iOS / macOS</button>
+    <button type="button" data-os-key="android-native">Android 原生 (11+)</button>
+    <button type="button" data-os-key="android-app">Android strongSwan</button>
+    <button type="button" data-os-key="linux">Linux strongSwan</button>
+    <button type="button" data-os-key="ca">CA 证书</button>
+  </div>
+
+  <div class="os-panel" data-os-key="apple">
+    <div class="row" style="align-items: flex-start; gap: var(--ikev2-rhythm-5);">
+      <div class="stack-tight">
+        <p><strong>iOS / macOS 推荐:</strong>下载后用 Safari 打开,设置 → 通用 → VPN 与设备管理 → 安装描述文件。</p>
+        <a href="/users/{{.User.ID}}/mobileconfig" role="button">下载 .mobileconfig</a>
+      </div>
+      <div class="qr-card">
+        <img src="/users/{{.User.ID}}/mobileconfig.qr.png" alt="mobileconfig QR">
+        <span class="qr-hint">扫码下载</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="os-panel" data-os-key="android-native">
+    <div class="stack-tight">
+      <p><strong>Android 11+ 系统原生支持:</strong>无需第三方 app。</p>
+      <ol style="padding-left: var(--ikev2-rhythm-5); margin: 0;">
+        <li>设置 → 网络和互联网 → VPN → 添加 VPN</li>
+        <li>类型选 <strong>IKEv2/IPsec MSCHAPv2</strong></li>
+        <li>按 <a href="/users/{{.User.ID}}/android">此处参数</a> 填入 server / CN / 用户名 / 密码</li>
+        <li>保存 → 连接</li>
+      </ol>
+    </div>
+  </div>
+
+  <div class="os-panel" data-os-key="android-app">
+    <div class="stack-tight">
+      <p><strong>strongSwan Android app:</strong>用于旧版 Android 或需要更精细控制。</p>
+      <a href="/users/{{.User.ID}}/sswan" role="button">下载 .sswan 配置</a>
+      <p class="text-sm text-muted">导入 strongSwan app → 添加 profile → 选择 .sswan 文件。</p>
+    </div>
+  </div>
+
+  <div class="os-panel" data-os-key="linux">
+    <div class="stack-tight">
+      <p><strong>Linux strongSwan:</strong>命令行客户端配置。</p>
+      <a href="/users/{{.User.ID}}/sswan" role="button">下载 .sswan 配置</a>
+      <p class="text-sm text-muted">复制到 <code>/etc/swanctl/conf.d/{{.User.Username}}.conf</code> → <code>swanctl --load-all</code> → <code>swanctl -i {{.User.Username}}</code>。</p>
+    </div>
+  </div>
+
+  <div class="os-panel" data-os-key="ca">
+    <div class="stack-tight">
+      <p><strong>CA 证书:</strong>Android 原生 / strongSwan app / Linux 客户端都要先装 CA 证书才能验证服务器身份。</p>
+      <a href="/ca.cert.pem" role="button">下载 ca.cert.pem</a>
+      <p class="text-sm text-muted">Android 需要单独安装 CA 证书;iOS / macOS 已通过 .mobileconfig 自动安装。</p>
+    </div>
+  </div>
 </article>
 
 <h3>操作</h3>
-<div role="group">
-  <form method="POST" action="/users/{{.User.ID}}/reset-password" onsubmit="return confirm('确认重置密码？')">
-    <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-    <button type="submit" class="contrast outline">重置密码（生成新 12 位密码）</button>
-  </form>
-  {{if .User.Enabled}}
-    <form method="POST" action="/users/{{.User.ID}}/disable" onsubmit="return confirm('确认停用？正在连接的客户端会被踢下线')">
+<article>
+  <div class="row">
+    <form method="POST" action="/users/{{.User.ID}}/reset-password" onsubmit="return confirm('确认重置密码？')">
       <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-      <button type="submit" class="secondary">停用</button>
+      <button type="submit" class="secondary">重置密码 (生成新 12 位)</button>
     </form>
-  {{else}}
-    <form method="POST" action="/users/{{.User.ID}}/enable">
-      <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-      <button type="submit">启用</button>
-    </form>
-  {{end}}
-  <a href="/users/{{.User.ID}}/delete" role="button" class="contrast">删除</a>
-</div>
+    {{if .User.Enabled}}
+      <form method="POST" action="/users/{{.User.ID}}/disable" onsubmit="return confirm('确认停用?正在连接的客户端会被踢下线')">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <button type="submit" class="secondary">停用</button>
+      </form>
+    {{else}}
+      <form method="POST" action="/users/{{.User.ID}}/enable">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <button type="submit">启用</button>
+      </form>
+    {{end}}
+    <a href="/users/{{.User.ID}}/delete" role="button" class="contrast">删除</a>
+  </div>
+</article>
+
 <p><a href="/users">← 返回用户列表</a></p>

@@ -313,7 +313,7 @@ func (s *Server) handleUserAndroidConfig(w http.ResponseWriter, r *http.Request)
 	}
 
 	s.RenderPage(w, "android", androidConfigData{
-		PageMeta:   PageMeta{Page: "android", Title: "Android 配置", AdminUsername: admin.Username, CSRFToken: csrfTokenOf(sess)},
+		PageMeta:   PageMeta{Page: "android", Title: "Android 配置", PageKey: "users", AdminUsername: admin.Username, CSRFToken: csrfTokenOf(sess)},
 		User:       u,
 		ServerAddr: s.ServerAddr,
 		ServerCN:   s.ServerCN,
