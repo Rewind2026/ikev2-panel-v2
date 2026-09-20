@@ -368,6 +368,7 @@ bash -n scripts/ikev2-reload.sh                   # 语法 OK
 | PR12.15 | nft 全面迁移评估 | **改为 PR12.16 实施** |
 | PR12.16 | **全面切 nft 自定义表 `ikev2` / `ikev26`** | `nft -f` 原子提交 + `fib daddr type != local` + `tcp option maxseg size set rt mtu`,docker daemon 完全碰不到 → 根治二次 iptables-restore 副作用 |
 | PR12.17 | **§7.9 retry stale 表清理 + Dockerfile OCI LABEL** | `re_add_ikev2_rules` 先 `delete table` 再 `nft -f` 处理跨 netns / nft 服务重启场景;Dockerfile 加 OCI 标准镜像元数据 |
+| PR12.18 | **fix listener/parser VICI nested Message 结构** | list-sas streaming 顶层是 connection-name 包裹的嵌套 Message,跟 ike-updown payload 同型。原 parser 按"顶层就是 SA 字段"实现导致 remote-id/uniqueid/bytes 全空 → 用户"最后活跃"和流量永远 0 |
 
 ### §3.5 iptables → nft 迁移(PR12.16,关键)
 
@@ -430,6 +431,49 @@ LABEL org.opencontainers.image.title="ikev2-panel" \
 
 `docker inspect` 顶层 metadata 可见,审计 / 调试 / 镜像溯源用。
 
+### listener/parser VICI nested Message 解析(PR12.18,关键 bug fix)
+
+**症状**:
+- 用户列表的"最后活跃"一直显示 `1970-01-01 00:00:00`
+- 即使一直在用 VPN,流量一直 `0B`
+- `audit_log` 里 sa.established 写入了但 `unique=0 remote=` 字段全空
+
+**根因**:
+strongSwan 6.0+ VICI 协议里 `list-sas` streaming 推的"单个 SA Message"
+是嵌套结构——顶层 key 是 connection-name (如 `ikev2-rw`),
+val 是嵌套的 SA Message(跟 `ike-updown` 事件 payload 完全同型)。
+原 `internal/swanctl/parser.go` `parseSingleSA` 按"顶层就是 SA 字段"假设
+实现,导致:
+
+```text
+m.Get("uniqueid")      → nil → UniqueID=""
+m.Get("remote-id")     → nil → RemoteID=""
+m.Get("bytes-in")      → nil → BytesIn=0
+```
+
+listener 早期已按正确结构修过(`handleEvent` 遍历顶层 keys 找嵌套
+`*vici.Message`),但 list-sas 路径忘了同改。
+
+**修复**:
+- `parseSingleSA`:遍历顶层 keys,找第一个 `*vici.Message` 嵌套作为真正的 SA 字段。
+  保留 fallback(嵌套不存在时用原 m 作为平铺格式)兼容老版本。
+- `SALifecycleEvent` 加 `RemoteID/RemoteVIP` 字段,audit_log details 现在含
+  `eap_id=rewind vip=[10.10.0.1]` 便于按用户查询。
+- `parser_test.go`:新加 `makeStreamingSA` 真实结构 + `TestParseSingleSA_FlatFallback`。
+  5 个 `TestParseSingleSA_*` 全 pass。
+
+**验证**(192.168.50.63 实测,v2.86-pr12.18c):
+```
+id  username  last_used_at  bytes_in_total  bytes_out_total  last_used_human
+--  --------  ------------  --------------  ---------------  -------------------
+4   rewind    1789868258    6455            48902            2026-09-20 01:37:08
+```
+
+`audit_log` 现在正确记录:
+```
+sa.established  unique=1 remote=2408:832e:881:6461:84c:102e:3375:6d4b eap_id=rewind vip=[10.10.0.1]
+```
+
 ### 验证结果(192.168.50.63 实测)
 
 | 指标 | 值 |
@@ -449,13 +493,18 @@ LABEL org.opencontainers.image.title="ikev2-panel" \
 - `internal/cert/mobileconfig.go` — 加 `IncludeAllNetworks=true` + `ExcludeLocalNetworks=true`
 - `internal/cert/generate.go` — `EnsureServerCert/EnsurePanelCert` 加 `serverIPs` 可变参数
 - `internal/web/handlers_users.go` — 7 处 `ExecuteTemplate` → `RenderPage`
+- `internal/swanctl/parser.go` — PR12.18 `parseSingleSA` 遍历嵌套 Message(关键 bug fix)
+- `internal/swanctl/parser_test.go` — PR12.18 新加 `makeStreamingSA` + `FlatFallback` 测试
+- `internal/swanctl/listener.go` — PR12.18 `SALifecycleEvent` 加 `RemoteID/RemoteVIP` 字段
+- `internal/limit/collector.go` — PR12.18 调试日志 `Debug → Info` + 空 RemoteID dump
 
 ### 镜像 tag
 
 - `ikev2-panel:v2.86-pr12.13` — 双栈 TS + mobileconfig 域名
 - `ikev2-panel:v2.86-pr12.14` — iptables-legacy 试验(失败,**勿用**)
-- `ikev2-panel:v2.86-pr12.16` — **nft 迁移首版**(推荐升级基线)
-- `ikev2-panel:v2.86-pr12.17` — **当前推荐**(stale 表清理 + LABEL)
+- `ikev2-panel:v2.86-pr12.16` — nft 迁移首版
+- `ikev2-panel:v2.86-pr12.17` — stale 表清理 + LABEL
+- `ikev2-panel:v2.86-pr12.18` — **当前推荐**(VICI nested Message bug fix,流量 / last_used 恢复)
 
 ---
 
