@@ -252,7 +252,7 @@ func main() {
 	if _, err := os.Stat(staticDir); err != nil {
 		staticDir = "/app/web/static"
 	}
-	tmpl, err := web.LoadTemplates(templatesDir, cfg.DisplayTimezone)
+	tmpl, err := web.LoadTemplates(templatesDir, staticDir, cfg.DisplayTimezone)
 	if err != nil {
 		logger.Error("load templates", "err", err, "dir", templatesDir)
 		os.Exit(1)

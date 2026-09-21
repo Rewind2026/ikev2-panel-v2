@@ -19,8 +19,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{{.Title}} - IKEv2 Panel</title>
-    <link rel="stylesheet" href="/static/css/pico.min.css">
-    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="/static/css/pico.min.css{{assetVersion "/static/css/pico.min.css"}}">
+    <link rel="stylesheet" href="/static/style.css{{assetVersion "/static/style.css"}}">
     <script>
       // 浅/深色模式切换 (Pico v2 data-theme + localStorage 持久化)
       (function () {
@@ -116,7 +116,7 @@
         });
       });
     </script>
-    <script src="/static/js/topology.js" defer></script>
+    <script src="/static/js/topology.js{{assetVersion "/static/js/topology.js"}}" defer></script>
   </head>
   <body data-page="{{.PageKey}}" {{if eq .PageKey "login"}}class="login-page"{{end}}>
     {{template "topbar" .}}

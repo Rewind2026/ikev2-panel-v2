@@ -43,7 +43,10 @@ type storeUser = store.User
 //   - 闭包捕获 tzName,模板调用语法不变:{{formatTime .X}}
 //
 // 历史：v2 之前所有模板平铺,nav 在 5 个页面重复。P1-B 后 nav 只在 layout.html 一处。
-func LoadTemplates(templatesDir string, displayTZ string) (*template.Template, error) {
+//
+// v2.86-PR20:新增 staticDir 参数,用于 assetVersion() cache-bust。
+//   详见 newAssetVersion。
+func LoadTemplates(templatesDir string, staticDir string, displayTZ string) (*template.Template, error) {
 	entries, err := os.ReadDir(templatesDir)
 	if err != nil {
 		return nil, fmt.Errorf("read templates dir: %w", err)
@@ -76,6 +79,21 @@ func LoadTemplates(templatesDir string, displayTZ string) (*template.Template, e
 		}
 		return baseI < baseJ
 	})
+
+	// v2.86-PR20:静态资源 cache-bust。
+	//
+	// 背景:之前 PR19 加了 Cache-Control: no-cache, must-revalidate 中间件,
+	// 但某些 view(IDE 内置 browser view / 调试代理)有进程级 cache,
+	// 即使 no-cache 也不一定生效。
+	//
+	// 现在:layout.html 引用 CSS/JS 用 {{assetVersion "/static/style.css"}},
+	// 函数返回 "?v=<unix-nano-of-file-mtime>",文件改动 mtime 变 → URL 变
+	// → 任何 cache 层(磁盘 / view 进程级 / CDN)100% 失效。
+	//
+	// 文件不存在 → 返回空串 → URL 不带 query,跟之前完全一致。
+	// 生产 docker 镜像里文件 mtime 是 build 时间,稳定;dev 模式文件每次改动
+	// mtime 变 → URL 自动 bust,无需手动重启服务。
+	assetV := newAssetVersion(staticDir)
 
 	t := template.New("")
 	t = t.Funcs(template.FuncMap{
@@ -115,14 +133,49 @@ func LoadTemplates(templatesDir string, displayTZ string) (*template.Template, e
 		// v2.86-PR12.21: audit 严重性映射 (timeline-dot class),基于 event name 启发式
 		"auditSeverity": auditSeverity,
 		// v2.86-PR12.22: admin mobileconfig defaults 表单用,*bool / *int 转字符串
-		"boolPtrVal":  boolPtrVal,
-		"intPtrVal":   intPtrValTpl,
+		"boolPtrVal": boolPtrVal,
+		"intPtrVal":  intPtrValTpl,
+		// v2.86-PR20:静态资源 cache-bust 版本号。
+		// 用法:{{assetVersion "/static/style.css"}} → "?v=1234567890" 或 ""
+		"assetVersion": assetV,
 	})
 
 	if _, err := t.ParseFiles(paths...); err != nil {
 		return nil, fmt.Errorf("parse templates: %w", err)
 	}
 	return t, nil
+}
+
+// newAssetVersion v2.86-PR20:为静态资源生成 cache-bust 版本号。
+//
+// 输入:URL 路径(以 /static/ 开头),输出:?v=<unix-nano-of-mtime> 或 ""(文件不存在)。
+//
+// 用法(模板里):
+//
+//	<link rel="stylesheet" href="/static/style.css{{assetVersion "/static/style.css"}}">
+//
+// 实现细节:
+//   - 把 URL 路径 strip "/static/" 前缀,跟 staticDir 拼起来就是磁盘路径
+//   - os.Stat 取 mtime,转 unix 纳秒作为版本号(纳秒精度足够,几乎不可能撞)
+//   - 闭包捕获 staticDir,FuncMap 注册时只需传函数指针
+//   - 失败(文件不存在 / stat 失败)→ 返回 "" → URL 不带 query,跟旧行为一致
+func newAssetVersion(staticDir string) func(string) string {
+	return func(urlPath string) string {
+		if staticDir == "" {
+			return ""
+		}
+		const prefix = "/static/"
+		if !strings.HasPrefix(urlPath, prefix) {
+			return ""
+		}
+		rel := strings.TrimPrefix(urlPath, prefix)
+		fullPath := filepath.Join(staticDir, filepath.FromSlash(rel))
+		fi, err := os.Stat(fullPath)
+		if err != nil {
+			return ""
+		}
+		return fmt.Sprintf("?v=%d", fi.ModTime().UnixNano())
+	}
 }
 
 // formatTimeTpl v2.85-PR3:表格列用 "2006-01-02 15:04 MST"(带时区缩写后缀)。
@@ -390,11 +443,14 @@ func jsonTopologyClients(clients []TopologyClient) (template.JS, error) {
 // jsonOneClient 单个用户转 JSON (UserDetail 页用)。
 //
 // v2.86-PR12.21
-func jsonOneClient(u *storeUser) (template.JS, error) {
+// v2.86-PR12.24:online 改由 handler 注入。UserDetail 渲染时,handler 已经
+// 查过 swanctl 实时活跃 SA,这里不再用 u.LastUsedAt>0 兜底——那个字段只在
+// 连接建立/重连时刷一次,用户掉线后很久都还是旧值,导致拓扑图节点卡在
+// "离线"但首页(走 swanctl 实时 SA)显示在线,两边不一致。
+func jsonOneClient(u *storeUser, online bool) (template.JS, error) {
 	if u == nil {
 		return template.JS("{}"), nil
 	}
-	online := u.Enabled && u.LastUsedAt > 0
 	c := TopologyClient{
 		ID:       u.ID,
 		Name:     u.Username,

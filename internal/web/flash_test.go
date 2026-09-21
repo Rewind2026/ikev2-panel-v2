@@ -194,7 +194,7 @@ func TestHandleUsersList_ConsumesFlash(t *testing.T) {
 	srv.FlashStore = NewFlashStore(5 * time.Minute)
 
 	// 加载真实模板（P1-B 后所有页面都走 RenderPage → LoadTemplates）
-	tmpl, err := LoadTemplates("../../web/templates", "UTC")
+	tmpl, err := LoadTemplates("../../web/templates", "../../web/static", "UTC")
 	if err != nil {
 		t.Fatalf("LoadTemplates: %v", err)
 	}
@@ -243,7 +243,7 @@ func TestHandleUserDetail_ConsumesFlash(t *testing.T) {
 	srv, sess := newTestServerWithSession(t)
 	srv.FlashStore = NewFlashStore(5 * time.Minute)
 
-	tmpl, err := LoadTemplates("../../web/templates", "UTC")
+	tmpl, err := LoadTemplates("../../web/templates", "../../web/static", "UTC")
 	if err != nil {
 		t.Fatalf("LoadTemplates: %v", err)
 	}
@@ -290,7 +290,7 @@ func TestFlashStore_NilSafe(t *testing.T) {
 	// 故意不设置 srv.FlashStore
 
 	// 用 LoadTemplates 拿真实模板(handler 会渲染 users_list)
-	tmpl, err := LoadTemplates("../../web/templates", "UTC")
+	tmpl, err := LoadTemplates("../../web/templates", "../../web/static", "UTC")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -319,7 +319,7 @@ func TestFlashStore_NilSafe(t *testing.T) {
 //
 // 这是回归测试：防止以后有人误删 layout.html 或改坏 FuncMap 让模板解析失败。
 func TestLoadTemplates_Layout(t *testing.T) {
-	tmpl, err := LoadTemplates("../../web/templates", "UTC")
+	tmpl, err := LoadTemplates("../../web/templates", "../../web/static", "UTC")
 	if err != nil {
 		t.Fatalf("LoadTemplates: %v", err)
 	}
@@ -380,7 +380,7 @@ func TestLoadTemplates_Layout(t *testing.T) {
 //
 // 这是端到端测试,确保两段渲染 + BodyHTML 反射注入不出错。
 func TestRenderPage_FullPipeline(t *testing.T) {
-	tmpl, err := LoadTemplates("../../web/templates", "UTC")
+	tmpl, err := LoadTemplates("../../web/templates", "../../web/static", "UTC")
 	if err != nil {
 		t.Fatalf("LoadTemplates: %v", err)
 	}
@@ -415,7 +415,7 @@ func TestRenderPage_FullPipeline(t *testing.T) {
 // TestLoadTemplates_LoginHasNoNav 验证：login_content.html 渲染时不含 nav 守卫。
 // （完整页面的 nav 守卫由 layout.html 的 {{if .AdminUsername}} 实现,所以测试要拼 layout）
 func TestLoadTemplates_LoginHasNoNav(t *testing.T) {
-	tmpl, err := LoadTemplates("../../web/templates", "UTC")
+	tmpl, err := LoadTemplates("../../web/templates", "../../web/static", "UTC")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -449,7 +449,7 @@ func TestLoadTemplates_LoginHasNoNav(t *testing.T) {
 func TestHome_ActiveSAsCount(t *testing.T) {
 	srv, sess := newTestServerWithSession(t)
 	// 用真实模板
-	tmpl, err := LoadTemplates("../../web/templates", "UTC")
+	tmpl, err := LoadTemplates("../../web/templates", "../../web/static", "UTC")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -477,7 +477,7 @@ func TestHome_ActiveSAsCount(t *testing.T) {
 // TestHome_LEWarning 验证：LE 续签失败时显示红色横幅。
 func TestHome_LEWarning(t *testing.T) {
 	srv, sess := newTestServerWithSession(t)
-	tmpl, err := LoadTemplates("../../web/templates", "UTC")
+	tmpl, err := LoadTemplates("../../web/templates", "../../web/static", "UTC")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -562,7 +562,7 @@ func TestItoa(t *testing.T) {
 // TestLoadTemplates_FormatTimeFormatBytes 验证 FuncMap 注册成功,
 // 模板里能直接用 {{formatTime}} 和 {{formatBytes}}。
 func TestLoadTemplates_FormatTimeFormatBytes(t *testing.T) {
-	tmpl, err := LoadTemplates("../../web/templates", "UTC")
+	tmpl, err := LoadTemplates("../../web/templates", "../../web/static", "UTC")
 	if err != nil {
 		t.Fatal(err)
 	}

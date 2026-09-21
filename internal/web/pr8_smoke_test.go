@@ -288,7 +288,7 @@ func newPR8Env(t *testing.T) *pr8Env {
 		t.Fatal(err)
 	}
 
-	tpl, err := LoadTemplates(filepath.Join("..", "..", "web", "templates"), "UTC")
+	tpl, err := LoadTemplates(filepath.Join("..", "..", "web", "templates"), filepath.Join("..", "..", "web", "static"), "UTC")
 	if err != nil {
 		t.Fatal(err)
 	}

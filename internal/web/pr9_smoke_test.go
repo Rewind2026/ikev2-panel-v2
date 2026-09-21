@@ -71,7 +71,7 @@ func newPR9Env(t *testing.T) *pr9Env {
 		Secure:          false,
 	}
 
-	tpl, err := LoadTemplates(filepath.Join("..", "..", "web", "templates"), "UTC")
+	tpl, err := LoadTemplates(filepath.Join("..", "..", "web", "templates"), filepath.Join("..", "..", "web", "static"), "UTC")
 	if err != nil {
 		t.Fatal(err)
 	}
