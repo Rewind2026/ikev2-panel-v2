@@ -1,138 +1,88 @@
 {{/*
-  登录页内容 - v2.86-PR18 (visual-first brand split)
+  v2.86-PR19 — 登录页(全新重做)
 
-  整页结构:
-    ┌─────────────────────────────────────────┐
-    │  [brand 区 55%]    │  [登录卡 380px]    │
-    │  - 盾形 logo       │  - 标题           │
-    │  - IKEv2 Panel     │  - 错误条(如有)   │
-    │  - 一句话定位      │  - 用户名/密码    │
-    │  - 网络节点装饰    │  - 登录按钮       │
-    │  - 版本/域名 hint  │  - 底部安全提示   │
-    └─────────────────────────────────────────┘
-
-  注意: login 时无 AdminUsername,layout 内的 topbar 不会显示
-        (登录页本身是 full-bleed,不需要 topbar)
+  设计要点:
+    - 单卡居中 + 装饰圆环 (radial-gradient glow)
+    - 顶部 mark + 大标题 + 副标题
+    - 表单: leading icon + 强 focus ring
+    - 底部安全提示 + 服务地址/版本 meta(在卡外)
+    - 深色模式适配
 */}}
-<div class="login-split">
-  <aside class="login-brand" aria-hidden="false">
-    <a class="login-brand-mark" href="/" aria-label="IKEv2 Panel 首页">
-      <svg viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg" focusable="false">
-        <path d="M16 2 L28 7 V16 C28 23 22 28.5 16 30 C10 28.5 4 23 4 16 V7 Z"
-              fill="currentColor" fill-opacity="0.18" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
-        <path d="M16 9 V21 M11 14 H21 M13 18 H19" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
-      </svg>
-    </a>
-    <h2 class="login-brand-name">IKEv2 Panel</h2>
-    <p class="login-brand-tag">VPN 隧道 · CA 颁发 · 一键配置</p>
+<section class="login-card">
+  <div class="login-card-mark" aria-hidden="true">
+    <svg viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg" focusable="false">
+      <path d="M16 2 L28 7 V16 C28 23 22 28.5 16 30 C10 28.5 4 23 4 16 V7 Z"
+            fill="currentColor" fill-opacity="0.18" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+      <path d="M16 9 V21 M11 14 H21 M13 18 H19" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+    </svg>
+  </div>
 
-    <ul class="login-brand-points">
-      <li>
-        <span class="dot dot-ok"></span>
-        IKEv2 / IPsec 隧道实时状态
-      </li>
-      <li>
-        <span class="dot dot-ok"></span>
-        CA 证书 / mobileconfig 颁发
-      </li>
-      <li>
-        <span class="dot dot-warn"></span>
-        操作审计 · 速率限制 · 会话 TTL
-      </li>
-    </ul>
+  <hgroup class="login-card-head">
+    <h1>欢迎回来</h1>
+    <p>登录 IKEv2 Panel 管理后台</p>
+  </hgroup>
 
-    <div class="login-brand-meta">
-      <span class="meta-label">服务地址</span>
-      <code class="meta-value" id="login-host">{{.Host}}</code>
+  {{if .Error}}
+    <div class="banner-danger" role="alert" style="margin-bottom: 1.25rem;">
+      <div>
+        <strong>登录失败</strong>
+        <small style="display: block; margin-top: 0.25rem;">{{.Error}}</small>
+      </div>
     </div>
-    <div class="login-brand-meta">
-      <span class="meta-label">面板版本</span>
-      <code class="meta-value">{{.Version}}</code>
-    </div>
-  </aside>
+  {{end}}
 
-  <article class="login-card">
-    <hgroup class="login-card-head">
-      <h1>管理员登录</h1>
-      <p>请输入管理员账号继续</p>
-    </hgroup>
-
-    {{if .Error}}<div class="banner-danger alert-danger" role="alert">{{.Error}}</div>{{end}}
-
-    <form method="POST" action="/login" class="login-form" autocomplete="on">
-      <label class="login-field">
-        <span class="login-field-label">用户名</span>
-        <span class="login-field-input">
-          <svg class="login-field-icon" viewBox="0 0 24 24" aria-hidden="true">
-            <circle cx="12" cy="8" r="4" fill="none" stroke="currentColor" stroke-width="1.7"/>
-            <path d="M4 21c0-4.4 3.6-8 8-8s8 3.6 8 8" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
-          </svg>
-          <input name="username" value="{{.Username}}" autocomplete="username" autocapitalize="off"
-                 autocorrect="off" spellcheck="false" required autofocus
-                 placeholder="admin">
-        </span>
-      </label>
-
-      <label class="login-field">
-        <span class="login-field-label">密码</span>
-        <span class="login-field-input">
-          <svg class="login-field-icon" viewBox="0 0 24 24" aria-hidden="true">
-            <rect x="4" y="10" width="16" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"/>
-            <path d="M8 10V7a4 4 0 1 1 8 0v3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
-          </svg>
-          <input name="password" type="password" autocomplete="current-password" required
-                 placeholder="••••••••">
-        </span>
-      </label>
-
-      <button type="submit" class="login-submit">
-        <span class="login-submit-text">登录</span>
-        <svg class="login-submit-arrow" viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M5 12h14M13 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <form method="POST" action="/login" class="login-form" autocomplete="on">
+    <label class="login-field">
+      <span class="login-field-label">用户名</span>
+      <span class="login-field-input">
+        <svg class="login-field-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="8" r="4" fill="none" stroke="currentColor" stroke-width="1.7"/>
+          <path d="M4 21c0-4.4 3.6-8 8-8s8 3.6 8 8" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
         </svg>
-      </button>
-    </form>
+        <input name="username" value="{{.Username}}" autocomplete="username" autocapitalize="off"
+               autocorrect="off" spellcheck="false" required autofocus
+               placeholder="admin">
+      </span>
+    </label>
 
-    <p class="login-card-foot">
-      登录即表示同意会话内所有操作记入审计日志。
-      <br>
-      <span class="login-card-foot-hint">本面板不存储明文密码 · 默认会话 TTL {{.SessionTTL}}</span>
-    </p>
-  </article>
+    <label class="login-field">
+      <span class="login-field-label">密码</span>
+      <span class="login-field-input">
+        <svg class="login-field-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <rect x="4" y="10" width="16" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"/>
+          <path d="M8 10V7a4 4 0 1 1 8 0v3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+        </svg>
+        <input name="password" type="password" autocomplete="current-password" required
+               placeholder="••••••••">
+      </span>
+    </label>
+
+    <button type="submit" class="login-submit">
+      <span>登录</span>
+      <svg class="login-submit-arrow" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M5 12h14M13 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </button>
+  </form>
+
+  <p class="login-card-foot">
+    登录即表示同意会话内所有操作记入审计日志。
+    <span class="login-card-foot-hint">本面板不存储明文密码 · 默认会话 TTL {{.SessionTTL}}</span>
+  </p>
+</section>
+
+<div class="login-meta">
+  <span>
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <circle cx="12" cy="12" r="10"/>
+      <path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+    </svg>
+    服务地址 <code>{{.Host}}</code>
+  </span>
+  <span>
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M20 7L9 18l-5-5"/>
+    </svg>
+    版本 <code>v{{.Version}}</code>
+  </span>
 </div>
-
-{{/*
-  v2.86-PR18:登录页品牌区背景的"网络节点"装饰 SVG。
-  渲染在 brand 区右上角,作为视觉镇纸(不抢主标题视线)。
-*/}}
-<svg class="login-brand-bg" viewBox="0 0 600 600" aria-hidden="true" focusable="false">
-  <defs>
-    <radialGradient id="login-node-glow" cx="50%" cy="50%" r="50%">
-      <stop offset="0%" stop-color="currentColor" stop-opacity="0.55"/>
-      <stop offset="100%" stop-color="currentColor" stop-opacity="0"/>
-    </radialGradient>
-  </defs>
-  <!-- 节点 1:中心(服务器) -->
-  <circle cx="300" cy="300" r="56" fill="url(#login-node-glow)"/>
-  <circle cx="300" cy="300" r="10" fill="currentColor"/>
-  <circle cx="300" cy="300" r="20" fill="none" stroke="currentColor" stroke-width="1.4" stroke-opacity="0.6"/>
-  <!-- 节点 2-5:外围用户节点 -->
-  <g stroke="currentColor" stroke-width="1.2" stroke-opacity="0.45" fill="none">
-    <line x1="300" y1="300" x2="120" y2="140"/>
-    <line x1="300" y1="300" x2="500" y2="120"/>
-    <line x1="300" y1="300" x2="540" y2="430"/>
-    <line x1="300" y1="300" x2="120" y2="500"/>
-  </g>
-  <g fill="currentColor" fill-opacity="0.9">
-    <circle cx="120" cy="140" r="6"/>
-    <circle cx="500" cy="120" r="6"/>
-    <circle cx="540" cy="430" r="6"/>
-    <circle cx="120" cy="500" r="6"/>
-  </g>
-  <g fill="none" stroke="currentColor" stroke-opacity="0.35" stroke-width="1">
-    <circle cx="120" cy="140" r="14"/>
-    <circle cx="500" cy="120" r="14"/>
-    <circle cx="540" cy="430" r="14"/>
-    <circle cx="120" cy="500" r="14"/>
-  </g>
-</svg>

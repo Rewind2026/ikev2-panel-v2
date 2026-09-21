@@ -1,17 +1,20 @@
 {{/*
-  用户列表内容 - v2.86-PR12.21 (users-toolbar + page-header)
+  v2.86-PR19 — 用户列表(整页重做)
 
-  PR12.21 改动:
-    - row-between → users-toolbar (新工具栏组件)
-    - hgroup → page-header (统一)
+  设计要点:
+    - page-header: 标题 + 用户数 chip + "+ 新增用户" 主按钮
+    - 警告 banner: Flash / 新生成的密码
+    - 数据表: ID + 用户名 + 状态 chip + 限速 + 过期 + 流量 + 最后活跃 + 操作按钮组
+    - 操作按钮: btn-sm btn-secondary(查看) + btn-sm btn-danger(删除)
+    - 空状态: 大 SVG + 标题 + 提示 + CTA 按钮
 */}}
 <header class="page-header">
   <hgroup>
     <h1>用户管理</h1>
-    <p>{{len .Users}} 个账号</p>
+    <p class="page-sub">{{len .Users}} 个账号 · 管理签发的证书、限速、流量</p>
   </hgroup>
-  <div class="page-meta">
-    <a href="/users/new" role="button">+ 新增用户</a>
+  <div class="page-actions">
+    <a href="/users/new" class="btn-primary">+ 新增用户</a>
   </div>
 </header>
 
@@ -19,45 +22,51 @@
 {{if .NewPassword}}
 <div class="banner-warn alert-warn">
   <div>
-    <strong>用户密码已生成:</strong><code>{{.NewPassword}}</code>
-    <small>(仅显示这一次,请记录后再关闭)</small>
+    <strong>用户密码已生成:</strong><code style="font-size: 0.9375rem;">{{.NewPassword}}</code>
+    <small style="display: block; margin-top: 0.4rem;">⚠️ 仅显示这一次,请记录后再关闭。</small>
   </div>
 </div>
 {{end}}
 
 {{if .Users}}
-<article>
-  <table class="compact responsive-stack">
+<div class="users-table">
+  <table class="responsive-stack">
     <thead>
       <tr>
-        <th>ID</th><th>用户名</th><th>状态</th><th>限速</th>
-        <th>过期</th><th>累计流量</th><th>最后活跃</th>
-        <th>备注</th><th class="actions">操作</th>
+        <th style="width: 60px;">ID</th>
+        <th>用户名</th>
+        <th>状态</th>
+        <th>限速</th>
+        <th>过期</th>
+        <th>累计流量</th>
+        <th>最后活跃</th>
+        <th>备注</th>
+        <th class="right">操作</th>
       </tr>
     </thead>
     <tbody>
     {{range .Users}}
       <tr>
-        <td data-label="ID">#{{.ID}}</td>
-        <td data-label="用户名"><a href="/users/{{.ID}}">{{.Username}}</a></td>
+        <td data-label="ID" class="user-id">#{{.ID}}</td>
+        <td data-label="用户名" class="user-name"><a href="/users/{{.ID}}">{{.Username}}</a></td>
         <td data-label="状态">
-          {{if .Enabled}}<span class="badge ok">启用</span>
-          {{else}}<span class="badge danger">停用</span>{{end}}
+          {{if .Enabled}}<span class="chip ok no-dot">启用</span>
+          {{else}}<span class="chip muted no-dot">停用</span>{{end}}
         </td>
-        <td data-label="限速">{{if eq .SpeedLimitMbps 0}}不限{{else}}{{.SpeedLimitMbps}} Mbps{{end}}</td>
-        <td data-label="过期">{{if eq .ExpiresAt 0}}<span class="text-muted">永不过期</span>{{else}}{{formatTime .ExpiresAt}}{{end}}</td>
-        <td data-label="累计流量">↓ {{formatBytes .BytesInTotal}} / ↑ {{formatBytes .BytesOutTotal}}</td>
-        <td data-label="最后活跃">{{if eq .LastUsedAt 0}}<span class="text-muted">从未</span>{{else}}{{formatTime .LastUsedAt}}{{end}}</td>
+        <td data-label="限速">{{if eq .SpeedLimitMbps 0}}<span class="text-muted">不限速</span>{{else}}<code>{{.SpeedLimitMbps}} Mbps</code>{{end}}</td>
+        <td data-label="过期">{{if eq .ExpiresAt 0}}<span class="text-muted">永不过期</span>{{else}}<code>{{formatTime .ExpiresAt}}</code>{{end}}</td>
+        <td data-label="累计流量"><code>↓ {{formatBytes .BytesInTotal}} / ↑ {{formatBytes .BytesOutTotal}}</code></td>
+        <td data-label="最后活跃">{{if eq .LastUsedAt 0}}<span class="text-muted">从未</span>{{else}}<code>{{formatTime .LastUsedAt}}</code>{{end}}</td>
         <td data-label="备注">{{.Note}}</td>
-        <td data-label="操作" class="actions">
-          <a href="/users/{{.ID}}" role="button" class="secondary outline" style="font-size: 0.75rem; padding: 0.25rem 0.5rem;">查看</a>
-          <a href="/users/{{.ID}}/delete" role="button" class="outline" style="font-size: 0.75rem; padding: 0.25rem 0.5rem;">删除</a>
+        <td data-label="操作" class="user-actions">
+          <a href="/users/{{.ID}}" class="btn-secondary btn-sm">查看</a>
+          <a href="/users/{{.ID}}/delete" class="btn-danger btn-sm">删除</a>
         </td>
       </tr>
     {{end}}
     </tbody>
   </table>
-</article>
+</div>
 {{else}}
 <article>
   <div class="empty-state">
@@ -68,7 +77,7 @@
     </svg>
     <div class="empty-title">还没有用户</div>
     <div class="empty-hint">创建用户后会出现在这里,他们可以在 iOS / macOS / Android / Linux 上扫码配置 VPN</div>
-    <a href="/users/new" class="empty-cta" role="button">+ 新增第一个用户</a>
+    <a href="/users/new" class="btn-primary">+ 新增第一个用户</a>
   </div>
 </article>
 {{end}}

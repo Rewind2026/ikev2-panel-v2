@@ -30,25 +30,28 @@
     - "未设置"和"显式 false"通过这两个 helper 区分
 */}}
 
+{{/*
+  v2.86-PR19 — Mobileconfig 默认值(头部重做, body 保留 PR12.22 表单)
+*/}}
 <header class="page-header">
   <hgroup>
-    <h1>📱 Mobileconfig 默认值</h1>
-    <p>v2.86-PR12.22 — 管理员全局默认(运行时热改,无需重启)</p>
+    <h1>Mobileconfig 默认值</h1>
+    <p class="page-sub">管理员全局默认 · 运行时热改,无需重启</p>
   </hgroup>
-  <div class="page-meta">
-    {{if .Current}}<span class="badge ok">已自定义</span>{{else}}<span class="badge">出厂</span>{{end}}
+  <div class="page-actions">
+    {{if .Current}}<span class="chip ok no-dot">已自定义</span>{{else}}<span class="chip muted no-dot">出厂</span>{{end}}
   </div>
 </header>
 
-{{if .Flash}}<div class="banner-ok alert-ok dismissable" data-dismiss-key="mc-defaults-flash">{{.Flash}}</div>{{end}}
+{{if .Flash}}<div class="banner-info dismissable" data-dismiss-key="mc-defaults-flash">{{.Flash}}</div>{{end}}
 {{if .Error}}<div class="banner-danger alert-danger">{{.Error}}</div>{{end}}
 
 <article>
-  <p class="text-sm">
+  <p class="text-sm" style="line-height: 1.6;">
     这组默认值影响 <strong>所有用户</strong> 下载的 <code>.mobileconfig</code>(除非用户在
     详情页单独设过覆盖项)。优先级:<strong>用户 overlay &gt; 本页 admin defaults &gt; 出厂</strong>。
   </p>
-  <p class="text-sm">
+  <p class="text-sm mt-3" style="line-height: 1.6;">
     修改保存后<strong>立即生效</strong>,用户下次扫码 / 下载 / 重新拉取描述文件就用新值。<strong>无需重启容器</strong>。
   </p>
 </article>

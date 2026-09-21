@@ -100,8 +100,12 @@ type Server struct {
 func New(srv *Server, staticDir string) http.Handler {
 	mux := http.NewServeMux()
 
-	// 静态文件
-	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.Dir(staticDir))))
+	// 静态文件 (v2.86-PR19: CSS/JS 加 no-cache,让部署新 CSS 后用户浏览器立刻拿到)
+	//  - .css / .js → no-cache + must-revalidate (缓存但每次验证)
+	//  - 图片/字体 → 1 天 (变化频率低)
+	//  - 其它 (favicon, docs) → 1 小时
+	staticFS := http.FileServer(http.Dir(staticDir))
+	mux.Handle("GET /static/", http.StripPrefix("/static/", cacheControlForStatic(staticFS)))
 
 	// v2.86-PR9:HTTP 安全 header 中间件(所有路由 + 包括静态资源)。
 	secureHdr := secureHeaders()
@@ -203,6 +207,36 @@ func New(srv *Server, staticDir string) http.Handler {
 	// trailingSlashRedirect 在 logging 之内、mux 之外,这样 301 响应也走 secureHeaders。
 	// 设计见 docs/design.md §3（错误处理策略）+ v2-80+ backlog（panic recover）+ v2.86-PR9
 	return recoverPanic(srv.Logger)(secureHeaders()(logging(srv.Logger, srv.Metrics)(trailingSlashRedirect(mux))))
+}
+
+// cacheControlForStatic v2.86-PR19:给静态资源按扩展名设置 Cache-Control。
+//
+// 设计意图:
+//   - 之前 PR12.21 部署后,用户浏览器 / 我浏览器 view 都命中旧 CSS,
+//     看到的是破碎布局 (登录页 brand 区居中失败 + 表单 SVG 巨大化)。
+//   - 根因:Go http.FileServer 默认不发 Cache-Control header,浏览器
+//     走 heuristic expiry 后 200 OK from disk cache, query bust
+//     (?v=Date.now()) 也只 bust HTML,CSS 仍命中 view 进程级 cache。
+//   - 现在:对 CSS/JS 加 no-cache + must-revalidate,ETag/Last-Modified
+//     走 304 → 用户每次拿最新版(磁盘 cache 1 次但立即验证)。
+//   - 图片/字体:cache 1 天 (变化频率低)。
+func cacheControlForStatic(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		switch {
+		case strings.HasSuffix(path, ".css"), strings.HasSuffix(path, ".js"):
+			w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+		case strings.HasSuffix(path, ".png"), strings.HasSuffix(path, ".jpg"),
+			strings.HasSuffix(path, ".jpeg"), strings.HasSuffix(path, ".gif"),
+			strings.HasSuffix(path, ".webp"), strings.HasSuffix(path, ".svg"),
+			strings.HasSuffix(path, ".woff"), strings.HasSuffix(path, ".woff2"),
+			strings.HasSuffix(path, ".ttf"), strings.HasSuffix(path, ".eot"):
+			w.Header().Set("Cache-Control", "public, max-age=86400")
+		default:
+			w.Header().Set("Cache-Control", "public, max-age=3600")
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // trailingSlashRedirect v2.86-PR12.21:把 /path/ 301 重定向到 /path。

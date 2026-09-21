@@ -1,21 +1,20 @@
 {{/*
-  v2.85-PR8(U11) 操作日志只读页 - v2.86-PR12.21 重构 (TimelineRow)
+  v2.86-PR19 — 操作日志(整页重做)
 
-  PR12.21 改动:
-    - 表 → TimelineRow 单列时间线 (行高 56px, PR12.20 的 4 列表行高 200px 太重)
-    - 详情列从 dl.kv-list (垂直 8 行) → 时间线同行 inline (紧凑)
-    - 严重性 → timeline-dot 颜色 (ok/warn/danger/info)
-    - 每行 hover 高亮 (timeline-row:hover)
-
-  历史:
-    - v2.86-PR12.20: dl.kv-list (双列 key-value)
-    - v2.86-PR12.19: empty-state
+  设计要点:
+    - page-header: 标题 + 总数 chip
+    - 工具栏: 事件类型 filter chips + actor 搜索
+    - timeline: 事件严重性 dot + 时间 + 事件 chip + actor + details
+    - 空状态: 大 SVG + 引导
 */}}
 <header class="page-header">
   <hgroup>
     <h1>操作日志</h1>
-    <p>最近 {{len .Events}} 条</p>
+    <p class="page-sub">最近 {{len .Events}} 条 · SA 生命周期 + 用户/凭证变更 + 管理员操作</p>
   </hgroup>
+  <div class="page-actions">
+    <span class="chip muted">{{len .Events}} 条</span>
+  </div>
 </header>
 
 {{if .Events}}
@@ -24,8 +23,12 @@
   <div class="timeline-row">
     <span class="timeline-dot {{auditSeverity .Event}}"></span>
     <span class="timeline-time">{{formatUnixNano .Timestamp}}</span>
-    <span class="timeline-event"><code>{{.Event}}</code></span>
-    <span class="timeline-actor">{{.Actor}}</span>
+    <span class="timeline-event">
+      <span class="chip {{auditSeverity .Event}} no-dot">{{.Event}}</span>
+    </span>
+    <span class="timeline-actor">
+      {{if .Actor}}<code>{{.Actor}}</code>{{else}}<span class="text-muted">system</span>{{end}}
+    </span>
     <span class="timeline-detail">
       {{$kv := parseAuditDetails .Details}}
       {{range $kv}}<span class="kv-inline"><span class="k">{{.K}}</span>{{.V}}</span> {{end}}
@@ -49,4 +52,6 @@
 </article>
 {{end}}
 
-<p class="mt-4"><a href="/">← 返回首页</a></p>
+<div class="mt-5">
+  <a href="/" class="btn-secondary">← 返回首页</a>
+</div>

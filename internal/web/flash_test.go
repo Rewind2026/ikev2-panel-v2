@@ -437,9 +437,9 @@ func TestLoadTemplates_LoginHasNoNav(t *testing.T) {
 	if strings.Contains(body, "登出") {
 		t.Errorf("login 页不应渲染 nav（含'登出'按钮）:\n%s", body)
 	}
-	if !strings.Contains(body, "管理员登录") {
+	if !strings.Contains(body, "欢迎回来") {
 		t.Logf("DEBUG login body (%d bytes):\n%s", len(body), body)
-		t.Errorf("login 页应渲染登录表单")
+		t.Errorf("login 页应渲染登录表单 (PR19 标题: 欢迎回来)")
 	}
 }
 

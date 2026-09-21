@@ -13,29 +13,76 @@
     - v2.86-PR12.19: 5 OS tabs
 */}}
 
-<header class="page-header">
-  <hgroup>
-    <h1>{{.User.Username}}</h1>
-    <p>ID #{{.User.ID}}{{if .User.Note}} · {{.User.Note}}{{end}}</p>
-  </hgroup>
-  <div class="page-meta">
-    {{if .User.Enabled}}<span class="badge ok">启用</span>{{else}}<span class="badge danger">停用</span>{{end}}
-    {{if gt .User.SpeedLimitMbps 0}}<span class="badge">{{.User.SpeedLimitMbps}} Mbps</span>{{end}}
+{{/*
+  v2.86-PR19 — 用户详情页(头部 + layout 重做, body 保留 PR12.20 mobileconfig 表单)
+*/}}
+
+<div class="user-detail-header">
+  <div class="user-avatar" aria-hidden="true">{{slice .User.Username 0 1}}</div>
+  <div class="user-meta">
+    <h1>
+      <span>{{.User.Username}}</span>
+      {{if .User.Enabled}}<span class="chip ok no-dot">启用</span>{{else}}<span class="chip danger no-dot">停用</span>{{end}}
+      {{if .UserOnline}}<span class="chip brand no-dot">在线</span>{{end}}
+    </h1>
+    <p class="page-sub">
+      <code>#{{.User.ID}}</code>
+      {{if .User.Note}}· {{.User.Note}}{{end}}
+    </p>
+    <div class="user-quick-stats">
+      {{if gt .User.SpeedLimitMbps 0}}
+      <div class="user-quick-stat">
+        <span class="qs-label">限速</span>
+        <span class="qs-value">{{.User.SpeedLimitMbps}} Mbps</span>
+      </div>
+      {{end}}
+      <div class="user-quick-stat">
+        <span class="qs-label">过期</span>
+        <span class="qs-value">{{if eq .User.ExpiresAt 0}}永不过期{{else}}{{formatTime .User.ExpiresAt}}{{end}}</span>
+      </div>
+      <div class="user-quick-stat">
+        <span class="qs-label">入站流量</span>
+        <span class="qs-value">{{formatBytes .User.BytesInTotal}}</span>
+      </div>
+      <div class="user-quick-stat">
+        <span class="qs-label">出站流量</span>
+        <span class="qs-value">{{formatBytes .User.BytesOutTotal}}</span>
+      </div>
+      <div class="user-quick-stat">
+        <span class="qs-label">创建于</span>
+        <span class="qs-value">{{if .User.CreatedAt}}{{formatTime .User.CreatedAt}}{{else}}—{{end}}</span>
+      </div>
+      <div class="user-quick-stat">
+        <span class="qs-label">最后活跃</span>
+        <span class="qs-value {{if .UserOnline}}ok{{end}}">{{if eq .User.LastUsedAt 0}}从未{{else}}{{formatTime .User.LastUsedAt}}{{end}}</span>
+      </div>
+    </div>
   </div>
-</header>
+  <div class="user-detail-actions">
+    <a href="/users" class="btn-secondary btn-sm">← 返回列表</a>
+    <form method="POST" action="/users/{{.User.ID}}/reset" style="display:inline;">
+      <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+      <button type="submit" class="btn-secondary btn-sm" onclick="return confirm('重置 {{.User.Username}} 的密码?')">重置密码</button>
+    </form>
+    <form method="POST" action="/users/{{.User.ID}}/delete" style="display:inline;">
+      <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+      <button type="submit" class="btn-danger btn-sm" onclick="return confirm('确认删除 {{.User.Username}}?此操作不可逆。')">删除用户</button>
+    </form>
+  </div>
+</div>
 
 {{if .Flash}}<div class="banner-warn alert-warn">{{.Flash}}</div>{{end}}
 {{if .NewPassword}}
 <div class="banner-warn alert-warn">
   <div>
-    <strong>用户密码已重置:</strong><code>{{.NewPassword}}</code>
-    <small>(仅显示这一次,请记录后再关闭)</small>
+    <strong>用户密码已重置:</strong><code style="font-size: 0.9375rem;">{{.NewPassword}}</code>
+    <small style="display: block; margin-top: 0.4rem;">⚠️ 仅显示这一次,请记录后再关闭。</small>
   </div>
 </div>
 {{end}}
 {{if .Error}}<div class="banner-danger alert-danger">{{.Error}}</div>{{end}}
 
-{{/* v2.86-PR12.21: dashboard-grid 主舞台 = topology(此用户聚焦) + 侧栏 = side-stats */}}
+{{/* v2.86-PR19: dashboard-grid 主舞台 = topology(此用户聚焦) + 侧栏 = system metrics */}}
 <div class="dashboard-grid">
   <div class="dashboard-main">
 
@@ -43,13 +90,15 @@
     <div class="topology"
          data-server-addr="{{.ServerAddr}}"
          data-server-state="{{if .User.Enabled}}ok{{else}}warn{{end}}"
-         data-clients='[{{jsonOneClient .User}}]'
+         data-clients='[{{jsonOneClient .User .UserOnline}}]'
          data-focus-user="{{.User.Username}}"
          data-height="280">
     </div>
 
     {{/* 客户端配置 */}}
-    <h3 class="mt-5">客户端配置</h3>
+    <div class="card-head" style="margin-top: 2rem; margin-bottom: 0; padding-left: 0; padding-right: 0; border: 0;">
+      <h2 style="font-size: 1rem;">客户端配置</h2>
+    </div>
     <article>
       <div class="os-tabs">
         <button type="button" data-os-key="apple">
@@ -268,83 +317,44 @@
       </div>
     </article>
 
-    {{/* 操作 */}}
-    <h3 class="mt-5">操作</h3>
-    <article>
-      <div class="row">
-        <form method="POST" action="/users/{{.User.ID}}/reset-password" onsubmit="return confirm('确认重置密码?当前正在连接的客户端会立即掉线,且原密码无法恢复。')">
-          <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-          <button type="submit" class="secondary">重置密码</button>
-        </form>
-        {{if .User.Enabled}}
-          <form method="POST" action="/users/{{.User.ID}}/disable" onsubmit="return confirm('确认停用?正在连接的客户端会被踢下线,无法撤销。')">
-            <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-            <button type="submit" class="secondary">停用</button>
-          </form>
-        {{else}}
-          <form method="POST" action="/users/{{.User.ID}}/enable">
-            <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-            <button type="submit">启用</button>
-          </form>
-        {{end}}
-        <a href="/users/{{.User.ID}}/delete" role="button" class="contrast">删除</a>
-      </div>
-    </article>
+    {{/* v2.86-PR19: 重置密码 / 删除用户 已经在 user-detail-header 里,这里不再重复 */}}
 
   </div>
 
   <aside class="dashboard-side">
-
-    {{/* v2.86-PR12.21: SideStats 6 行 (状态/限速/过期/流量/创建/最后活跃 + 备注) */}}
-    <div class="side-stats">
-      <div class="side-stat">
-        <span class="side-stat-label">状态</span>
-        <span class="side-stat-value {{if .User.Enabled}}ok{{else}}danger{{end}}">
-          {{if .User.Enabled}}● 启用{{else}}○ 停用{{end}}
-        </span>
-      </div>
-      <div class="side-stat">
-        <span class="side-stat-label">限速</span>
-        <span class="side-stat-value">
-          {{if eq .User.SpeedLimitMbps 0}}<span class="text-muted">不限</span>{{else}}{{.User.SpeedLimitMbps}} Mbps{{end}}
-        </span>
-      </div>
-      <div class="side-stat">
-        <span class="side-stat-label">过期</span>
-        <span class="side-stat-value {{if and (gt .User.ExpiresAt 0) (lt .User.ExpiresAt .NowUnix)}}danger{{end}}">
-          {{if eq .User.ExpiresAt 0}}<span class="text-muted">永不过期</span>{{else}}{{formatTime .User.ExpiresAt}}{{end}}
-        </span>
-      </div>
-      <div class="side-stat">
-        <span class="side-stat-label">↓ 入站</span>
-        <span class="side-stat-value">{{formatBytes .User.BytesInTotal}}</span>
-      </div>
-      <div class="side-stat">
-        <span class="side-stat-label">↑ 出站</span>
-        <span class="side-stat-value">{{formatBytes .User.BytesOutTotal}}</span>
-      </div>
-      <div class="side-stat">
-        <span class="side-stat-label">创建于</span>
-        <span class="side-stat-value text-muted">{{formatTime .User.CreatedAt}}</span>
-      </div>
-      <div class="side-stat">
-        <span class="side-stat-label">最后活跃</span>
-        <span class="side-stat-value text-muted">
-          {{if eq .User.LastUsedAt 0}}从未{{else}}{{formatTime .User.LastUsedAt}}{{end}}
-        </span>
-      </div>
-    </div>
+    {{/* v2.86-PR19: 侧栏显示补充操作 + 备注(quick-stats 已经在 header 里) */}}
 
     {{if .User.Note}}
-    <div class="side-stats">
-      <div class="side-stat" style="flex-direction: column; align-items: flex-start; gap: 0.25rem;">
-        <span class="side-stat-label">备注</span>
-        <span style="font-size: 0.875rem; color: var(--ikev2-fg);">{{.User.Note}}</span>
+    <div class="card">
+      <div class="card-head" style="padding: 0.75rem 1rem;">
+        <h3 style="font-size: 0.8125rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--ikev2-fg-muted); font-weight: 600;">备注</h3>
       </div>
+      <div class="card-body-tight" style="font-size: 0.875rem; line-height: 1.6;">{{.User.Note}}</div>
     </div>
     {{end}}
+
+    <div class="card">
+      <div class="card-head" style="padding: 0.75rem 1rem;">
+        <h3 style="font-size: 0.8125rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--ikev2-fg-muted); font-weight: 600;">用户操作</h3>
+      </div>
+      <div class="card-body-tight" style="display: flex; flex-direction: column; gap: 0.5rem;">
+        {{if .User.Enabled}}
+          <form method="POST" action="/users/{{.User.ID}}/disable" onsubmit="return confirm('确认停用?正在连接的客户端会被踢下线,无法撤销。')">
+            <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+            <button type="submit" class="btn-secondary btn-block" style="width: 100%;">停用账号</button>
+          </form>
+        {{else}}
+          <form method="POST" action="/users/{{.User.ID}}/enable">
+            <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+            <button type="submit" class="btn-primary btn-block" style="width: 100%;">启用账号</button>
+          </form>
+        {{end}}
+      </div>
+    </div>
 
   </aside>
 </div>
 
-<p class="mt-4"><a href="/users">← 返回用户列表</a></p>
+<div class="mt-5">
+  <a href="/users" class="btn-secondary">← 返回用户列表</a>
+</div>
