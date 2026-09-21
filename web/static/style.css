@@ -936,24 +936,300 @@ label input[type="checkbox"], label input[type="radio"] { width: auto; margin-ri
 .mb-4 { margin-bottom: var(--ikev2-rhythm-4); }
 
 /* ============================================================================
-   Login page
+   Login page (v2.86-PR18 visual-first brand split)
    ============================================================================ */
+
+/* --- 整页:全屏背景 + 居中容器 --- */
 body.login-page {
-  background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%);
+  background: var(--ikev2-bg);
+  color: var(--ikev2-fg);
   min-height: 100vh;
-  display: flex; align-items: center; justify-content: center;
-  padding: var(--ikev2-rhythm-5);
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  padding: 0;
+  font-family: var(--ikev2-font-ui, "Inter", -apple-system, "Segoe UI", system-ui, sans-serif);
 }
+body.login-page main {
+  width: 100%;
+  max-width: none;
+  padding: 0;
+  margin: 0;
+}
+
+/* --- 双列布局 --- */
+.login-split {
+  display: grid;
+  grid-template-columns: 1fr 460px;
+  width: 100%;
+  min-height: 100vh;
+}
+@media (max-width: 960px) {
+  .login-split { grid-template-columns: 1fr; }
+  .login-brand { display: none; }
+}
+
+/* --- 左侧品牌区 --- */
+.login-brand {
+  position: relative;
+  overflow: hidden;
+  padding: 48px 56px;
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+  background: linear-gradient(135deg, #4f46e5 0%, #6366f1 50%, #818cf8 100%);
+  color: #fff;
+}
+.login-brand::before {
+  /* 浅色 dot grid 底纹 */
+  content: "";
+  position: absolute; inset: 0;
+  background-image: radial-gradient(circle, rgba(255,255,255,0.16) 1px, transparent 1px);
+  background-size: 28px 28px;
+  opacity: 0.5;
+  pointer-events: none;
+}
+.login-brand-bg {
+  position: absolute;
+  right: -120px; bottom: -120px;
+  width: 720px; height: 720px;
+  color: rgba(255, 255, 255, 0.55);
+  pointer-events: none;
+  z-index: 0;
+}
+.login-brand > * { position: relative; z-index: 1; }
+
+.login-brand-mark {
+  display: inline-flex;
+  width: 56px; height: 56px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.18);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  transition: transform .2s ease, background .2s ease;
+}
+.login-brand-mark svg { width: 30px; height: 30px; }
+.login-brand-mark:hover {
+  background: rgba(255, 255, 255, 0.28);
+  transform: translateY(-1px);
+}
+
+.login-brand-name {
+  margin: 0;
+  font-size: 36px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+}
+.login-brand-tag {
+  margin: -16px 0 0;
+  font-size: 15px;
+  color: rgba(255, 255, 255, 0.85);
+  letter-spacing: 0.02em;
+}
+
+.login-brand-points {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.92);
+}
+.login-brand-points li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.login-brand-points .dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  flex: 0 0 8px;
+  box-shadow: 0 0 0 4px rgba(255,255,255,0.15);
+}
+.login-brand-points .dot-ok   { background: #34d399; }
+.login-brand-points .dot-warn { background: #fbbf24; }
+
+.login-brand-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding-top: 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.18);
+  font-size: 13px;
+}
+.login-brand-meta .meta-label {
+  color: rgba(255, 255, 255, 0.7);
+  flex: 0 0 64px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.login-brand-meta .meta-value {
+  font-family: var(--ikev2-font-mono, "JetBrains Mono", ui-monospace, "SF Mono", Consolas, monospace);
+  font-size: 13px;
+  background: rgba(255, 255, 255, 0.14);
+  padding: 3px 10px;
+  border-radius: 6px;
+  color: #fff;
+  word-break: break-all;
+}
+
+/* --- 右侧登录卡 --- */
 .login-card {
-  width: 100%; max-width: 380px;
-  background: var(--ikev2-bg-elevated);
-  border-radius: var(--ikev2-radius-xl);
-  padding: var(--ikev2-rhythm-6) var(--ikev2-rhythm-5);
-  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+  width: 100%;
+  max-width: 460px;
+  align-self: center;
+  justify-self: center;
+  margin: auto;
+  padding: 56px 48px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  background: var(--ikev2-bg);
 }
-.login-card h1 { margin: 0 0 var(--ikev2-rhythm-2); text-align: center; }
-.login-card .login-sub { text-align: center; color: var(--ikev2-fg-muted); margin-bottom: var(--ikev2-rhythm-5); }
-.login-card button[type="submit"] { width: 100%; justify-content: center; }
+@media (max-width: 960px) {
+  .login-card { max-width: 480px; padding: 48px 32px; }
+}
+@media (max-width: 480px) {
+  .login-card { padding: 40px 24px; }
+}
+
+.login-card-head { margin: 0; }
+.login-card-head h1 {
+  margin: 0 0 8px;
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--ikev2-fg);
+}
+.login-card-head p {
+  margin: 0;
+  font-size: 14px;
+  color: var(--ikev2-fg-muted);
+}
+
+/* --- 表单 --- */
+.login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.login-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.login-field-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ikev2-fg);
+  letter-spacing: 0.01em;
+}
+.login-field-input {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.login-field-icon {
+  position: absolute;
+  left: 14px;
+  width: 18px; height: 18px;
+  color: var(--ikev2-fg-subtle);
+  pointer-events: none;
+}
+.login-field-input input {
+  width: 100%;
+  height: 48px;
+  padding: 0 14px 0 44px;
+  font: inherit;
+  font-size: 15px;
+  color: var(--ikev2-fg);
+  background: var(--ikev2-bg-soft);
+  border: 1px solid var(--ikev2-border);
+  border-radius: 12px;
+  outline: none;
+  transition: border-color .15s ease, box-shadow .15s ease, background .15s ease;
+}
+.login-field-input input::placeholder { color: var(--ikev2-fg-subtle); }
+.login-field-input input:hover { border-color: var(--ikev2-border-strong); }
+.login-field-input input:focus {
+  border-color: var(--ikev2-brand);
+  background: var(--ikev2-bg);
+  box-shadow: 0 0 0 4px var(--ikev2-brand-ring);
+}
+
+/* --- 提交按钮(带箭头) --- */
+.login-submit {
+  margin-top: 8px;
+  height: 50px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 0 22px;
+  font: inherit;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: #fff;
+  background: linear-gradient(135deg, var(--ikev2-brand) 0%, #6366f1 100%);
+  border: 0;
+  border-radius: 12px;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(79, 70, 229, 0.32);
+  transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
+}
+.login-submit:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 22px rgba(79, 70, 229, 0.42);
+  filter: brightness(1.04);
+}
+.login-submit:active { transform: translateY(0); filter: brightness(0.96); }
+.login-submit:focus-visible {
+  outline: 0;
+  box-shadow: 0 0 0 4px var(--ikev2-brand-ring), 0 4px 14px rgba(79, 70, 229, 0.32);
+}
+.login-submit-arrow {
+  width: 18px; height: 18px;
+  transition: transform .2s ease;
+}
+.login-submit:hover .login-submit-arrow { transform: translateX(3px); }
+
+/* --- 卡脚注 --- */
+.login-card-foot {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--ikev2-fg-muted);
+  text-align: center;
+}
+.login-card-foot-hint { color: var(--ikev2-fg-subtle); }
+
+/* --- 深色主题微调 --- */
+[data-theme="dark"] body.login-page {
+  background: #0b1020;
+}
+[data-theme="dark"] .login-card {
+  background: #0f172a;
+}
+[data-theme="dark"] .login-field-input input {
+  background: #1e293b;
+  border-color: #334155;
+  color: #f1f5f9;
+}
+[data-theme="dark"] .login-field-input input::placeholder { color: #64748b; }
+[data-theme="dark"] .login-field-input input:focus {
+  background: #0f172a;
+  border-color: #818cf8;
+}
+[data-theme="dark"] .login-card-head h1 { color: #f1f5f9; }
+[data-theme="dark"] .login-card-head p { color: #94a3b8; }
+[data-theme="dark"] .login-field-label { color: #cbd5e1; }
 
 /* ============================================================================
    用户列表 (users_list)

@@ -35,6 +35,7 @@ type Server struct {
 	Limiter    *limit.Limiter
 	Templates  *template.Template
 	SessionTTL time.Duration
+	Version    string // v2.86-PR18:面板版本号(由 main.go 注入,登录页品牌区展示用)
 
 	// HTTPS / 证书
 	Cert          *tls.Certificate // 面板 HTTPS 证书（M5+）
@@ -44,6 +45,9 @@ type Server struct {
 	ServerCN      string           // mobileconfig RemoteIdentifier
 	CACertPEM     []byte           // mobileconfig 内联 CA
 	CertIncludeCA bool             // true = 自签模式；false = LE 模式
+	// v2.86-PR12.23:PayloadIdentifier 反向 DNS 前缀(不含 ".username")。
+	// 默认 cert.DefaultPayloadIdentifierBase;空 → cert 内 fallback。
+	PayloadIdentifierBase string
 	// v2-76+：EAP-MSCHAPv2 模式。mobileconfig 的 AuthName/AuthPassword 从 user 对象取（per-user），
 	// server-level 不再持有共享密钥。
 

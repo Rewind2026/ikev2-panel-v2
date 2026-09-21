@@ -14,8 +14,11 @@ import (
 // loginPageData 登录页模板数据。
 type loginPageData struct {
 	PageMeta        // P1-B
-	Error    string // 用户名/密码错误时回显
-	Username string // 表单回显（避免重复输入）
+	Error      string // 用户名/密码错误时回显
+	Username   string // 表单回显（避免重复输入）
+	Host       string // v2.86-PR18:展示给用户的服务地址(host:port),帮用户确认面板实例
+	Version    string // v2.86-PR18:面板版本号,用于品牌区底部 meta
+	SessionTTL string // v2.86-PR18:人类可读的 session TTL(例如 "24h"),给登录卡底部 hint
 }
 
 // handleLoginPage GET /login。已登录则 302 → /。
@@ -27,8 +30,17 @@ func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// v2.86-PR18:设 PageKey 让 layout 给 body 加 .login-page,
+	// 否则浅色主题下 flex 居中、深色渐变背景都不会生效。
+	host := s.PanelHost
+	if host == "" {
+		host = r.Host // fallback 到请求 host,admin 可看到当前访问的 url
+	}
 	s.RenderPage(w, "login", loginPageData{
-		PageMeta: PageMeta{Page: "login", Title: "登录"},
+		PageMeta: PageMeta{Page: "login", PageKey: "login", Title: "登录"},
+		Host:       host,
+		Version:    s.Version,
+		SessionTTL: s.SessionTTL.String(), // "24h" 等
 	})
 }
 
@@ -54,7 +66,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			if s.RateLimiter != nil {
 				auth.RecordLoginFail(s.RateLimiter, r)
 			}
-			s.renderLoginError(w, username, "用户名或密码错误")
+			s.renderLoginError(w, r, username, "用户名或密码错误")
 			return
 		}
 		s.Logger.Error("get admin", "err", err)
@@ -75,7 +87,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 					"username", username)
 			}
 		}
-		s.renderLoginError(w, username, "用户名或密码错误")
+		s.renderLoginError(w, r, username, "用户名或密码错误")
 		return
 	}
 
@@ -124,12 +136,20 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/login", http.StatusFound)
 }
 
-func (s *Server) renderLoginError(w http.ResponseWriter, username, msg string) {
+func (s *Server) renderLoginError(w http.ResponseWriter, r *http.Request, username, msg string) {
 	w.WriteHeader(http.StatusUnauthorized)
+	// v2.86-PR18:同上,补 PageKey 让 layout 给 body 加 .login-page。
+	host := s.PanelHost
+	if host == "" {
+		host = r.Host
+	}
 	s.RenderPage(w, "login", loginPageData{
-		PageMeta: PageMeta{Page: "login", Title: "登录"},
-		Error:    msg,
-		Username: username,
+		PageMeta: PageMeta{Page: "login", PageKey: "login", Title: "登录"},
+		Error:      msg,
+		Username:   username,
+		Host:       host,
+		Version:    s.Version,
+		SessionTTL: s.SessionTTL.String(),
 	})
 }
 

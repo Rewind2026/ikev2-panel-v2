@@ -426,6 +426,7 @@ func main() {
 		Limiter:       lm,
 		Templates:     tmpl,
 		SessionTTL:    cfg.SessionTTL,
+		Version:       panelVersion, // v2.86-PR18:登录页品牌区展示用
 		Cert:          tlsCert,
 		Secure:        cfg.CookieSecure,
 		ServerAddr:    mcAddr,
@@ -433,6 +434,9 @@ func main() {
 		ServerCN:      cfg.ServerCN,
 		CACertPEM:     caCertPEM,
 		CertIncludeCA: includeCA,
+		// v2.86-PR12.23:PayloadIdentifier 反向 DNS 前缀。空 → cert 内 fallback 默认值。
+		// env IKEV2_PAYLOAD_ID_BASE 覆盖(给有自有反向域名的用户用)。
+		PayloadIdentifierBase: os.Getenv("IKEV2_PAYLOAD_ID_BASE"),
 		InstallTokens: installTokens,
 		FlashStore:    flashStore,
 		// P1-C：M6 监控所需的服务端信息。
@@ -587,6 +591,9 @@ func main() {
 				Iface:    iface,
 				Period:   60 * time.Second,
 				Logger:   logger,
+				// v2.86-PR16:让 ipv6watch 的 reload 走 Manager.ReloadAll,
+				// 复用 reloadMu,避免和 web handler 并发时 charon 读到半截 conf.d（H2）。
+				Reloader: scm,
 			})
 			if err != nil {
 				logger.Warn("ipv6watch exited", "err", err)
@@ -642,6 +649,47 @@ func main() {
 	logger.Info("background goroutines started",
 		"count", len(bgList),
 		"names", strings.Join(bgList, ","))
+
+	// v2.86-PR17:明文 HTTP 监听(内网/调试用)。
+	// - cfg.HTTPListenAddr == "" → 不起,行为跟之前完全一致
+	// - cfg.HTTPListenAddr != "" → 起第二个 http.Server(handler 共用),
+	//   自动关 cookie Secure,并打醒目 WARN 提醒 admin cookie 走明文
+	if cfg.HTTPListenAddr != "" {
+		if cfg.CookieSecure {
+			// HTTPS 入口下浏览器会拒收 Secure cookie,等同登录态丢失。
+			// 启 HTTP 入口时强制把 Secure 关掉,让 cookie 在明文入口能存能带。
+			cfg.CookieSecure = false
+			logger.Warn("cookie Secure auto-disabled because HTTP panel is enabled",
+				"reason", "Secure cookies are dropped by browsers on plain http",
+				"action", "set IKEV2_COOKIE_SECURE=true only if you do NOT use the HTTP entrypoint")
+		}
+		// 把 web.Server.Secure 同步刷新(handler 渲染 cookie 时会读)
+		srv.Secure = cfg.CookieSecure
+		logger.Warn("HTTP panel listening (plaintext); admin session cookie is now in cleartext",
+			"addr", cfg.HTTPListenAddr,
+			"safety", "bind to 127.0.0.1 or trusted LAN only; never expose to public internet",
+			"note", "this listener is independent of HTTPS/IKEv2/strongSwan and does not affect tunnel certificates")
+		httpPlainSrv := &http.Server{
+			Addr:              cfg.HTTPListenAddr,
+			Handler:           handler,
+			ReadHeaderTimeout: 5 * time.Second,
+			// 故意不带 TLSConfig → 走 ListenAndServe() 明文
+		}
+		go func() {
+			if err := httpPlainSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				logger.Error("http (plaintext) server error", "err", err, "addr", cfg.HTTPListenAddr)
+				stop()
+			}
+		}()
+		// 优雅关闭时也要 Shutdown 第二个 server
+		defer func() {
+			shutdownCtx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel2()
+			if err := httpPlainSrv.Shutdown(shutdownCtx2); err != nil {
+				logger.Error("http (plaintext) graceful shutdown failed", "err", err)
+			}
+		}()
+	}
 
 	go func() {
 		if tlsCert != nil {
