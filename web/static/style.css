@@ -576,6 +576,10 @@ tbody tr:hover td{ background:rgba(34,211,238,0.04);}
   z-index:200;
   display:flex; flex-direction:column;
 }
+/* v2.86-pr21 fix:HTML5 [hidden] 属性的 user-agent 样式优先级低于 class display:flex,
+   必须用 !important 拉回优先级,否则菜单一直显示(不受 JS toggle 控制)。
+   这是 hidden 属性 + display:flex 共存的标准踩坑点。 */
+.topbar-menu[hidden]{ display:none !important; }
 .topbar-menu-item{
   display:flex; align-items:center; gap:0.6rem;
   width:100%; padding:0.5rem 0.65rem;
