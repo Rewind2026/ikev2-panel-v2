@@ -6,7 +6,7 @@
 //   - POST /api/cert/clear    清除证书配置(回到 env 默认)
 //
 // 设计要点:
-//   - cert.conf 是"配置"(域名/模式),不是"凭证",**不需要 audit + 二次确认 + mask**
+//   - cert.conf 是"配置"(域名/模式),不是"凭证",**不需要 audit + mask**
 //     (跟 aliyun.creds 区分)
 //   - Validate 在 WriteCertConfig 内部完成(handler 只透传 error)
 //   - 写文件后,新配置要 **重启容器** 才生效(原因见 panelstate/cert.go 注释)
@@ -145,7 +145,6 @@ func (s *Server) handleCertSave(w http.ResponseWriter, r *http.Request) {
 // 副作用:
 //   - 删除 /data/panel-state/cert.conf
 //   - 重启后 Go 进程从 env 读 CertMode/Domain/CN
-//   - 不需要二次确认(用户主动点"清除"按钮,意图明确)
 func (s *Server) handleCertClear(w http.ResponseWriter, r *http.Request) {
 	if s.CertConfigStore == nil {
 		http.Error(w, "cert config store not initialized", http.StatusInternalServerError)

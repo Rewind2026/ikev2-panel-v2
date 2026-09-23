@@ -188,7 +188,7 @@ func New(srv *Server, staticDir string) http.Handler {
 
 	// v2-83:阿里云凭证卡 API(面板 UI 调)
 	//   - GET  /api/aliyun/status   查询当前凭证状态(已配置/未配置/来源)
-	//   - POST /api/aliyun/save     保存凭证(需要 confirm=yes 二次确认)
+	//   - POST /api/aliyun/save     保存凭证
 	//   - POST /api/aliyun/clear    清除凭证
 	mux.Handle("GET /api/aliyun/status", protect(http.HandlerFunc(srv.handleAliyunStatus)))
 	mux.Handle("POST /api/aliyun/save", protectPOST(http.HandlerFunc(srv.handleAliyunSave)))

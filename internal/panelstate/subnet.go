@@ -25,8 +25,8 @@
 //   - subnet.conf 是"配置 + 运行期 reload"(只动 pool 段,charon 不需要重启证书栈)
 //
 // 跟 aliyun.creds 的区别:
-//   - aliyun.creds 是"凭证",需要 mask + audit + 二次确认
-//   - subnet.conf 是"配置",**不需要 audit + mask + 二次确认**(IP 段不是凭证)
+//   - aliyun.creds 是"凭证",需要 mask + audit
+//   - subnet.conf 是"配置",**不需要 audit + mask**(IP 段不是凭证)
 //
 // 设计见 docs/design.md §19.6(v2-83 panelstate 基础)+ v2.86-PR13.2 扩展。
 package panelstate

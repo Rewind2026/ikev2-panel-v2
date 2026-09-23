@@ -9,7 +9,7 @@
 //   - 跟 cert.conf 一样持久化,但**不需要重启容器** —— Go 进程写完 panelstate
 //     后立即调 Manager.UpdatePoolsAndReload,运行期生效
 //   - 副作用:swanctl --load-all 会中断活跃 SA(~500ms),客户端需要重新拨号
-//   - 不需要 audit + mask + 二次确认(IP 段不是凭证)
+//   - 不需要 audit + mask(IP 段不是凭证)
 //   - clear() 不动 swanctl.conf —— 因为"清除 panelstate"≠"清空 swanctl.conf 段",
 //     要清空 swanctl.conf 必须重新给一对合法值。clear 等价于"重启容器时不再用 panelstate 覆盖"
 //
@@ -160,7 +160,6 @@ func (s *Server) handleSubnetSave(w http.ResponseWriter, r *http.Request) {
 //     实际生效的值"(由 main.go 启动期从 swanctl.conf 读出,作为 Server.StartupIPv4Subnet
 //     注入)。这样用户点"清除"后客户端不需要等重启,立即用回上一段。
 //   - 行为对齐 cert.conf / aliyun.creds 的 clear("清掉 panelstate + 立即生效")
-//   - 不需要二次确认(用户主动点"清除"按钮,意图明确)
 //
 // 边界:
 //   - StartupIPv4Subnet 为空(dev 模式 / swanctl.conf 不可读)→ 不动 swanctl.conf,

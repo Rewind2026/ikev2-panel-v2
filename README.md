@@ -573,12 +573,12 @@ v2-79 已经内置 `internal/swanctl/ipv6watch.go`：
 - 证书不变(SAN 只放域名,DNS-01 跟 IP 无关)
 - 失败时面板顶部红色横幅告警 + 最多 3 次自动重试
 
-**v2-83 凭证统一**:不用在 `.env` 写两套凭证(`Ali_Key` + `ALIYUN_ACCESS_KEY_*`),统一在面板"阿里云 API 凭证"卡片填(type=password + confirm=yes 二次确认)。
+**v2-83 凭证统一**:不用在 `.env` 写两套凭证(`Ali_Key` + `ALIYUN_ACCESS_KEY_*`),统一在面板"阿里云 API 凭证"卡片填(type=password)。
 
 启用:
 ```bash
 # 方式 A:推荐 — 面板填
-#   面板首页 → 阿里云 API 凭证卡片 → 填 ID + Secret → 勾 confirm=yes → 保存
+#   面板首页 → 阿里云 API 凭证卡片 → 填 ID + Secret → 保存
 #   DDNS 下次 tick (60s) 自动用新凭证
 
 # 方式 B:.env 写

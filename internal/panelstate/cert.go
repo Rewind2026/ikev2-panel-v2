@@ -21,7 +21,7 @@
 //	}
 //
 // 跟 aliyun.creds 的区别:
-//   - alyun.creds 是"凭证"(AccessKey),需要 mask + audit + 二次确认
+//   - alyun.creds 是"凭证"(AccessKey),需要 mask + audit
 //   - cert.conf 是"配置"(域名/模式),**不需要 audit + mask**,但需要:
 //     1. validate cert_mode ∈ {self-signed, letsencrypt}
 //     2. validate domain 是合法 FQDN(不能是 IP,不能空除非 self-signed)
