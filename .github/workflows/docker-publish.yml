@@ -1,15 +1,19 @@
 name: docker-publish
 
 # v2.79.2 起：源码在 GitHub Actions 上编译并推送多架构镜像到 ghcr.io
+# v2.86-PR16 起：push main 也触发 → 每次合 main 都自动重打 :latest + :sha-xxxxxxx
 # 触发：
-#   1. push tag v*  → 构建对应 tag（如 v2.79.2 → :2.79.2, :v2.79.2, :latest）
-#   2. workflow_dispatch  → 手动触发（可选输入 ref / 自定义 tag）
+#   1. push main      → 打 :latest + :sha-<7 位 commit>
+#   2. push tag v*    → 打 :<版本> + :v<版本> + :latest（如果 tag 在 main 上）
+#   3. workflow_dispatch → 手动触发（可选输入 ref / 自定义 tag）
 #
 # 镜像仓库：ghcr.io/rewind2026/ikev2-panel-v2
 # 凭据：用 GitHub 自带 GITHUB_TOKEN，无需额外 PAT
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*"
   workflow_dispatch:
@@ -62,17 +66,22 @@ jobs:
       - name: Compute image tags
         id: meta
         run: |
-          # 优先用 push 触发的 tag（去掉 v 前缀），否则用 workflow_dispatch 输入或 commit SHA
+          # 触发顺序：tag > main push > workflow_dispatch
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            # push tag v2.79.2 → :2.79.2 + :v2.79.2 + :latest
             RAW_TAG="${GITHUB_REF_NAME}"            # e.g. v2.79.2
             SHORT="${RAW_TAG#v}"                     # e.g. 2.79.2
-            TAGS="${REGISTRY}/${IMAGE_NAME}:${SHORT},${REGISTRY}/${IMAGE_NAME}:${RAW_TAG}"
-            # main 分支的 tag 自动同步 latest
-            TAGS="${TAGS},${REGISTRY}/${IMAGE_NAME}:latest"
+            TAGS="${REGISTRY}/${IMAGE_NAME}:${SHORT},${REGISTRY}/${IMAGE_NAME}:${RAW_TAG},${REGISTRY}/${IMAGE_NAME}:latest"
+          elif [[ "${GITHUB_REF_TYPE}" == "branch" && "${GITHUB_REF_NAME}" == "main" ]]; then
+            # push main → :latest + :sha-<7 位>（部署端默认拉 :latest）
+            SHA="${GITHUB_SHA::7}"
+            TAGS="${REGISTRY}/${IMAGE_NAME}:latest,${REGISTRY}/${IMAGE_NAME}:sha-${SHA}"
           elif [[ -n "${{ github.event.inputs.tag }}" ]]; then
+            # 手动触发 + 自定义 tag
             CUSTOM="${{ github.event.inputs.tag }}"
             TAGS="${REGISTRY}/${IMAGE_NAME}:${CUSTOM}"
           else
+            # fallback（不会走到这里，main push 已覆盖）
             SHA="${GITHUB_SHA::7}"
             TAGS="${REGISTRY}/${IMAGE_NAME}:${SHA},${REGISTRY}/${IMAGE_NAME}:sha-${SHA}"
           fi

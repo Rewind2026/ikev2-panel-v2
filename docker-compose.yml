@@ -36,13 +36,25 @@
 
 services:
   ikev2-panel:
-    # v2.85-PR1:tag 从 PANEL_TAG 环境变量读(默认 v2.86),与 build.args 同步,
-    # 保证 README / compose / Dockerfile 三处一致。改一处,两处都跟着变。
-    image: ikev2-panel:${PANEL_TAG:-v2.86}
+    # v2.86-PR16:镜像源迁 ghcr.io,默认 tag :latest(每次 push main 都重打)。
+    # 老用户留 PANEL_TAG=v2.86-pr15 等显式 tag 仍可固定版本;不设则每次
+    # up -d 都拉最新 main commit 镜像。
+    #
+    # 默认 PANEL_TAG=latest + pull_policy: always:
+    #   部署体验:`docker compose up -d` 一行,自动拉最新 main 镜像。
+    #   老版本固定:`PANEL_TAG=v2.86-pr15 ./scripts/up.sh`。
+    #
+    # build 段保留(本地开发 / 没装 ghcr.io 凭证时兜底):
+    #   pull_policy=always → 总是先 pull ghcr,本地 build 仅作为离线 fallback。
+    #
+    # 注意:包是 public(https://github.com/users/Rewind2026/packages/container/ikev2-panel-v2),
+    #      不用 login 就能 pull;只有 push 才需要 PAT。
+    image: ghcr.io/rewind2026/ikev2-panel-v2:${PANEL_TAG:-latest}
     build:
       context: .
       args:
-        PANEL_VERSION: ${PANEL_TAG:-v2.86}
+        PANEL_VERSION: ${PANEL_TAG:-latest}
+    pull_policy: always
     container_name: ikev2-panel
     restart: unless-stopped
 
