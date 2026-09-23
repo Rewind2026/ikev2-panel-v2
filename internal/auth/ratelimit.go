@@ -22,8 +22,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"github.com/yourname/ikev2-panel-v2/internal/fsutil"
 )
 
 // RateLimitConfig 限速参数(可调)。
@@ -57,11 +61,11 @@ func DefaultRateLimitConfig(dataDir string) RateLimitConfig {
 
 // ipBucket 单 IP 的登录失败计数。
 type ipBucket struct {
-	mu             sync.Mutex
-	failCount      int
-	firstFailAt    time.Time
-	lockedUntil    time.Time
-	postReqs       []time.Time // 全局 POST 时间戳环形缓冲
+	mu          sync.Mutex
+	failCount   int
+	firstFailAt time.Time
+	lockedUntil time.Time
+	postReqs    []time.Time // 全局 POST 时间戳环形缓冲
 }
 
 // IsLocked 检查 IP 是否被锁。
@@ -129,6 +133,14 @@ type RateLimiter struct {
 	cfg     RateLimitConfig
 	buckets map[string]*ipBucket
 	persist map[string]persistedBucket // ip → 持久化字段(锁定信息)
+
+	// v2.86-PR15 P0 修复:saveToDisk 期间可能并发触发(同一时间多 IP 失败,
+	// 每个 IP 各自 RecordLoginFail → saveToDisk)。多个 goroutine 同时写
+	// 同一个 .tmp 文件 → 后者 close 时前者已 rename,前者 close 时拿到
+	// stale fd → 写错误 / tmp 残留。加 saveMu 串行化 flush。
+	//
+	// 注意:saveMu 不保护 rl.persist(rl.mu 负责);只保护磁盘 I/O。
+	saveMu sync.Mutex
 }
 
 // persistedBucket 仅持久化关键字段(login fail count + lockedUntil),
@@ -227,10 +239,24 @@ func (rl *RateLimiter) saveToDisk() error {
 	if err != nil {
 		return err
 	}
+	// 串行化磁盘写入,防止并发触发 saveToDisk 时两个 goroutine 撞同一个 .tmp。
+	rl.saveMu.Lock()
+	defer rl.saveMu.Unlock()
 	if err := os.MkdirAll(filepath.Dir(rl.cfg.PersistPath), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(rl.cfg.PersistPath, data, 0o600)
+	// v2.86-PR15 P0 修复:之前用 os.WriteFile 直接覆写 ratelimit.json。
+	// RecordLoginFail/Success 每次触发都写一次 → 高频路径 → 容器 OOM kill
+	// 发生在 write 中途 → JSON 半截 → loadFromDisk 解析失败 → 整个 rate-limit
+	// 状态丢失 → 5 次锁定计数清零(等于让暴力破解不受限)。
+	// 走 fsutil.AtomicWriteFile(write tmp + rename),保证持久化文件永远
+	// 是完整的旧版或完整的新版,不会半截。
+	//
+	// 性能注:5 次失败后 + 1 次成功 = 6 次 fsync 写,30 req/min 下多次/秒。
+	// fsutil.AtomicWriteFile 内部走 tmp + rename,比直接 WriteFile 慢约 30%
+	// 但相对业务耗时(网络/磁盘 I/O)可忽略。如果未来 perf 成问题,可加 timer
+	// 批量 flush(每 5 秒 sync 一次),但优先保留每次失败立即落盘的"安全语义"。
+	return fsutil.AtomicWriteFile(rl.cfg.PersistPath, data, 0o600)
 }
 
 func (rl *RateLimiter) loadFromDisk() error {
@@ -251,21 +277,61 @@ func (rl *RateLimiter) loadFromDisk() error {
 	return nil
 }
 
-// ClientIP 从 http.Request 取客户端 IP,处理 X-Forwarded-For(单层反向代理)。
+// ClientIP 从 http.Request 取客户端 IP。
+//
+// v2.86-PR15 P0 修复:之前默认无条件信任 X-Forwarded-For / X-Real-IP。
+// 这意味着公网部署时,任何客户端发 "X-Forwarded-For: 127.0.0.1" 即被识别为
+// 本机,绕过 5 次锁定阈值 → 登录端点无限速。
+//
+// 修复:必须显式设置 IKEV2_TRUSTED_PROXY=true 才读 XFF/X-Real-IP(且 XFF
+// 取**最左** IP,这是 RFC 7239 标准的"原始客户端"位置)。
+// 未设置时,ClientIP 直接走 RemoteAddr — 跟 v2.86-PR9 之前的行为一致,
+// 公网直接暴露无 NLB / 无反代时这是正确语义。
+//
+// 为什么不用 env 自动开启:
+//   - "set if behind NLB" 是用户主动决策,不应该自动推断。
+//   - 自动推断会让用户配了 NLB 但忘记 env 时出现"有些 IP 信任有些不信任"
+//     的诡异行为。
+//
+// 为什么是 env 不在 web Server 构造时注入:
+//   - 保持 ClientIP 是 pure function(http.Request → string),不依赖
+//     全局变量,便于测试 + 复用(可换 Redis 限速 / 多 server 复用)。
+//
+// 测试覆盖:isTrustedProxy 默认读 env,但测试可通过 ratelimit_test.go 内的
+// setTrustedProxyForTest() 临时覆盖,测试结束用 t.Cleanup 还原。
+func isTrustedProxy() bool {
+	return os.Getenv("IKEV2_TRUSTED_PROXY") == "true"
+}
+
+// trustedProxyOverride 测试用钩子;非 nil 时覆盖 env 行为。
+// 仅测试代码可写(ratelimit_test.go 的 setTrustedProxyForTest),生产路径
+// 永远走 isTrustedProxy() 读 env。
+var trustedProxyOverride atomic.Pointer[bool]
+
 func ClientIP(r *http.Request) string {
-	// X-Forwarded-For:格式 "client, proxy1, proxy2",取第一个
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		for i := 0; i < len(xff); i++ {
-			if xff[i] == ',' || xff[i] == ' ' {
-				return xff[:i]
+	trusted := isTrustedProxy()
+	if v := trustedProxyOverride.Load(); v != nil {
+		trusted = *v
+	}
+	if trusted {
+		// X-Forwarded-For 格式:"client, proxy1, proxy2",RFC 7239 标准取**最左** IP
+		//(最左是原始客户端,右侧追加每一层代理)。
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			// 取第一个 IP,处理前后空白
+			first := strings.TrimSpace(xff)
+			if idx := strings.IndexByte(first, ','); idx >= 0 {
+				first = strings.TrimSpace(first[:idx])
+			}
+			if first != "" {
+				return first
 			}
 		}
-		return xff
+		// X-Real-IP:Nginx 反代常用(单层反代场景)
+		if xri := r.Header.Get("X-Real-IP"); xri != "" {
+			return xri
+		}
 	}
-	// X-Real-IP:Nginx 反代常用
-	if xri := r.Header.Get("X-Real-IP"); xri != "" {
-		return xri
-	}
+	// 默认走 RemoteAddr。严格 split("host:port"),失败时 fallback r.RemoteAddr 原值
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr

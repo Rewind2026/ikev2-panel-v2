@@ -25,6 +25,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/yourname/ikev2-panel-v2/internal/fsutil"
 )
 
 // IPv6WatchConfig IPv6 watch-dog 配置。
@@ -119,10 +121,14 @@ func checkAndUpdateIPv6(cfg IPv6WatchConfig) error {
 	cfg.Logger.Info("ipv6watch: IPv6 address changed, updating swanctl.conf",
 		"old", oldV6, "new", newV6)
 
-	// 3. sed 替换
+	// 3. sed 替换 + 原子写
+	// v2.86-PR15 P0 修复:之前用 os.WriteFile 直接覆盖,容器 OOM kill / 重启
+	// 发生在 write 中途 → swanctl.conf 半截 → charon 拒启动 → VPN 全断。
+	// 走 fsutil.AtomicWriteFile(write tmp + rename),保证观察者永远看到
+	// 完整文件(要么旧要么新,不会半截)。
 	newConfStr := localAddrsRe.ReplaceAllString(confStr, fmt.Sprintf("local_addrs = %s", newV6))
-	if err := os.WriteFile(cfg.ConfPath, []byte(newConfStr), 0o644); err != nil {
-		return fmt.Errorf("write %s: %w", cfg.ConfPath, err)
+	if err := fsutil.AtomicWriteFile(cfg.ConfPath, []byte(newConfStr), 0o644); err != nil {
+		return fmt.Errorf("atomic write %s: %w", cfg.ConfPath, err)
 	}
 
 	// 4. reload。优先用 Manager.ReloadAll(复用 reloadMu);nil 时 fallback 到 fork-exec `swanctl --load-all`。

@@ -8,6 +8,7 @@
 //   5. 全局 POST 限速
 //   6. 持久化往返
 //   7. X-Forwarded-For / X-Real-IP / RemoteAddr 三种 IP 来源
+//      (v2.86-PR15:必须 IKEV2_TRUSTED_PROXY=true 才信任 XFF;默认走 RemoteAddr)
 package auth
 
 import (
@@ -18,6 +19,21 @@ import (
 	"testing"
 	"time"
 )
+
+// setTrustedProxyForTest 测试用 helper:覆盖 trustedProxyOverride,测试结束还原。
+//
+// 不放在 ratelimit.go(避免生产代码 import testing),放测试文件内通过包内
+// 访问 trustedProxyOverride 字段 + ClientIP() 内 atomic.Load 间接生效。
+func setTrustedProxyForTest(t *testing.T, v bool) func() {
+	t.Helper()
+	prev := trustedProxyOverride.Load()
+	ptr := new(bool)
+	*ptr = v
+	trustedProxyOverride.Store(ptr)
+	return func() {
+		trustedProxyOverride.Store(prev)
+	}
+}
 
 // helper:构造带 IP 的 *http.Request
 func newReqWithIP(ip string) *http.Request {
@@ -185,23 +201,36 @@ func TestRateLimit_PersistenceRoundtrip(t *testing.T) {
 	}
 }
 
-// TestRateLimit_ClientIP_XForwardedFor 测试 X-Forwarded-For 取首个 IP。
+// TestRateLimit_ClientIP_XForwardedFor 测试 X-Forwarded-For 取最左 IP。
+//
+// v2.86-PR15 P0 修复:必须 IKEV2_TRUSTED_PROXY=true 才信任 XFF。
+// 默认(trusted=false)→ ClientIP 忽略 XFF,走 RemoteAddr(127.0.0.1)。
 func TestRateLimit_ClientIP_XForwardedFor(t *testing.T) {
+	// 默认(未开启):应当忽略 XFF,走 RemoteAddr
 	r := newReqWithXFF("203.0.113.5, 10.0.0.1, 10.0.0.2")
-	got := ClientIP(r)
-	want := "203.0.113.5"
-	if got != want {
-		t.Fatalf("ClientIP(XFF) = %q, want %q", got, want)
+	if got := ClientIP(r); got != "127.0.0.1" {
+		t.Errorf("default(untrusted) ClientIP(XFF) = %q, want %q (RemoteAddr)", got, "127.0.0.1")
+	}
+
+	// 启用 trusted-proxy:取 XFF 最左 IP
+	defer setTrustedProxyForTest(t, true)()
+	if got := ClientIP(r); got != "203.0.113.5" {
+		t.Errorf("trusted ClientIP(XFF) = %q, want %q (XFF first)", got, "203.0.113.5")
 	}
 }
 
-// TestRateLimit_ClientIP_XRealIP 测试 X-Real-IP。
+// TestRateLimit_ClientIP_XRealIP 测试 X-Real-IP(同样需 trusted)。
 func TestRateLimit_ClientIP_XRealIP(t *testing.T) {
 	r := newReqWithXReal("203.0.113.10")
-	got := ClientIP(r)
-	want := "203.0.113.10"
-	if got != want {
-		t.Fatalf("ClientIP(X-Real-IP) = %q, want %q", got, want)
+	// 默认:忽略 X-Real-IP
+	if got := ClientIP(r); got != "127.0.0.1" {
+		t.Errorf("default(untrusted) ClientIP(X-Real-IP) = %q, want %q (RemoteAddr)", got, "127.0.0.1")
+	}
+
+	// 启用:走 X-Real-IP
+	defer setTrustedProxyForTest(t, true)()
+	if got := ClientIP(r); got != "203.0.113.10" {
+		t.Errorf("trusted ClientIP(X-Real-IP) = %q, want %q", got, "203.0.113.10")
 	}
 }
 
@@ -212,6 +241,30 @@ func TestRateLimit_ClientIP_RemoteAddr(t *testing.T) {
 	want := "203.0.113.20"
 	if got != want {
 		t.Fatalf("ClientIP(RemoteAddr) = %q, want %q", got, want)
+	}
+}
+
+// TestRateLimit_ClientIP_XFFBypassBlocked 验证 v2.86-PR15 P0 修复:默认不信 XFF
+// → 攻击者发 "X-Forwarded-For: 127.0.0.1" 也不能绕过 rate limit。
+//
+// 设计动机:之前默认信任 XFF → 攻击者伪造 header 让 ClientIP 始终是
+// 127.0.0.1 → 5 次锁定计数器永远是空(每次都是新 IP "127.0.0.1" 但都被
+// 识别为同一本机),但实际行为是每个 request 都是新 entry,触发空 fail count,
+// 形成"无限次尝试"等价。修复后必须显式 IKEV2_TRUSTED_PROXY=true 才读 XFF。
+func TestRateLimit_ClientIP_XFFBypassBlocked(t *testing.T) {
+	// 攻击者 scenario:同一个 RemoteAddr + 伪造 XFF,默认应该都用 RemoteAddr
+	r1 := newReqWithXFF("1.1.1.1")
+	r2 := newReqWithXFF("2.2.2.2")
+	r3 := newReqWithXFF("3.3.3.3")
+
+	if got1, got3 := ClientIP(r1), ClientIP(r3); got1 != got3 {
+		t.Errorf("default mode should ignore XFF: r1=%q r3=%q (must be equal — both = RemoteAddr)",
+			got1, got3)
+	}
+
+	// r2 RemoteAddr 跟 r1 一样 → IP 应该一致(都是 RemoteAddr)
+	if got2 := ClientIP(r2); got2 != "127.0.0.1" {
+		t.Errorf("default mode XFF bypass should fail: got %q", got2)
 	}
 }
 
