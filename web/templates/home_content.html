@@ -366,63 +366,66 @@
 
 {{define "cert-card-content"}}
 <div class="settings-body" style="padding: 0; background: transparent; border: 0;">
-  {{if .CertConfigured}}
-    <p>
-      状态：<span class="chip {{if eq .CertMode "letsencrypt"}}ok{{else}}warn{{end}} no-dot">
-        {{if eq .CertMode "letsencrypt"}}Let's Encrypt 自动签发{{else}}自签证书{{end}}
-      </span>
-      {{if eq .CertMode "letsencrypt"}}
-        {{if .CertDomain}}<br><small>域名：<code>{{.CertDomain}}</code></small>{{end}}
-        {{if .CertServerCN}}<br><small>Server CN：<code>{{.CertServerCN}}</code></small>{{end}}
-        {{if .CertACMEEmail}}<br><small>ACME 邮箱：<code>{{.CertACMEEmail}}</code></small>{{end}}
-      {{end}}
-      <br>
-      <small>配置来源：<code>{{.CertSource}}</code>
-        {{if eq .CertSource "panelstate"}}(需 <code>docker compose restart</code> 生效){{end}}
-      </small>
-    </p>
-    <form method="POST" action="/api/cert/save">
-      <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-      <div class="form-section">
-        <span class="form-label">证书模式</span>
-        <div class="radio-group">
-          <label>
-            <input type="radio" name="cert_mode" value="self-signed" {{if eq .CertMode "self-signed"}}checked{{end}}>
-            <span>自签模式 <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(无需域名)</small></span>
-          </label>
-          <label>
-            <input type="radio" name="cert_mode" value="letsencrypt" {{if eq .CertMode "letsencrypt"}}checked{{end}}>
-            <span>Let's Encrypt <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(需域名 + 阿里云凭证)</small></span>
-          </label>
-        </div>
-      </div>
-      <div class="form-section">
-        <label class="form-label" for="cert-domain">域名 (LE 模式必填)</label>
-        <input id="cert-domain" type="text" name="domain" placeholder="vpn.example.com" value="{{.CertDomain}}">
-      </div>
-      <div class="form-section">
-        <label class="form-label" for="cert-cn">Server CN <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(mobileconfig RemoteIdentifier，空 = 用域名)</small></label>
-        <input id="cert-cn" type="text" name="server_cn" placeholder="留空 = 用域名" value="{{.CertServerCN}}">
-      </div>
-      <div class="form-section">
-        <label class="form-label" for="cert-email">ACME 注册邮箱 <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(可选)</small></label>
-        <input id="cert-email" type="email" name="acme_email" placeholder="admin@example.com" value="{{.CertACMEEmail}}">
-      </div>
-      <p class="banner-warn" style="margin-top: 1rem; font-size: 0.8125rem;">⚠️ 保存后必须重启容器才能生效</p>
-      <div class="settings-actions settings-actions-end">
-        <button type="submit" class="btn-secondary" formaction="/api/cert/clear">清除证书配置</button>
-        <button type="submit" class="btn-primary">保存证书配置</button>
-      </div>
-    </form>
-  {{else}}
-    <p>
-      状态：<span class="chip {{if eq .CertMode "letsencrypt"}}ok{{else}}warn{{end}} no-dot">
-        {{if eq .CertMode "letsencrypt"}}Let's Encrypt (env 配置){{else}}自签证书 (env 配置){{end}}
-      </span>
+  {{/*
+    v2.86-PR20:统一显示切换表单(不管 CertConfigured 与否)。
+    之前 CertConfigured=false(默认 self-signed,用户在面板没设过)时只显示
+    "通过 env 配置"提示,没有切换按钮 —— 用户首次访问面板无法切到 LE。
+    现在任何时候都显示 radio + 域名 + CN + 邮箱,首次访问就能切。
+    顶部仍显示当前生效模式 + 来源(panelstate / env-default)做提示。
+  */}}
+  <p>
+    状态：<span class="chip {{if eq .CertMode "letsencrypt"}}ok{{else}}warn{{end}} no-dot">
+      {{if eq .CertMode "letsencrypt"}}Let's Encrypt 自动签发{{else}}自签证书{{end}}
+    </span>
+    {{if eq .CertMode "letsencrypt"}}
       {{if .CertDomain}}<br><small>域名：<code>{{.CertDomain}}</code></small>{{end}}
+      {{if .CertServerCN}}<br><small>Server CN：<code>{{.CertServerCN}}</code></small>{{end}}
+      {{if .CertACMEEmail}}<br><small>ACME 邮箱：<code>{{.CertACMEEmail}}</code></small>{{end}}
+    {{end}}
+    <br>
+    <small>配置来源：<code>{{if .CertSource}}{{.CertSource}}{{else}}env-default{{end}}</code>
+      {{if eq .CertSource "panelstate"}}(需 <code>docker compose restart</code> 生效){{end}}
+    </small>
+  </p>
+  <form method="POST" action="/api/cert/save">
+    <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+    <div class="form-section">
+      <span class="form-label">证书模式</span>
+      <div class="radio-group">
+        <label>
+          <input type="radio" name="cert_mode" value="self-signed" {{if eq .CertMode "self-signed"}}checked{{end}}>
+          <span>自签模式 <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(无需域名)</small></span>
+        </label>
+        <label>
+          <input type="radio" name="cert_mode" value="letsencrypt" {{if eq .CertMode "letsencrypt"}}checked{{end}}>
+          <span>Let's Encrypt <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(需域名 + 阿里云凭证)</small></span>
+        </label>
+      </div>
+    </div>
+    <div class="form-section">
+      <label class="form-label" for="cert-domain">域名 (LE 模式必填)</label>
+      <input id="cert-domain" type="text" name="domain" placeholder="vpn.example.com" value="{{.CertDomain}}">
+    </div>
+    <div class="form-section">
+      <label class="form-label" for="cert-cn">Server CN <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(mobileconfig RemoteIdentifier，空 = 用域名)</small></label>
+      <input id="cert-cn" type="text" name="server_cn" placeholder="留空 = 用域名" value="{{.CertServerCN}}">
+    </div>
+    <div class="form-section">
+      <label class="form-label" for="cert-email">ACME 注册邮箱 <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(可选)</small></label>
+      <input id="cert-email" type="email" name="acme_email" placeholder="admin@example.com" value="{{.CertACMEEmail}}">
+    </div>
+    <p class="banner-warn" style="margin-top: 1rem; font-size: 0.8125rem;">
+      ⚠️ 自签 ↔ LE 切换后必须 <code>docker compose restart</code> 才能生效
+      ({{if eq .CertMode "self-signed"}}当前自签 → 切 LE 后首次签发约 30s;{{else}}当前 LE → 切自签会清掉证书栈;{{end}}
+      <strong style="color: var(--ikev2-fg-warning);">所有 mobileconfig 客户端需要重新安装 profile</strong>)
     </p>
-    <p class="text-muted">证书通过环境变量配置，如需修改请编辑 docker-compose.yml 或 <code>.env</code> 后 <code>docker compose restart</code>。</p>
-  {{end}}
+    <div class="settings-actions settings-actions-end">
+      {{if .CertConfigured}}
+        <button type="submit" class="btn-secondary" formaction="/api/cert/clear">清除证书配置</button>
+      {{end}}
+      <button type="submit" class="btn-primary">保存证书配置</button>
+    </div>
+  </form>
 </div>
 {{end}}
 
@@ -451,6 +454,49 @@
       <button type="submit" class="btn-primary">保存阿里云凭证</button>
     </div>
   </form>
+
+  {{/*
+    v2.86-PR20:DDNS 记录类型切换(v4 / v6 / dual)。
+    之前 family 只在 ddns-card 的 header summary 显示只读,用户在 aliyun
+    卡看不到独立切换控件。放到这里的好处:aliyun 凭证 + DDNS 同步配置
+    在同一卡里管理,语义对齐(都跟阿里云 DNS API 相关)。
+    注意:仅在 DDNSConfigured 时显示(DDNS sync 实例未初始化时
+    /api/ddns/family 返回 404);用户没启用 DDNS 也能保存(下次 enable 自动用)。
+  */}}
+  {{if .DDNSConfigured}}
+  <hr style="margin: 1.25rem 0; border: 0; border-top: 1px solid var(--ikev2-border, #2a3142);">
+  <form method="POST" action="/api/ddns/family">
+    <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+    <div class="form-section">
+      <span class="form-label">DDNS 记录类型
+        <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(同步服务器 IP 到阿里云 DNS 时用哪类记录)</small>
+      </span>
+      <div class="radio-group">
+        <label>
+          <input type="radio" name="family" value="v4" {{if eq .DDNSFamily "v4"}}checked{{end}}>
+          <span>仅 A 记录 <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(IPv4 only 服务器)</small></span>
+        </label>
+        <label>
+          <input type="radio" name="family" value="v6" {{if eq .DDNSFamily "v6"}}checked{{end}}>
+          <span>仅 AAAA 记录 <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(IPv6 only 服务器,推荐)</small></span>
+        </label>
+        <label>
+          <input type="radio" name="family" value="dual" {{if eq .DDNSFamily "dual"}}checked{{end}}>
+          <span>A + AAAA 双栈 <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(双栈服务器)</small></span>
+        </label>
+      </div>
+    </div>
+    <p class="text-muted" style="margin-top: 0.5rem; font-size: 0.8125rem;">
+      当前记录类型:<code>
+        {{if eq .DDNSFamily "v4"}}A{{else if eq .DDNSFamily "v6"}}AAAA{{else}}A + AAAA{{end}}
+      </code>
+      {{if not .DDNSEnabled}}<span class="chip warn no-dot" style="margin-left: 0.5rem;">DDNS 未启用</span>{{end}}
+    </p>
+    <div class="settings-actions settings-actions-end">
+      <button type="submit" class="btn-secondary">保存 DDNS 记录类型</button>
+    </div>
+  </form>
+  {{end}}
 </div>
 {{end}}
 
