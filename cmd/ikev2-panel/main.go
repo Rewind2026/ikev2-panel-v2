@@ -406,15 +406,56 @@ func main() {
 	//   - 加 cfg.DDNSFamily + cfg.DDNSProbeTarget 注入
 	//   - 注入 IPv4 探测 swanctl.DetectGlobalV4
 	//
+	// v2.86-pr23a:面板可改 RR / EnableA / EnableAAAA / Period,启动时从
+	// panelstate 读出来覆盖 env(用户改了面板配置就以面板为准)。
+	//
 	// v2-83:CredentialGetter 让 DDNS 每次 tick 重新读 /data/panel-state/aliyun.creds,
 	// 面板 UI 改凭证后 DDNS 下次 tick 自动用新凭证,无需重启容器。
+	//
+	// panelstate 预读:用户可能在面板改过配置(/api/ddns/config 写入 ddns.conf),
+	// 启动时读出来覆盖 env 的 AliyunRR / DDNSFamily / Period,真正做到面板是 source of truth。
+	ddnsCfgStore := panelstate.NewDDNSConfigStore()
+	ddnsCfg, ddnsCfgErr := ddnsCfgStore.LoadDDNSConfig()
+	if ddnsCfgErr != nil {
+		logger.Warn("load ddns config from panelstate", "err", ddnsCfgErr, "fallback", "env")
+		ddnsCfg = nil
+	} else if ddnsCfg != nil {
+		logger.Info("ddns config loaded from panelstate",
+			"rr", ddnsCfg.RR,
+			"enable_a", ddnsCfg.EnableA,
+			"enable_aaaa", ddnsCfg.EnableAAAA,
+			"period_seconds", ddnsCfg.PeriodSeconds,
+		)
+		// 用 panelstate 的值覆盖 env 启动值
+		if ddnsCfg.RR != "" {
+			cfg.AliyunRR = ddnsCfg.RR
+		}
+		// family 从 (EnableA, EnableAAAA) 反推回 v4/v6/dual 字符串(传给 ddns.NewSync)
+		switch {
+		case ddnsCfg.EnableA && ddnsCfg.EnableAAAA:
+			cfg.DDNSFamily = "dual"
+		case ddnsCfg.EnableA:
+			cfg.DDNSFamily = "v4"
+		case ddnsCfg.EnableAAAA:
+			cfg.DDNSFamily = "v6"
+		default:
+			// 两个都关 → 保持 env 值
+		}
+	}
+	ddnsPeriod := 60 * time.Second
+	if ddnsCfg != nil && ddnsCfg.PeriodSeconds > 0 {
+		ddnsPeriod = time.Duration(ddnsCfg.PeriodSeconds) * time.Second
+	}
+
 	var ddnsSync *ddns.Sync
 	if cfg.DDNSEnabled {
 		credStore := panelstate.NewStore()
 		_, _ = credStore.LoadAliyun() // 启动时预热缓存(失败也不 fatal,getter 会重试)
 		ddnsSync = ddns.NewSync(ddns.Config{
 			Enabled:      cfg.DDNSEnabled,
-			Family:       cfg.DDNSFamily,      // v2-84:"v4" / "v6" / "dual"
+			Family:       cfg.DDNSFamily, // v2-84:"v4" / "v6" / "dual"(pr23a 已根据 panelstate 反推)
+			EnableA:      ddnsCfg != nil && ddnsCfg.EnableA,
+			EnableAAAA:   ddnsCfg != nil && ddnsCfg.EnableAAAA,
 			DetectTarget: cfg.DDNSProbeTarget, // v2-84:IPv4 探测目标
 			// env 启动值作为 fallback,getter 优先
 			AliyunAccessKeyID:     cfg.AliyunAccessKeyID,
@@ -429,7 +470,7 @@ func main() {
 			Domain:         cfg.AliyunDomain,
 			RR:             cfg.AliyunRR,
 			Iface:          os.Getenv("IKEV2_OUT_IF"),
-			Period:         60 * time.Second,
+			Period:         ddnsPeriod,
 			Throttle:       60 * time.Second,
 			StateFile:      "/etc/ikev2/ddns.conf",
 			LastFailedFile: "/data/le/LAST_DDNS_FAILED",

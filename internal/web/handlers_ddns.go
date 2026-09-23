@@ -8,10 +8,13 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -181,4 +184,220 @@ func lastDDNSFailedExists() bool {
 		}
 	}
 	return false
+}
+
+// handleDDNSConfig v2.86-pr23a:POST /api/ddns/config,改 RR / EnableA / EnableAAAA / Period。
+//
+// Form 参数:
+//   - rr             主机记录(空 = "@")
+//   - enable_a       "true"/"1" 勾选 / 不传或 "false" 不勾
+//   - enable_aaaa    "true"/"1" 勾选 / 不传或 "false" 不勾
+//   - period_seconds 同步周期(10-3600)
+//
+// 副作用:
+//   - 写 /data/panel-state/ddns.conf (atomic)
+//   - 内存立即生效(Sync.SetConfig)
+//   - 写审计
+//   - flash 成功 → 302 /
+//
+// 不需要 DDNS Sync 实例吗?需要 — 没启用 DDNS 时改配置是无意义的(状态文件写了
+// 但没人跑),所以走 /api/ddns/config 也要先校验 Sync 已初始化。
+func (s *Server) handleDDNSConfig(w http.ResponseWriter, r *http.Request) {
+	if s.DDNSSync == nil {
+		http.Error(w, "DDNS not configured", http.StatusNotFound)
+		return
+	}
+
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+
+	rr := strings.TrimSpace(r.PostFormValue("rr"))
+	enableA := parseBoolForm(r.PostFormValue("enable_a"))
+	enableAAAA := parseBoolForm(r.PostFormValue("enable_aaaa"))
+
+	periodStr := strings.TrimSpace(r.PostFormValue("period_seconds"))
+	var periodSec int
+	if periodStr != "" {
+		n, err := strconv.Atoi(periodStr)
+		if err != nil {
+			http.Error(w, "period_seconds 必须是整数", http.StatusBadRequest)
+			return
+		}
+		if n < 10 || n > 3600 {
+			http.Error(w, "period_seconds 必须在 10-3600 之间", http.StatusBadRequest)
+			return
+		}
+		periodSec = n
+	}
+
+	// RR 校验(独立于 panelstate — 这里直接给 Sync,Sync 自己会 fallback 到 "@")
+	if rr != "" && rr != "@" {
+		if !validRRChars(rr) {
+			http.Error(w, "rr 不合法 (只允许字母/数字/_/-,1-63 字符)", http.StatusBadRequest)
+			return
+		}
+	}
+
+	if err := s.DDNSSync.SetConfig(rr, enableA, enableAAAA, periodSec); err != nil {
+		s.Logger.Error("ddns config save failed", "err", err)
+		http.Error(w, "保存失败: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	s.Logger.Info("ddns config updated",
+		"rr", rr, "enable_a", enableA, "enable_aaaa", enableAAAA, "period_seconds", periodSec,
+	)
+	// v2.86-pr23a:审计
+	s.writeAudit(r, "ddns.config.update",
+		fmt.Sprintf("rr=%s,enable_a=%v,enable_aaaa=%v,period_seconds=%d",
+			rr, enableA, enableAAAA, periodSec))
+
+	// flash 成功
+	sess, _ := SessionFrom(r.Context())
+	if sess != nil && s.FlashStore != nil {
+		s.FlashStore.Set(sess.ID, Flash{
+			Message: "DNS 同步配置已保存",
+		})
+	}
+
+	if r.Header.Get("Accept") == "application/json" {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+		return
+	}
+	http.Redirect(w, r, "/", http.StatusFound)
+}
+
+// handleDDNSSyncNow v2.86-pr23a:POST /api/ddns/sync-now,触发后台立即 tick。
+//
+// 行为:
+//   - 非阻塞:Sync.TriggerNow() 立即返回(handler 不等 tick 完成)
+//   - flash 提示"已触发同步,刷新页面查看结果"
+//   - 用户刷新后能在 ddns-card 看到新的 LastSync 时间戳 / V4IP / V6IP
+//
+// 节流:节流照常生效 — 刚同步过就 skip,所以多次点击不会撞 alidns 限流。
+func (s *Server) handleDDNSSyncNow(w http.ResponseWriter, r *http.Request) {
+	if s.DDNSSync == nil {
+		http.Error(w, "DDNS not configured", http.StatusNotFound)
+		return
+	}
+
+	s.DDNSSync.TriggerNow()
+	s.Logger.Info("ddns manual sync triggered")
+	s.writeAudit(r, "ddns.sync.now", "")
+
+	sess, _ := SessionFrom(r.Context())
+	if sess != nil && s.FlashStore != nil {
+		s.FlashStore.Set(sess.ID, Flash{
+			Message: "已触发同步,刷新页面查看结果",
+		})
+	}
+
+	if r.Header.Get("Accept") == "application/json" {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+		return
+	}
+	http.Redirect(w, r, "/", http.StatusFound)
+}
+
+// handleDDNSFetchRemote v2.86-pr23a:POST /api/ddns/fetch-remote,阻塞调阿里云
+// DescribeDomainRecords 拿 A + AAAA 当前实际值,跟 LastSync 对比排查。
+//
+// 行为:
+//   - 阻塞(handler 等阿里云响应,通常 < 1s,加了 5s timeout 兜底)
+//   - 结果存到 Sync.remoteSnap → home template 渲染展示
+//   - flash 提示"已查询:A=1.2.3.4 / AAAA=2001:db8::1"(成功)或错误
+//
+// 注意:这是 **诊断** 操作,会**读**阿里云 API(RAM 权限需要 alidns:DescribeDomainRecords,
+// 跟 DDNS 同步用的同一套)。不会修改任何记录。
+func (s *Server) handleDDNSFetchRemote(w http.ResponseWriter, r *http.Request) {
+	if s.DDNSSync == nil {
+		http.Error(w, "DDNS not configured", http.StatusNotFound)
+		return
+	}
+
+	// 5s timeout 兜底 — 阿里云正常 < 1s,挂死就报错
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	snap, err := s.DDNSSync.FetchRemote(ctx)
+	if err != nil {
+		s.Logger.Warn("ddns fetch remote failed", "err", err)
+	}
+
+	s.writeAudit(r, "ddns.fetch_remote",
+		fmt.Sprintf("domain=%s,a=%s,aaaa=%s,err=%q", snap.Domain, snap.A, snap.AAAA, snap.Error))
+
+	// flash 成功 / 失败都用 flash 提示(handler 端不直接渲染,统一回首页)
+	sess, _ := SessionFrom(r.Context())
+	if sess != nil && s.FlashStore != nil {
+		var msg string
+		if snap.Error != "" {
+			msg = fmt.Sprintf("查询阿里云记录失败: %s", snap.Error)
+		} else {
+			parts := []string{}
+			if snap.A != "" {
+				parts = append(parts, "A="+snap.A)
+			}
+			if snap.AAAA != "" {
+				parts = append(parts, "AAAA="+snap.AAAA)
+			}
+			if len(parts) == 0 {
+				msg = fmt.Sprintf("阿里云 %s 当前没有 A/AAAA 记录", snap.Domain)
+			} else {
+				msg = fmt.Sprintf("阿里云 %s 当前: %s", snap.Domain, strings.Join(parts, " / "))
+			}
+		}
+		s.FlashStore.Set(sess.ID, Flash{
+			Message: msg,
+		})
+	}
+
+	if r.Header.Get("Accept") == "application/json" {
+		w.Header().Set("Content-Type", "application/json")
+		// 序列化为简单 JSON,只暴露 A/AAAA/Error
+		out := struct {
+			OK     bool   `json:"ok"`
+			A      string `json:"a,omitempty"`
+			AAAA   string `json:"aaaa,omitempty"`
+			Error  string `json:"error,omitempty"`
+		}{
+			OK:    err == nil,
+			A:     snap.A,
+			AAAA:  snap.AAAA,
+			Error: snap.Error,
+		}
+		_ = json.NewEncoder(w).Encode(out)
+		return
+	}
+	http.Redirect(w, r, "/", http.StatusFound)
+}
+
+// parseBoolForm v2.86-pr23a:把 form "true"/"1"/"on"/"" 解析成 bool。
+//
+// HTML checkbox 不勾选时**根本不发这个字段**,所以空字符串就当 false。
+func parseBoolForm(v string) bool {
+	v = strings.TrimSpace(v)
+	return v == "true" || v == "1" || v == "on"
+}
+
+// validRRChars v2.86-pr23a:校验 RR 字符集 — 跟 ddns.allRRChars / panelstate.validRR 同 pattern。
+func validRRChars(s string) bool {
+	if len(s) == 0 || len(s) > 63 {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '-' || r == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }

@@ -49,7 +49,14 @@ type Config struct {
 	// Family v2-84:同步哪些 family。取值 "v4" / "v6" / "dual"。
 	// 默认 "dual"。family = "v4" 时仅同步 A 记录;="v6" 时仅同步 AAAA;
 	// ="dual" 时并发同步 A + AAAA(v4 retry 不阻塞 v6)。
+	//
+	// v2.86-pr23a:deprecated — EnableA/EnableAAAA 两个独立 bool 替代。
+	// 保留字段是为了兼容老用户的 statefile / env。新代码优先看 EnableA/EnableAAAA。
 	Family string
+	// EnableA v2.86-pr23a:是否同步 A 记录(IPv4)。panelstate 可改。
+	EnableA bool
+	// EnableAAAA v2.86-pr23a:是否同步 AAAA 记录(IPv6)。panelstate 可改。
+	EnableAAAA bool
 	// DetectTarget v2-84:IPv4 探测目标(默认 swanctl.DefaultProbeTarget = 8.8.8.8)。
 	// 中国大陆用户可改为 223.5.5.5(阿里 DNS)以提高探测成功率。
 	DetectTarget string
@@ -107,9 +114,12 @@ type LastSync struct {
 // Sync 后台 DDNS 同步器。
 //
 // 不是 goroutine 本身——把 Run() 放到 goroutine 里调用。
-// 提供 SetEnabled / SetFamily 供面板 UI 切换用。
+// 提供 SetEnabled / SetFamily / SetConfig / TriggerNow 供面板 UI 切换用。
 //
 // v2-84:detectV4 注入,per-type 节流 map。
+// v2.86-pr23a:面板可改 RR / EnableA / EnableAAAA / Period,内存立即生效;
+// 上一组 family 枚举被 EnableA/EnableAAAA 两个独立 bool 替代(更符合
+// "DDNS 是阿里云 API 的子功能"的产品认知)。
 type Sync struct {
 	cfg Config
 
@@ -125,6 +135,31 @@ type Sync struct {
 	// v2-84 加 detectV4,签名带 target(IPv4 探测目标,可配置)。
 	detectV6 func(iface string) (string, error)
 	detectV4 func(iface, target string) (string, error)
+
+	// v2.86-pr23a:手动触发 channel(handler POST /api/ddns/sync-now 时塞一个)。
+	// buffered=1 → handler 立即返回,不等 tick 完成。
+	triggerCh chan struct{}
+
+	// v2.86-pr23a:上一次 "查询阿里云记录值" 的快照(handler POST /api/ddns/fetch-remote)。
+	// 暴露给 UI 展示"阿里云实际值 vs DDNS 推上去的值"是否一致。
+	remoteSnap RemoteSnapshot
+}
+
+// RemoteSnapshot v2.86-pr23a:面板"查询当前阿里云记录值"按钮的返回。
+//
+// 用于排查"DDNS 显示同步成功但实际解析不对"——直接调 FindRecord 拿阿里云
+// 此刻实际值,跟 LastSync.V4IP / V6IP 对比即可看出是否一致。
+type RemoteSnapshot struct {
+	// FetchedAt 查询时间(用户点按钮时)
+	FetchedAt time.Time
+	// Domain 查询的完整域名(RR.Domain 或 Domain)
+	Domain string
+	// A 阿里云当前 A 记录值(空 = 记录不存在)
+	A string
+	// AAAA 阿里云当前 AAAA 记录值(空 = 记录不存在)
+	AAAA string
+	// Error 错误信息(查询失败时填;成功时为空)
+	Error string
 }
 
 // NewSync 构造同步器。
@@ -155,6 +190,8 @@ func NewSync(cfg Config) *Sync {
 			"got", cfg.Family)
 		cfg.Family = "dual"
 	}
+	// v2.86-pr23a:EnableA/EnableAAAA 默认值 fallback 移到下面 — 必须等 statefile 覆盖完再做。
+	// (statefile 显式写 enable_aaaa=false 时,要在 fallback 之前读到 cfg。)
 
 	s := &Sync{
 		cfg: cfg,
@@ -167,6 +204,8 @@ func NewSync(cfg Config) *Sync {
 		// stopOnce v2.85-PR6 (Q1-02):zero value 即可,无需显式构造。
 		// 保留 stopCh + 加 sync.Once:Stop() 只 close 一次,语义干净、可复用实例。
 		lastSyncTime: make(map[string]time.Time), // v2-84:per-type 节流
+		// v2.86-pr23a:手动触发 channel(buffered=1 → handler 非阻塞,Run() select 时拿到)
+		triggerCh: make(chan struct{}, 1),
 	}
 
 	// v2-84 状态文件读取(兼容 v2-83 老格式 + INI 自动迁移)
@@ -179,6 +218,16 @@ func NewSync(cfg Config) *Sync {
 		if rec, readErr := parseStateFile(s.cfg.StateFile, defaultFamily); readErr == nil {
 			s.cfg.Enabled = rec.Enabled
 			s.cfg.Family = rec.Family
+			// v2.86-pr23a:RR / EnableA / EnableAAAA / Period 从 statefile 覆盖
+			// (statefile 是 source of truth — writeStateFile 总是写这三个字段,
+			// 所以 rec 里的 zero value 也代表"用户显式关了")
+			s.cfg.RR = rec.RR
+			s.cfg.EnableA = rec.EnableA
+			s.cfg.EnableAAAA = rec.EnableAAAA
+			// PeriodSec > 0 才覆盖(0 = statefile 里没设,沿用 env 默认)
+			if rec.PeriodSec > 0 {
+				s.cfg.Period = time.Duration(rec.PeriodSec) * time.Second
+			}
 			// v2.85-PR6 (Q5-01):回填 throttle 时间戳(unix 秒 → time.Time)。
 			// map 未初始化的 key 读出来是 zero value,
 			// throttle 检查 !s.lastSyncTime[rt].IsZero() 已能区分"从未同步"和"已同步过"。
@@ -188,6 +237,24 @@ func NewSync(cfg Config) *Sync {
 			if rec.LastSyncAAAA > 0 {
 				s.lastSyncTime[dns.RecordTypeAAAA] = time.Unix(rec.LastSyncAAAA, 0)
 			}
+		}
+	}
+
+	// v2.86-pr23a:EnableA/EnableAAAA 默认值 fallback。
+	// 必须在 statefile 覆盖之后再做 — statefile 显式 false 时不能被 fallback 改成 true。
+	// 三种情况:
+	// 1. caller 显式传了 EnableA 或 EnableAAAA → 用之
+	// 2. statefile 写了这俩字段(不管是 true/false)→ 用之
+	// 3. 都没有 → 按 cfg.Family 翻译;fallback 到 dual 全开
+	if !s.cfg.EnableA && !s.cfg.EnableAAAA {
+		switch s.cfg.Family {
+		case "v4":
+			s.cfg.EnableA = true
+		case "v6":
+			s.cfg.EnableAAAA = true
+		default: // "dual" 或 fallback 后
+			s.cfg.EnableA = true
+			s.cfg.EnableAAAA = true
 		}
 	}
 	return s
@@ -228,13 +295,14 @@ func (s *Sync) LastSyncSnapshot() LastSync {
 // SetEnabled 切换开关,同步更新 state file(原子写)。
 //
 // 返回错误:state file 写失败(但内存里已更新,不影响本次运行)。
+// v2.86-pr23a:stateRecord 加了新字段,这里用 snapshot() helper 拿全字段。
 func (s *Sync) SetEnabled(enabled bool) error {
 	s.mu.Lock()
 	s.cfg.Enabled = enabled
-	family := s.cfg.Family
+	rec := s.snapshotStateRecord()
 	s.mu.Unlock()
 
-	if err := writeStateFile(s.cfg.StateFile, stateRecord{Enabled: enabled, Family: family}); err != nil {
+	if err := writeStateFile(s.cfg.StateFile, rec); err != nil {
 		return fmt.Errorf("write state file: %w", err)
 	}
 	return nil
@@ -244,27 +312,260 @@ func (s *Sync) SetEnabled(enabled bool) error {
 //
 // family 必须是 "v4" / "v6" / "dual",否则返回 error(双重白名单,跟 handler 端呼应)。
 // 内存立即更新,但下次 tick 才生效(节流保护)。
+//
+// v2.86-pr23a:deprecated — 由 SetConfig(rr, enableA, enableAAAA, period) 替代。
+// 保留此 API 是因为 /api/ddns/family endpoint 还在(handler 端做软兼容)。
 func (s *Sync) SetFamily(family string) error {
 	if !validFamily(family) {
 		return fmt.Errorf("invalid family %q (supported: v4, v6, dual)", family)
 	}
 	s.mu.Lock()
 	s.cfg.Family = family
-	enabled := s.cfg.Enabled
+	// 同步把 EnableA/EnableAAAA 改成跟 family 一致(向后兼容老 API 调用方)
+	switch family {
+	case "v4":
+		s.cfg.EnableA = true
+		s.cfg.EnableAAAA = false
+	case "v6":
+		s.cfg.EnableA = false
+		s.cfg.EnableAAAA = true
+	case "dual":
+		s.cfg.EnableA = true
+		s.cfg.EnableAAAA = true
+	}
+	rec := s.snapshotStateRecord()
 	s.mu.Unlock()
 
-	if err := writeStateFile(s.cfg.StateFile, stateRecord{Enabled: enabled, Family: family}); err != nil {
+	if err := writeStateFile(s.cfg.StateFile, rec); err != nil {
 		return fmt.Errorf("write state file: %w", err)
 	}
-	s.cfg.Logger.Info("ddns: family updated", "family", family)
+	s.cfg.Logger.Info("ddns: family updated (deprecated, prefer SetConfig)",
+		"family", family, "enable_a", s.cfg.EnableA, "enable_aaaa", s.cfg.EnableAAAA)
 	return nil
 }
 
+// snapshotStateRecord v2.86-pr23a:在锁内把 cfg + lastSyncTime 打包成完整 stateRecord。
+//
+// 给 SetEnabled / SetFamily / SetConfig / setLastSyncAndPersist 共用,避免每个
+// 持锁片段重复拷贝字段(加新字段时漏一处 → statefile 持久化丢字段)。
+func (s *Sync) snapshotStateRecord() stateRecord {
+	var lastA, lastAAAA int64
+	if v := s.lastSyncTime[dns.RecordTypeA]; !v.IsZero() {
+		lastA = v.Unix()
+	}
+	if v := s.lastSyncTime[dns.RecordTypeAAAA]; !v.IsZero() {
+		lastAAAA = v.Unix()
+	}
+	return stateRecord{
+		Enabled:      s.cfg.Enabled,
+		Family:       s.cfg.Family,
+		RR:           s.cfg.RR,
+		EnableA:      s.cfg.EnableA,
+		EnableAAAA:   s.cfg.EnableAAAA,
+		PeriodSec:    int(s.cfg.Period.Seconds()),
+		LastSyncA:    lastA,
+		LastSyncAAAA: lastAAAA,
+	}
+}
+
+// FetchRemote v2.86-pr23a:面板 "查询阿里云记录值" 按钮 handler 调用。
+//
+// 行为:
+//   - 阻塞调 FindRecord 两次(A + AAAA),错误聚合到 RemoteSnapshot.Error
+//   - 凭证缺失 / 域名缺失 → 立即返回 error(不调 API)
+//   - 结果存到 remoteSnap → handler 渲染 home template
+//   - handler 端要自己处理 timeout(因为是阻塞调用)
+//
+// 跟 LastSync 的区别:LastSync 是 DDNS **推**上去的值;RemoteSnapshot 是阿里云
+// **当前实际**值。两者不一致 → 说明 DDNS 没同步成功,或者阿里云那边被手动改了。
+func (s *Sync) FetchRemote(ctx context.Context) (RemoteSnapshot, error) {
+	s.mu.Lock()
+	domain := s.cfg.Domain
+	rr := s.cfg.RR
+	s.mu.Unlock()
+
+	fullDomain := domain
+	if rr != "" && rr != "@" {
+		fullDomain = rr + "." + domain
+	}
+
+	snap := RemoteSnapshot{
+		FetchedAt: time.Now(),
+		Domain:    fullDomain,
+	}
+
+	if domain == "" {
+		snap.Error = "DDNS 主域名未配置(env IKEV2_DDNS_DOMAIN)"
+		s.mu.Lock()
+		s.remoteSnap = snap
+		s.mu.Unlock()
+		return snap, fmt.Errorf("domain not set")
+	}
+
+	keyID, keySecret := s.getCredentials()
+	if keyID == "" || keySecret == "" {
+		snap.Error = "阿里云凭证未配置(请先在 AccessKey 框填值)"
+		s.mu.Lock()
+		s.remoteSnap = snap
+		s.mu.Unlock()
+		return snap, fmt.Errorf("aliyun creds not configured")
+	}
+
+	client := dns.NewAliyunClient(keyID, keySecret)
+
+	// A 记录查询(只查用户启用的 family;没启用的 record_type 不查)
+	if s.EnableA() {
+		rec, err := client.FindRecord(domain, rr, dns.RecordTypeA)
+		if err != nil {
+			snap.Error = fmt.Sprintf("A 查询失败: %v", err)
+		} else if rec != nil {
+			snap.A = rec.Value
+		}
+	}
+
+	if s.EnableAAAA() {
+		rec, err := client.FindRecord(domain, rr, dns.RecordTypeAAAA)
+		if err != nil {
+			prev := snap.Error
+			if prev != "" {
+				prev += "; "
+			}
+			snap.Error = prev + fmt.Sprintf("AAAA 查询失败: %v", err)
+		} else if rec != nil {
+			snap.AAAA = rec.Value
+		}
+	}
+
+	s.mu.Lock()
+	s.remoteSnap = snap
+	s.mu.Unlock()
+
+	if snap.Error != "" {
+		return snap, fmt.Errorf("%s", snap.Error)
+	}
+	return snap, nil
+}
+
+// getCredentials v2.86-pr23a:跟 tick() 里同样的凭证解析逻辑(extract helper)。
+func (s *Sync) getCredentials() (string, string) {
+	s.mu.Lock()
+	keyID, keySecret := s.cfg.AliyunAccessKeyID, s.cfg.AliyunAccessKeySecret
+	getter := s.cfg.CredentialGetter
+	s.mu.Unlock()
+	if getter != nil {
+		if id, secret, ok := getter(); ok && id != "" && secret != "" {
+			return id, secret
+		}
+	}
+	return keyID, keySecret
+}
+
 // Family v2-84:返回当前 family 配置。
+//
+// v2.86-pr23a:deprecated — EnableA/EnableAAAA 两个独立 bool 替代了 family 枚举。
+// 保留此 getter 是因为 JSON API / 健康检查还引用。优先从 (EnableA, EnableAAAA)
+// 推断;两个都关时回退到 cfg.Family 字段(老 statefile 兼容)。
 func (s *Sync) Family() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.cfg.Family
+	switch {
+	case s.cfg.EnableA && s.cfg.EnableAAAA:
+		return "dual"
+	case s.cfg.EnableA:
+		return "v4"
+	case s.cfg.EnableAAAA:
+		return "v6"
+	default:
+		// 两个都关 → 用 family 字段(向后兼容老用户)
+		return s.cfg.Family
+	}
+}
+
+// EnableA v2.86-pr23a:返回是否同步 A 记录(IPv4)。
+func (s *Sync) EnableA() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cfg.EnableA
+}
+
+// EnableAAAA v2.86-pr23a:返回是否同步 AAAA 记录(IPv6)。
+func (s *Sync) EnableAAAA() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cfg.EnableAAAA
+}
+
+// PeriodSeconds v2.86-pr23a:返回同步周期秒数(给面板显示 + statefile 持久化)。
+func (s *Sync) PeriodSeconds() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return int(s.cfg.Period.Seconds())
+}
+
+// SetConfig v2.86-pr23a:面板改 RR / EnableA / EnableAAAA / Period 的统一入口。
+//
+// 设计要点:
+//   - 内存立即更新(cfg 字段直接赋值)
+//   - 持久化到 statefile(跟 SetEnabled / SetFamily 同 mode,handler 重启后值不丢)
+//   - Period 改动:**不立即重启 ticker**(避免并发 race);Run() 下一轮
+//     ticker.C fire 后会读最新 Period,新周期自然生效
+//   - EnableA / EnableAAAA 改动:内存改了,tick 下次 fire 时走新分支
+//
+// 参数:
+//   - rr:主机记录(空 = "@")
+//   - enableA / enableAAAA:同步哪些 family
+//   - periodSeconds:同步周期(0 = 不改;传有效值时 clamp 到 [10, 3600])
+//
+// 返回 error:statefile 写失败(内存已更新,只是不持久化)。
+func (s *Sync) SetConfig(rr string, enableA, enableAAAA bool, periodSeconds int) error {
+	s.mu.Lock()
+	s.cfg.RR = rr
+	s.cfg.EnableA = enableA
+	s.cfg.EnableAAAA = enableAAAA
+	if periodSeconds > 0 {
+		if periodSeconds < 10 {
+			periodSeconds = 10
+		}
+		if periodSeconds > 3600 {
+			periodSeconds = 3600
+		}
+		s.cfg.Period = time.Duration(periodSeconds) * time.Second
+	}
+	rec := s.snapshotStateRecord()
+	s.mu.Unlock()
+
+	// 持久化到 /etc/ikev2/ddns.conf(INI-style,跟 SetEnabled/SetFamily 走同 path)
+	if err := writeStateFile(s.cfg.StateFile, rec); err != nil {
+		return fmt.Errorf("write state file: %w", err)
+	}
+	s.cfg.Logger.Info("ddns: config updated",
+		"rr", rr, "enable_a", enableA, "enable_aaaa", enableAAAA,
+		"period_seconds", int(s.cfg.Period.Seconds()),
+	)
+	return nil
+}
+
+// TriggerNow v2.86-pr23a:通知 Run() 立即跑一次 tick(handler POST /api/ddns/sync-now)。
+//
+// 非阻塞:channel buffered=1,handler 立即返回。Run() 在 select 里取到 → tick。
+// 如果 channel 已 buffered 但 Run() 没消费 → 本次塞入被丢弃(下次 Run() 取到的是旧值,
+// 仍会触发一次 tick;不会被卡住)。
+func (s *Sync) TriggerNow() {
+	select {
+	case s.triggerCh <- struct{}{}:
+	default:
+		// channel 已有 pending → 不重复塞,Run() 反正会跑
+	}
+}
+
+// RemoteSnapshot v2.86-pr23a:面板 "查询阿里云记录值" 按钮触发的结果。
+//
+// handler POST /api/ddns/fetch-remote → 立即同步调 FindRecord 拿 A/AAAA → 存到
+// remoteSnap → 渲染到 home template 的 status 表。
+func (s *Sync) RemoteSnapshot() RemoteSnapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.remoteSnap
 }
 
 // Domain v2.86-pr22:返回完整域名(RR + "." + Domain,如 "vpn.example.com")。
@@ -355,6 +656,10 @@ func (s *Sync) Run(ctx context.Context) error {
 		case <-s.stopCh:
 			s.cfg.Logger.Info("ddns sync stopping (stop signal)")
 			return nil
+		case <-s.triggerCh:
+			// v2.86-pr23a:面板 "手动同步一次" 按钮触发的立即 tick。
+			// 不等 ticker 周期,直接跑(节流照常生效,刚同步过就跳过)。
+			s.tick()
 		case <-ticker.C:
 			s.tick()
 		}
@@ -381,23 +686,9 @@ func (s *Sync) Stop() {
 func (s *Sync) setLastSyncAndPersist(rt string, t time.Time) {
 	s.mu.Lock()
 	s.lastSyncTime[rt] = t
-	enabled := s.cfg.Enabled
-	family := s.cfg.Family
-	var lastA, lastAAAA int64
-	if v := s.lastSyncTime[dns.RecordTypeA]; !v.IsZero() {
-		lastA = v.Unix()
-	}
-	if v := s.lastSyncTime[dns.RecordTypeAAAA]; !v.IsZero() {
-		lastAAAA = v.Unix()
-	}
+	rec := s.snapshotStateRecord()
 	s.mu.Unlock()
 
-	rec := stateRecord{
-		Enabled:      enabled,
-		Family:       family,
-		LastSyncA:    lastA,
-		LastSyncAAAA: lastAAAA,
-	}
 	if err := writeStateFile(s.cfg.StateFile, rec); err != nil {
 		s.cfg.Logger.Warn("ddns: persist throttle time failed",
 			"rt", rt, "err", err)
@@ -451,8 +742,9 @@ func (s *Sync) tick() {
 
 	// 每个 family 独立判断:enabled 的 family 如果被 throttle 就 skip,
 	// 没被 throttle 就跑(dual 下两个 family 各自独立)。
-	runV6 := !throttledV6 && (s.cfg.Family == "v6" || s.cfg.Family == "dual")
-	runV4 := !throttledV4 && (s.cfg.Family == "v4" || s.cfg.Family == "dual")
+	// v2.86-pr23a:走 EnableA/EnableAAAA 而不是 cfg.Family 枚举 — 面板直接控制。
+	runV6 := !throttledV6 && s.cfg.EnableAAAA
+	runV4 := !throttledV4 && s.cfg.EnableA
 
 	// dual 模式下两个 family 都被 throttle → 整轮 skip(节省 goroutine 开销)
 	if !runV6 && !runV4 {
@@ -507,23 +799,22 @@ func (s *Sync) tick() {
 		results <- result{recordType: rt, oldIP: oldIP, newIP: ip, err: upsertErr}
 	}
 
-	// 起任务(按 family 决定是否跑)
-	switch s.cfg.Family {
-	case "v6":
-		wg.Add(1)
-		go runFamily(dns.RecordTypeAAAA, v6IP, v6Err)
-	case "v4":
-		wg.Add(1)
-		go runFamily(dns.RecordTypeA, v4IP, v4Err)
-	case "dual":
+	// 起任务(按 EnableA/EnableAAAA 决定跑哪些 family)
+	// v2.86-pr23a:替代 v2-84 的 family 枚举 switch — 面板可独立控制 A / AAAA。
+	switch {
+	case s.cfg.EnableA && s.cfg.EnableAAAA:
 		wg.Add(2)
 		go runFamily(dns.RecordTypeAAAA, v6IP, v6Err)
 		go runFamily(dns.RecordTypeA, v4IP, v4Err)
+	case s.cfg.EnableA:
+		wg.Add(1)
+		go runFamily(dns.RecordTypeA, v4IP, v4Err)
+	case s.cfg.EnableAAAA:
+		wg.Add(1)
+		go runFamily(dns.RecordTypeAAAA, v6IP, v6Err)
 	default:
-		s.cfg.Logger.Warn("ddns: unknown family, fallback to dual", "got", s.cfg.Family)
-		wg.Add(2)
-		go runFamily(dns.RecordTypeAAAA, v6IP, v6Err)
-		go runFamily(dns.RecordTypeA, v4IP, v4Err)
+		// 两个都关 → 没有 task 要起;但 tick 入口已 enable 检查,正常路径不会到这里
+		s.cfg.Logger.Debug("ddns: tick called but both A and AAAA disabled, skipping")
 	}
 
 	wg.Wait()
@@ -559,12 +850,13 @@ func (s *Sync) tick() {
 	if anyAttempted {
 		ls.Success = anySuccess
 		// 单 family 模式时填充兼容字段,给 v2-83 客户端读
-		if s.cfg.Family == "v6" {
+		// v2.86-pr23a:走 EnableA/EnableAAAA 判断,不再是 cfg.Family 枚举
+		if s.cfg.EnableAAAA && !s.cfg.EnableA {
 			ls.NewIP = ls.V6IP
 			if ls.V6Error != "" {
 				ls.Error = ls.V6Error
 			}
-		} else if s.cfg.Family == "v4" {
+		} else if s.cfg.EnableA && !s.cfg.EnableAAAA {
 			ls.NewIP = ls.V4IP
 			if ls.V4Error != "" {
 				ls.Error = ls.V4Error

@@ -188,10 +188,13 @@ func New(srv *Server, staticDir string) http.Handler {
 
 	mux.Handle("POST /logout", protectPOST(http.HandlerFunc(srv.handleLogout)))
 
-	// v2-82：DDNS API(面板 UI 调);v2-84 加 /api/ddns/family
+	// v2-82：DDNS API(面板 UI 调);v2-84 加 /api/ddns/family;v2.86-pr23a 加 config/sync-now/fetch-remote
 	mux.Handle("GET /api/ddns/status", protect(http.HandlerFunc(srv.handleDDNSStatus)))
 	mux.Handle("POST /api/ddns/toggle", protectPOST(http.HandlerFunc(srv.handleDDNSToggle)))
 	mux.Handle("POST /api/ddns/family", protectPOST(http.HandlerFunc(srv.handleDDNSFamily)))
+	mux.Handle("POST /api/ddns/config", protectPOST(http.HandlerFunc(srv.handleDDNSConfig)))
+	mux.Handle("POST /api/ddns/sync-now", protectPOST(http.HandlerFunc(srv.handleDDNSSyncNow)))
+	mux.Handle("POST /api/ddns/fetch-remote", protectPOST(http.HandlerFunc(srv.handleDDNSFetchRemote)))
 
 	// v2-83:阿里云凭证卡 API(面板 UI 调)
 	//   - GET  /api/aliyun/status   查询当前凭证状态(已配置/未配置/来源)

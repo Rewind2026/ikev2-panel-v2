@@ -10,9 +10,9 @@
 //  2. v2-83 老格式兼容:
 //     v2-83 ddns.conf 内容是裸 "true"/"false"。
 //     v2-84 升级用户的文件不能丢,必须:
-//       a) 启动时识别老格式
-//       b) 立即重写成新格式(自动迁移)
-//       c) 之后正常走新格式读/写
+//     a) 启动时识别老格式
+//     b) 立即重写成新格式(自动迁移)
+//     c) 之后正常走新格式读/写
 //
 // 实现:全部用 swanctl.AtomicWriteFile(write-tmp + rename),
 // 失败时原文件不动;读用 parseStateFile(同时识别新老两种格式)。
@@ -41,18 +41,56 @@ func validFamily(f string) bool {
 	return f == "v4" || f == "v6" || f == "dual"
 }
 
+// allRRChars v2.86-pr23a:校验 RR 字符集([a-zA-Z0-9_-],1-63 字符)。
+//
+// 跟 panelstate.validRR 同 pattern,这里再写一遍避免 import 循环
+// (panelstate -> ddns 没问题;ddns -> panelstate 会反向)。
+func allRRChars(s string) bool {
+	if len(s) == 0 || len(s) > 63 {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '-' || r == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// boolStr v2.86-pr23a:statefile 输出 "true"/"false" 字符串。
+func boolStr(b bool) string {
+	if b {
+		return "true"
+	}
+	return "false"
+}
+
 // stateRecord 是解析后的运行时状态。
 //
 // Enabled:DDNS 总开关。
-// Family:DDNS family 选择(v4 / v6 / dual)。
+// Family:DDNS family 选择(v4 / v6 / dual)。v2.86-pr23a:deprecated —
+// EnableA/EnableAAAA 两个独立 bool 替代。保留字段做向后兼容(老 statefile
+// 仍能读;Family() getter 会自动从 (EnableA, EnableAAAA) 反推回 v4/v6/dual)。
+// RR:主机记录(vpn.example.com 中的 vpn),面板可改。
+// EnableA / EnableAAAA:v2.86-pr23a 取代 family 枚举,两个独立 bool。
+// PeriodSec:同步周期秒数(v2.86-pr23a 新增,之前是 env 启动值)。
 // LastSyncA / LastSyncAAAA:节流时间戳(unix 秒)— v2.85-PR6 (Q5-01) 新增,
 // 用于重启后保留 throttle 窗口,避免撞 alidns 30 QPS 限流。
 // Both zero values are valid defaults(调用方决定何时用 env fallback)。
 type stateRecord struct {
 	Enabled      bool
 	Family       string
-	LastSyncA    int64 // unix 秒;0 = 从未同步
-	LastSyncAAAA int64 // 同上
+	RR           string // v2.86-pr23a:主机记录(空 = "@")
+	EnableA      bool   // v2.86-pr23a:同步 A 记录(IPv4)
+	EnableAAAA   bool   // v2.86-pr23a:同步 AAAA 记录(IPv6)
+	PeriodSec    int    // v2.86-pr23a:同步周期(秒);0 = 用 env 默认 60
+	LastSyncA    int64  // unix 秒;0 = 从未同步
+	LastSyncAAAA int64  // 同上
 }
 
 // parseStateFile 读 /etc/ikev2/ddns.conf,返回 stateRecord。
@@ -121,6 +159,21 @@ func parseStateFile(path, defaultFamily string) (stateRecord, error) {
 			if n, perr := strconv.ParseInt(val, 10, 64); perr == nil && n >= 0 {
 				rec.LastSyncAAAA = n
 			}
+		case "rr":
+			// v2.86-pr23a:主机记录(只接受合法字符;不合法保留空走 default)
+			if val == "@" || (len(val) <= 63 && allRRChars(val)) {
+				rec.RR = val
+			}
+		case "enable_a":
+			// v2.86-pr23a:独立 bool("true"/"false"/"1"/"0"/"on"/"off")
+			rec.EnableA = (val == "true" || val == "1" || val == "on")
+		case "enable_aaaa":
+			rec.EnableAAAA = (val == "true" || val == "1" || val == "on")
+		case "period_seconds":
+			// v2.86-pr23a:同步周期秒数,clamp [10, 3600],越界保留 0 走 default
+			if n, perr := strconv.Atoi(val); perr == nil && n >= 10 && n <= 3600 {
+				rec.PeriodSec = n
+			}
 		}
 	}
 	// family 缺省 → 用 defaultFamily(env 透传的值,通常 "dual")
@@ -154,6 +207,18 @@ func writeStateFile(path string, rec stateRecord) error {
 		b.WriteString("family=")
 		b.WriteString(rec.Family)
 		b.WriteByte('\n')
+	}
+	// v2.86-pr23a:面板可配字段(rr / enable_a / enable_aaaa / period_seconds)。
+	// 全部写,即使跟 env 默认值相同 — statefile 是"用户显式配置"的 source of truth。
+	rr := rec.RR
+	if rr == "" {
+		rr = "@"
+	}
+	fmt.Fprintf(&b, "rr=%s\n", rr)
+	fmt.Fprintf(&b, "enable_a=%s\n", boolStr(rec.EnableA))
+	fmt.Fprintf(&b, "enable_aaaa=%s\n", boolStr(rec.EnableAAAA))
+	if rec.PeriodSec > 0 {
+		fmt.Fprintf(&b, "period_seconds=%d\n", rec.PeriodSec)
 	}
 	// v2.85-PR6 (Q5-01):节流时间戳持久化(unix 秒)。
 	// > 0 才写(0 = 从未同步,无需持久化;启动时默认就是 0)。
