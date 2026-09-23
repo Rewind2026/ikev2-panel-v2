@@ -1364,7 +1364,7 @@ func (c *Checker) check(ctx context.Context) {
 | **宿主持 SoftEther 占 IPv6 UDP 500** | charon 启动失败 | 极少见（SoftEther L2TP/IPsec 不走 IPv6），但仍可能；建议改 SoftEther 监听 |
 | ~~**iOS mobileconfig `RemoteAddress` 只接受单值**~~ | 早期 iOS 不支持双栈数组 | **已修复**：只用 `RemoteAddress` 单地址，不混用 `ServerAddresses` 数组 |
 | ~~**iPhone 拨号成功但无法访问公网（VPN 能通 / 公网不通）**~~ | 出向 XFRM table 220 缺 default route + iptables FORWARD DROP + MASQUERADE 缺 | **v2-78 已修复**：`entrypoint.sh §3.5` 加 `table 220 default via $V4_GW` + `iptables -I FORWARD -i/o ipsec0 -j ACCEPT` + `iptables -t nat -A POSTROUTING -s $IKEV2_VPN_SUBNET -o $OUT_IF -j MASQUERADE` |
-| **iPhone 拨号成功但 captive.apple.com 探测超时（Safari/WX 报"没连接互联网"）** | iOS 17+ 把所有 UDP 53 也按 0.0.0.0/0 强制路由进 ESP，server 端没推 DNS → 客户端解析走不通 | **v2-78 已修复**：mobileconfig 加 `DNSSettings`（1.1.1.1/8.8.8.8/2606:4700:4700::1111/2001:4860:4860::8888）+ swanctl.conf `pools.dns` 双推 |
+| **iPhone 拨号成功但 captive.apple.com 探测超时（Safari/WX 报"没连接互联网"）** | iOS 17+ 把所有 UDP 53 也按 0.0.0.0/0 强制路由进 ESP，server 端没推 DNS → 客户端解析走不通 | **v2-78 已修复**：mobileconfig 加 `<key>DNS</key>` dict（含 `ServerAddresses` + `DNSProtocol=Cleartext`，v2.86-PR12.23 修正）+ swanctl.conf `pools.dns` 双推 |
 | **ACME HTTP-01 80 端口被 SoftEther 占** | 证书申请失败 | 改用 DNS-01 或停 SoftEther 80 端口（v2-76 起默认走 DNS-01） |
 | **Let's Encrypt 续期失败** | 证书过期，所有用户断连 | **已加回退**：`/etc/ikev2-panel/scripts/renew-cert.sh` 检测新证书 < 30 天 → cp 备份证书 + 设置 LAST_RENEW_FAILED；Go 端 health.certcheck 60s 检测标志 → 首页红字横幅 |
 | **iOS 拒绝 ECDSA 证书** | iPhone/iPad 连接 IKEv2 静默失败 | **已修复**：续签脚本强制 `--keylength 2048`（RSA） |
@@ -1380,7 +1380,7 @@ func (c *Checker) check(ctx context.Context) {
 | **宿主 IPv6 forwarding 未开，客户端拨号后无法访问公网** | docker host 网络模式下默认把 forwarding 重置为 0 | **v2-79 已修复**：三层兜底——L1 `docker-compose.yml sysctls:` + L2 `entrypoint.sh §3 enable_forwarding()` 自愈（host 模式 rw 时 echo 1，等同于改宿主）+ L3 FATAL 退出 11；详见 design §16.4 |
 | **iOS 18 协商降级到 MODP2048** | swanctl proposals 只列 `modp2048`，iOS 18 默认推 `ecp256` 会回退到非 ECDH | **v2-79.1 已修复**：`proposals` 追加 `ecp256` / `curve25519` 系列；Dockerfile 已 `--enable-curve25519` |
 | **server.key.pem 私钥 0o644 同主机可读** | `installCertsToSwanctl` 所有文件统一 0o644 | **v2-79.1 已修复**：按文件类型拆权限——cert 0o644，key 0o600 |
-| **mobileconfig DNSSettings 格式错误** | 用了 `<array><dict>...</dict></array>`，iOS 17/18 静默忽略整个节点 → captive.apple.com 探测超时 | **v2-79.1 已修复**：改为 `<dict><key>DNS</key><array>...</array></dict>` |
+| **mobileconfig DNSSettings 格式错误** | 用了 `<array><dict>...</dict></array>`，iOS 17/18 静默忽略整个节点 → captive.apple.com 探测超时 | **v2-79.1 已修复**：改为 `<dict><key>DNS</key><array>...</array></dict>` → **v2.86-PR12.23 进一步修正**：顶层 `<key>DNS</key><dict><key>ServerAddresses</key><array>...</array><key>DNSProtocol</key><string>Cleartext</string></dict>` 才是 iOS 14+ 规范形态（DNSSettings 是杜撰 key，本身永远不会被识别） |
 
 ---
 

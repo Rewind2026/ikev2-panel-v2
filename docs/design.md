@@ -1372,15 +1372,43 @@ v2-78 调试 iPhone 能拨号但上不了网的根因（家用路由器对 LAN�
 
 完整 ruleset 见 [scripts/ikev2.nft.template](../scripts/ikev2.nft.template)，调用方式见 `entrypoint.sh §3.5`。
 
-### 15.3 mobileconfig DNSSettings（v2-78 新增，v2-79 保留）
+### 15.3 mobileconfig DNS 推送（v2-78 新增，v2-79 沿用，v2.86-PR12.23 修正 key 名）
 
-v2-78 在 mobileconfig 加 `DNSSettings` 数组（4 = IPv4 DNS, 6 = IPv6 DNS），推 1.1.1.1 / 8.8.8.8 / 2606:4700:4700::1111 / 2001:4860:4860::8888。
+v2-78 在 mobileconfig 加 DNS 推送（4 个 DNS server），推 1.1.1.1 / 8.8.8.8 / 2606:4700:4700::1111 / 2001:4860:4860::8888。
 
 **根因**：iOS 17+ 把所有 UDP 53 也按 `0.0.0.0/0` 强制路由进 ESP 隧道 → server 端 swanctl pools 没 dns 时客户端 DNS 解析走不通 → captive.apple.com 探测超时 → Safari/WX 直接报"没连接互联网"（即使 TCP 443 实际能 curl 通）。
 
 **v2-79 同步加到 swanctl.conf 的 pools.dns**（两个渠道都推，兼容老客户端）：
-- mobileconfig 的 DNSSettings（iOS 优先用）
+- mobileconfig 的 `<key>DNS</key>`（iOS 优先用）
 - swanctl.conf 的 pools.dns（strongSwan 通过 ModeConfig 推送给客户端）
+
+**v2.86-PR12.23 audit 修复**（C6 §22.1）：
+
+原代码 key 名写错：
+```xml
+<!-- 错的 -->
+<key>DNSSettings</key>
+<dict>
+  <key>DNS</key>
+  <array><string>1.1.1.1</string>...</array>
+</dict>
+```
+
+`DNSSettings` 是**杜撰 key**，[Apple devicemanagement 文档](https://developer.apple.com/documentation/devicemanagement/vpn/dns-data.dictionary)从没用过这个名字，iOS 任何版本都静默忽略整个节点 → DNS 实际从未生效。
+
+正确形态（iOS 14+）：
+```xml
+<!-- 对的 -->
+<key>DNS</key>
+<dict>
+  <key>ServerAddresses</key>
+  <array><string>1.1.1.1</string>...</array>
+  <key>DNSProtocol</key>
+  <string>Cleartext</string>
+</dict>
+```
+
+`ServerAddresses` + `DNSProtocol=Cleartext` 是 iOS 14+ Required pair，缺一个就判定"无 DNS"配置。同样的 close-tag typo 修了两处：ChildSA `IntegrityAlgorithm` 的 `</key>` → `</string>`、外层 `PayloadType` 同样 → 之前 iOS plist parser 在 install 阶段就 reject。详见 release-notes-v2.86-pr12.23.md。
 
 ### 15.4 swanctl.conf 的 pools 段配置（v2-79 占位符化）
 
@@ -1671,7 +1699,7 @@ v2-78 之前用户反馈："你改了我宿主机的网络配置"。
 | **`send_cert = always`** | v2-74 修 iOS 不发 CERTREQ 的坑 | ✅ 保留（swanctl.conf L48） |
 | **`proposals` 包含 GCM 和 CBC** | v2-74 兼容 iOS 16（CBC）和 iOS 17+（GCM） | ✅ 保留 |
 | **`eap_identity = %identity`** | v2-76 修 iOS EAP identity | ✅ 保留 |
-| **DNSSettings 4 个 DNS** | v2-78 修 captive.apple.com 探测 | ✅ 保留（mobileconfig + swanctl.conf 双推） |
+| **DNSSettings 4 个 DNS** | v2-78 修 captive.apple.com 探测 | ✅ 保留（mobileconfig + swanctl.conf 双推）→ v2.86-PR12.23 改用 Apple 规范 DNS 顶层 + ServerAddresses |
 | **`rekey_time = 24h`** | v2 起步就是 | ✅ 保留 |
 | **`mobike = yes`** | v2 起步就是 | ✅ 保留 |
 | **`MOBIKE = 1` (mobileconfig)** | v2-74 | ✅ 保留 |
@@ -1757,7 +1785,7 @@ v2-78 之前用户反馈："你改了我宿主机的网络配置"。
 - [ ] 改宿主 LAN 段为 10.10.0.0/24 + 重启容器 → 容器自动跳过 10.10.0.0/24 → 用 10.13.0.0/24，swanctl.conf pools 也跟着换
 - [ ] iptables MASQUERADE 规则的源网段跟 §0.6 选的一致（`iptables -t nat -L POSTROUTING` 看）
 - [ ] IPv6 公网地址 ISP 重拨变化 → 60s 内 swanctl 自动 reload → 客户端无需改任何东西
-- [ ] iPhone 拨号 → 设置 → VPN → DNS 看到 1.1.1.1 + 8.8.8.8（v2-78 DNSSettings）
+- [ ] iPhone 拨号 → 设置 → VPN → DNS 看到 1.1.1.1 + 8.8.8.8（v2-78 DNS 推送 → v2.86-PR12.23 已改用 Apple 规范 ServerAddresses + DNSProtocol=Cleartext）
 - [ ] 用户的 `.env` 里 `IKEV2_SERVER_ADDR_V6=2408:...` 不变（保持旧值），宿主 IP 真变了 → 容器仍能跑（探测会覆盖用户值）
 
 ## 21. v2-79 → v2-80 路线图（v2-84 状态更新）
@@ -1797,7 +1825,7 @@ v2-78 之前用户反馈："你改了我宿主机的网络配置"。
 |---|---|---|---|
 | C5 | iOS 18 默认推 ecp256 → 降级 MODP2048（耗电/性能差）| `configs/swanctl-ipv6-only.conf:44` | `proposals` 追加 `aes256gcm16-sha256-ecp256` / `aes128gcm16-sha256-ecp256` / `aes256gcm16-sha256-curve25519` / `aes128gcm16-sha256-curve25519`（ECDH 系列在 MODP 之前，best-of 匹配）|
 | C4 | server.key.pem 私钥被写成 0o644（任何同主机用户可读）| `cmd/ikev2-panel/main.go:453-477` | `pair` 结构加 `isKey` 字段，私钥 dst 用 0o600，cert 仍 0o644 |
-| C6 | mobileconfig DNSSettings 用了 `<array><dict>` 错误格式，iOS 17/18 静默忽略整个节点 | `internal/cert/mobileconfig.go:35` | 改为 `<dict><key>DNS</key><array>...</array></dict>` |
+| C6 | mobileconfig DNSSettings 用了 `<array><dict>` 错误格式，iOS 17/18 静默忽略整个节点 | `internal/cert/mobileconfig.go:35` | 改为 `<dict><key>DNS</key><array>...</array></dict>` | ✅ **v2.86-PR12.23 resolved**:改成 Apple [VPN.DNS](https://developer.apple.com/documentation/devicemanagement/vpn/dns-data.dictionary) iOS 14+ 规范形态(顶层 `<key>DNS</key><dict><key>ServerAddresses</key><array>...</array><key>DNSProtocol</key><string>Cleartext</string></dict>`)。DNSSettings 是杜撰 key,任何版本均被静默忽略;ServerAddresses + DNSProtocol 是 iOS 14+ Required pair,缺一个判定"无 DNS"配置。详见 release-notes-v2.86-pr12.23.md。|
 
 **为什么只修这 3 个**：另外 6 个 "Critical" 经审视后属于"通用项目标准 / 你的部署场景用不上 / 是设计妥协项"——详见 §21 v2-80 路线图。
 
