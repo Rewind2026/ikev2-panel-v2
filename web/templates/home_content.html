@@ -197,6 +197,28 @@
       </div>
     </details>
 
+    {{/* v2.86-PR13.2:客户端虚拟 IP 段配置卡 */}}
+    <details class="settings-card" id="subnet-card">
+      <summary>
+        <span class="settings-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2" y="9" width="20" height="6" rx="2"/>
+            <path d="M6 9V7a3 3 0 0 1 3-3h6a3 3 0 0 1 3 3v2"/>
+            <path d="M12 13v2"/>
+          </svg>
+        </span>
+        <span>客户端 IP 段</span>
+        <small class="header-note">
+          {{if and .SubnetConfigured .SubnetIPv4}}<code>{{.SubnetIPv4}}</code>{{if .SubnetIPv6}} · <code>{{.SubnetIPv6}}</code>{{end}}
+          {{else if .SubnetCurrentIPv4}}<code>{{.SubnetCurrentIPv4}}</code>{{if .SubnetCurrentIPv6}} · <code>{{.SubnetCurrentIPv6}}</code>{{end}}
+          {{else}}<span class="chip warn no-dot">未配置</span>{{end}}
+        </small>
+      </summary>
+      <div class="settings-body">
+        {{template "subnet-card-content" .}}
+      </div>
+    </details>
+
     <details class="settings-card" id="aliyun-card">
       <summary>
         <span class="settings-icon" aria-hidden="true">
@@ -453,5 +475,46 @@
       <button type="submit" class="btn-primary">启用 DDNS 同步</button>
     </form>
   {{end}}
+</div>
+{{end}}
+
+{{/* v2.86-PR13.2:客户端 IP 段配置卡表单 */}}
+{{define "subnet-card-content"}}
+<div class="settings-body" style="padding: 0; background: transparent; border: 0;">
+  {{if .SubnetCurrentIPv4}}
+    <p>
+      客户端虚拟 IP 池：
+      <code>{{.SubnetCurrentIPv4}}</code>{{if .SubnetCurrentIPv6}} · <code>{{.SubnetCurrentIPv6}}</code>{{end}}
+      <br>
+      <small>配置来源：<code>{{.SubnetSource}}</code></small>
+    </p>
+  {{else}}
+    <p>
+      <span class="chip warn no-dot">未生效</span>
+      <small>dev 模式下没有 swanctl.conf(生产部署后 entrypoint 会自动写入)。</small>
+    </p>
+  {{end}}
+  <form method="POST" action="/api/subnet/save">
+    <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+    <div class="form-section">
+      <label class="form-label" for="subnet-ipv4">IPv4 段 <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(/24,如 10.13.0.0/24)</small></label>
+      <input id="subnet-ipv4" type="text" name="ipv4_subnet" placeholder="10.10.0.0/24"
+             value="{{if .SubnetIPv4}}{{.SubnetIPv4}}{{else if .SubnetCurrentIPv4}}{{.SubnetCurrentIPv4}}{{end}}"
+             pattern="[0-9./]+" required>
+    </div>
+    <div class="form-section">
+      <label class="form-label" for="subnet-ipv6">IPv6 ULA 段 <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(/64,fd00::/8,如 fd00:1::/64)</small></label>
+      <input id="subnet-ipv6" type="text" name="ipv6_subnet" placeholder="fd00:1::/64"
+             value="{{if .SubnetIPv6}}{{.SubnetIPv6}}{{else if .SubnetCurrentIPv6}}{{.SubnetCurrentIPv6}}{{end}}"
+             pattern="[0-9a-fA-F:/]+" required>
+    </div>
+    <p class="banner-warn" style="margin-top: 1rem; font-size: 0.8125rem;">⚠️ 修改后所有活跃客户端需<strong>重新拨号</strong>才能拿到新 IP 段(约 500ms 短暂中断)</p>
+    <div class="settings-actions settings-actions-end">
+      {{if .SubnetConfigured}}
+        <button type="submit" class="btn-secondary" formaction="/api/subnet/clear">清除面板配置</button>
+      {{end}}
+      <button type="submit" class="btn-primary">保存并立即生效</button>
+    </div>
+  </form>
 </div>
 {{end}}

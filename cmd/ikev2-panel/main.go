@@ -235,16 +235,29 @@ func main() {
 	}
 
 	// ---------- panelstate 文件预热 ----------
-	// v2-83 / v2.86-PR12.5 / v2.86-PR12.22 三个 panelstate store 启动时读磁盘。
-	// aliyun.creds 在 DDNSEnabled=true 分支已 LoadAliyun() 过,这里只补 cert.conf 和 mobileconfig.defaults。
+	// v2-83 / v2.86-PR12.5 / v2.86-PR12.22 / v2.86-PR13.2 四个 panelstate store 启动时读磁盘。
+	// aliyun.creds 在 DDNSEnabled=true 分支已 LoadAliyun() 过,这里只补 cert.conf /
+	// mobileconfig.defaults / subnet.conf。
 	//
 	// 为什么不 fatal:文件缺失 = 用户没在面板改过,启动失败反而阻挡部署。
-	// 运行时改完 → 进程内缓存即时生效(handler 端用 ReadMobileConfigDefaults 拿最新值)。
+	// 运行时改完 → 进程内缓存即时生效(handler 端用 ReadMobileConfigDefaults / ReadSubnetConfig 拿最新值)。
+	//
+	// v2.86-PR13.2:subnet.conf 启动时预读是为了日志一致性(可观察"是否从 panelstate 加载了 subnet"),
+	// 真正的运行期生效是 handler 端调 Manager.UpdatePoolsAndReload。
 	certCfgStore := panelstate.NewCertConfigStore()
 	if _, err := certCfgStore.LoadCertConfig(); err != nil {
 		logger.Warn("load cert config", "err", err, "fallback", "env")
 	} else {
 		logger.Info("cert config loaded")
+	}
+	subnetCfgStore := panelstate.NewSubnetConfigStore()
+	if subnetCfg, err := subnetCfgStore.LoadSubnetConfig(); err != nil {
+		logger.Warn("load subnet config", "err", err, "fallback", "env/auto")
+	} else if subnetCfg != nil {
+		logger.Info("subnet config loaded from panelstate",
+			"ipv4_subnet", subnetCfg.IPv4Subnet,
+			"ipv6_subnet", subnetCfg.IPv6Subnet,
+		)
 	}
 	mcDefaultsStore := panelstate.NewMobileConfigDefaultsStore()
 	if _, err := mcDefaultsStore.LoadMobileConfigDefaults(); err != nil {
@@ -460,6 +473,8 @@ func main() {
 		PanelState: panelstate.NewStore(),
 		// v2.86-PR12.5:证书配置运行时持久化(模式/域名/CN/邮箱)
 		CertConfigStore: certCfgStore,
+		// v2.86-PR13.2:客户端虚拟 IP 段运行时持久化(IPv4 pool + IPv6 ULA pool)
+		SubnetConfigStore: subnetCfgStore,
 		// v2.86-PR12.22:管理员全局 mobileconfig 默认值,运行时热改无需重启。
 		MobileConfigDefaults:  mcDefaultsStore,
 		AliyunAccessKeySource: cfg.AliyunAccessKeySource,

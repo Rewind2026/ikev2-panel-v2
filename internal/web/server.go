@@ -72,6 +72,10 @@ type Server struct {
 	// 跟 PanelState 是独立的另一个 Store(同目录不同文件),可独立读写。
 	CertConfigStore *panelstate.CertConfigStore
 
+	// v2.86-PR13.2:客户端虚拟 IP 段(IPv4 pool + IPv6 ULA pool)运行时持久化。
+	// 保存后 handler 立即调 Manager.UpdatePoolsAndReload,运行期生效(无需重启容器)。
+	SubnetConfigStore *panelstate.SubnetConfigStore
+
 	// v2.86-PR12.22:管理员全局 mobileconfig 默认值(运行时热改,无需重启)。
 	// 优先级:overlay(user.MobileConfigOpts) > MobileConfigDefaults > BaseMobileConfigDefaults()。
 	MobileConfigDefaults *panelstate.MobileConfigDefaultsStore
@@ -188,6 +192,14 @@ func New(srv *Server, staticDir string) http.Handler {
 	mux.Handle("GET /api/cert/status", protect(http.HandlerFunc(srv.handleCertStatus)))
 	mux.Handle("POST /api/cert/save", protectPOST(http.HandlerFunc(srv.handleCertSave)))
 	mux.Handle("POST /api/cert/clear", protectPOST(http.HandlerFunc(srv.handleCertClear)))
+
+	// v2.86-PR13.2:客户端虚拟 IP 段配置卡 API
+	//   - GET  /api/subnet/status   查询当前 subnet 配置(panelstate + swanctl 当前生效值)
+	//   - POST /api/subnet/save     保存 subnet + 立即 swanctl reload(无需重启)
+	//   - POST /api/subnet/clear    清除 panelstate(swanctl.conf 当前值不变,重启容器回 env/auto)
+	mux.Handle("GET /api/subnet/status", protect(http.HandlerFunc(srv.handleSubnetStatus)))
+	mux.Handle("POST /api/subnet/save", protectPOST(http.HandlerFunc(srv.handleSubnetSave)))
+	mux.Handle("POST /api/subnet/clear", protectPOST(http.HandlerFunc(srv.handleSubnetClear)))
 
 	// v2.86-PR12.22:管理员后台 mobileconfig 全局默认值。
 	//   - GET  /admin/mobileconfig-defaults         设置页

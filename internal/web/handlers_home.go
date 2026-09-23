@@ -57,6 +57,16 @@ type homeData struct {
 	CertACMEEmail  string // LE 注册邮箱
 	CertSource     string // 来源: panelstate / env-default / ""
 
+	// v2.86-PR13.2:客户端虚拟 IP 段配置状态(给 home 模板渲染用)
+	SubnetConfigured bool   // subnet.conf 文件是否存在
+	SubnetIPv4       string // panelstate 里的 IPv4 pool CIDR
+	SubnetIPv6       string // panelstate 里的 IPv6 ULA pool
+	SubnetSource     string // panelstate / runtime-default / dev-unknown
+	SubnetUpdatedAt  int64  // unix seconds,面板最后修改时间
+	// 当前 swanctl.conf 正在生效的值(独立于 panelstate,看运行态)
+	SubnetCurrentIPv4 string
+	SubnetCurrentIPv6 string
+
 	// v2.85-PR2:默认密码横幅(/data/panel-state/INITIAL_ADMIN_PASSWORD.txt 存在 → 提示改密码)
 	IsDefaultPassword bool
 
@@ -101,6 +111,9 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 	// v2.86-PR12.5:证书配置状态
 	certCfg := loadCertConfigStatus(s)
 
+	// v2.86-PR13.2:客户端虚拟 IP 段配置状态
+	subnetCfg := loadSubnetConfigStatus(s)
+
 	// v2.85-PR2:检测是否仍用启动时生成的默认密码
 	isDefaultPassword := loadIsDefaultPassword(s)
 
@@ -132,6 +145,14 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 		CertServerCN:      certCfg.serverCN,
 		CertACMEEmail:     certCfg.acmeEmail,
 		CertSource:        certCfg.source,
+		// v2.86-PR13.2:subnet 状态
+		SubnetConfigured:  subnetCfg.configured,
+		SubnetIPv4:        subnetCfg.ipv4,
+		SubnetIPv6:        subnetCfg.ipv6,
+		SubnetSource:      subnetCfg.source,
+		SubnetUpdatedAt:   subnetCfg.updatedAt,
+		SubnetCurrentIPv4: subnetCfg.currentIPv4,
+		SubnetCurrentIPv6: subnetCfg.currentIPv6,
 		IsDefaultPassword: isDefaultPassword,
 		// v2.86-PR12.21:Visual-first topology
 		TopologyClients: buildHomeTopology(r.Context(), s, activeSAs),
@@ -212,6 +233,58 @@ func loadCertConfigStatus(s *Server) certStatusData {
 		serverCN:   s.ServerCN,
 		source:     s.CertConfigSource,
 	}
+}
+
+// subnetStatusData v2.86-PR13.2:homeData 用的 subnet 配置状态集合。
+//
+// 与 certStatusData 类似,但多了 currentIPv4/IPv6 字段(从 swanctl.conf
+// 读当前实际生效的 pool 段,跟 panelstate 字段可以不一致 — 比如刚 clear
+// 了 panelstate 但 swanctl.conf 仍是上一次的配置)。
+type subnetStatusData struct {
+	configured  bool   // subnet.conf 文件是否存在
+	ipv4        string // panelstate IPv4 pool CIDR
+	ipv6        string // panelstate IPv6 ULA pool
+	updatedAt   int64  // panelstate UpdatedAt
+	source      string // panelstate / runtime-default / dev-unknown
+	currentIPv4 string // swanctl.conf 当前生效的 IPv4(独立于 panelstate)
+	currentIPv6 string // swanctl.conf 当前生效的 IPv6
+}
+
+// loadSubnetConfigStatus 加载 subnet 配置状态(给 home 模板用)。
+//
+// 行为:
+//   - panelstate 优先:SubnetConfigStore.ReadSubnetConfig()
+//   - panelstate 没设 → 仍从 swanctl.conf 读 currentIPv4/IPv6(给 UI 显示"运行态")
+//   - dev 模式(swanctl.conf 不存在)→ source="dev-unknown",currentIPv4/IPv6 都为空
+func loadSubnetConfigStatus(s *Server) subnetStatusData {
+	out := subnetStatusData{}
+
+	// 1) 当前 swanctl.conf 正在生效的值(给 UI 看"实际跑的是哪个段")
+	if s.Swanctl != nil {
+		v4, v6 := s.Swanctl.ReadCurrentPoolsFromFile()
+		out.currentIPv4 = v4
+		out.currentIPv6 = v6
+	} else {
+		out.source = "dev-unknown"
+	}
+
+	// 2) panelstate 优先
+	if s.SubnetConfigStore != nil && s.SubnetConfigStore.SubnetConfigExists() {
+		if c, err := s.SubnetConfigStore.ReadSubnetConfig(); err == nil && c != nil {
+			out.configured = true
+			out.ipv4 = c.IPv4Subnet
+			out.ipv6 = c.IPv6Subnet
+			out.updatedAt = c.UpdatedAt
+			out.source = "panelstate"
+			return out
+		}
+	}
+
+	// 3) 没设 panelstate → source = runtime-default(如果能读到 swanctl.conf)
+	if out.source == "" && (out.currentIPv4 != "" || out.currentIPv6 != "") {
+		out.source = "runtime-default"
+	}
+	return out
 }
 
 // loadLEWarning 检查 LE 模式证书状态,返回告警文本(无告警返回空字符串)。

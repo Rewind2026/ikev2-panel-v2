@@ -87,6 +87,7 @@ const SwanctlBin = "/usr/sbin/swanctl"
 // Manager swanctl 子配置 + 重载管理。
 type Manager struct {
 	confDir  string
+	confPath string // v2.86-PR13.2:测试可覆盖 swanctl.conf 路径
 	viciSock string
 	SkipVici bool // dev 模式：无 swanctl/charon.vici 时静默跳过 reload
 
