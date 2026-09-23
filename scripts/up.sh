@@ -59,6 +59,22 @@ EOF
   esac
 done
 
+# ---------- 0.5 准备 ./logs bind mount 目标(v2.86-PR13.4)----------
+# docker-compose.yml 把容器内 /var/log bind 到宿主 ./logs。
+# 如果宿主目录不存在或权限不对,容器启动会 mount 失败 / 容器内进程写不进去。
+# 必须在 docker compose up 之前建好。
+if [ ! -d ./logs ]; then
+  log "creating ./logs bind mount target (chmod 1777)..."
+  mkdir -p ./logs
+  chmod 1777 ./logs
+  ok "./logs created (chmod 1777, sticky bit so different containers can't delete each other's logs)"
+else
+  # 已存在:只校验权限,避免破坏用户已有日志
+  if [ "$(stat -c '%a' ./logs 2>/dev/null)" != "1777" ]; then
+    warn "./logs exists with mode $(stat -c '%a' ./logs), recommend chmod 1777 ./logs"
+  fi
+fi
+
 # ---------- 1. 探测网络模式(生成 override) ----------
 if [ "$NO_DETECT" = "1" ]; then
   warn "--no-detect passed, skipping auto-network.sh (using docker-compose.yml default = host)"

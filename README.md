@@ -197,6 +197,25 @@ $EDITOR .env
 docker compose logs -f | grep -E '(auto-detect|FATAL|version=)'
 ```
 
+**日志落盘（v2.86-PR13.4）**：
+
+```bash
+# 容器内 /var/log bind 到宿主机 ./logs(sticky bit 1777)
+ls -la ./logs/
+# 典型文件:
+#   swanctl.log          strongSwan 控制连接日志
+#   charon.log            IKE daemon 主日志
+#   audit.log            面板审计日志(用户增删 / 证书变更 / DDNS 同步等)
+#   cron.log             renew-cert / audit-retention cron 执行日志
+#   panel-stdout.log     Go 进程 stdlib log(容器 stdout/stderr 的本地镜像)
+
+# 直接 tail 排查
+tail -f ./logs/audit.log
+
+# 容器 stdout/stderr(docker daemon 层轮转 20m×5)
+docker logs -f ikev2-panel
+```
+
 **v2.85 新增：自动网络模式切换** —— `./scripts/up.sh` 会探测宿主网络环境：
 
 | 探测结果 | 选择的模式 | 说明 |

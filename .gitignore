@@ -21,6 +21,10 @@ vendor/
 # 数据卷(用户数据)
 data/
 /data/
+# v2.86-PR13.4:宿主机日志目录(由 docker-compose.yml ./logs:/var/log bind mount)。
+# 强Swan/Go/cron 写出来的运行时日志,不在源码目录下;跟 data/ 同样不进库。
+logs/
+/logs/
 
 # 系统
 .DS_Store

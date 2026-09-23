@@ -1465,6 +1465,32 @@ FATAL 退出（带明确错误提示 + 修复指引）
 
 详细设计见 [docs/release-notes-v2.86-pr13.3.md](release-notes-v2.86-pr13.3.md)。
 
+**v2.86-PR13.4:容器日志持久化 + 轮转**
+
+之前 `/var/log` 是 tmpfs 128m,有两个问题:
+- 容器重启即丢 → 排查"重启前发生了什么"无据可查
+- 128m 写满 → 容器内 Go / strongSwan 进程写不进去 → 500 错误 / charon 异常退出
+
+**改造**(对齐 `ddnsv6` 项目的日志范式):
+
+| 路径 | 类型 | 轮转方式 | 持久化 |
+|---|---|---|---|
+| 容器内 `/var/log/*.log` | bind mount → 宿主 `./logs` | sticky bit 1777 + 手工 `logrotate`(可选) | ✅ 持久 |
+| 容器 stdout/stderr | `logging.driver=json-file` | `max-size=20m` + `max-file=5` (daemon 层) | ✅ 持久 |
+
+**为什么 `./logs` 用 bind mount 不用 named volume**:
+- 跟 ddnsv6 项目对齐(`./ddns_logs:/var/log/ddns`)
+- 用户能直接 `ls ./logs/` / `tail -f`,运维直觉好
+- named volume 要 `docker volume inspect` 看路径,不直观
+
+**为什么 `./data` 保留 named volume**:
+- 里面是 SQLite DB + LE 私钥 + acme.sh account.json,bin mount 到源码目录会让数据跟 `.git` 距离太近,误删风险
+- named volume 由 docker 管理,可备份(`docker run --rm -v ikev2-panel-v2_ikev2-data:/data -v $(pwd):/backup alpine tar czf /backup/...`)
+
+**scripts/up.sh 启动前准备**:`mkdir -p ./logs && chmod 1777 ./logs`(sticky bit 防容器逃逸后误删其他日志)。
+
+详细验证步骤见 [docs/release-notes-v2.86-pr13.4.md](release-notes-v2.86-pr13.4.md)。
+
 ### 16.3 关键改动文件
 
 | 文件 | v2-78 | v2-79 |

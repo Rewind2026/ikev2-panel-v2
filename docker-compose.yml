@@ -83,6 +83,17 @@ services:
     security_opt:
       - no-new-privileges:true   # v2.86-PR11:防 setuid 提权
 
+    # v2.86-PR13.4:docker daemon 层日志轮转(跟 ddnsv6 同款 json-file driver)。
+    # 这是双保险:即使 ./logs bind mount 写满了 docker 也会按 max-size 滚动,
+    # 不会让容器把宿主磁盘吃满。
+    # 注意:这是 docker 自己的 stdout/stderr 日志(容器内 Go 进程走的 stdlib log),
+    # strongSwan/charon/audit/renew 这些业务日志在 /var/log/*.log(由 ./logs bind mount 接管)。
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+
     # 关键：VPN 服务器需要 IP forwarding。
     #
     # Docker host network mode 下默认会强制把 IPv6 forwarding 重置为 0
@@ -118,7 +129,8 @@ services:
     #   - acme.sh 工作目录用命名 volume (/data),天然持久化
     tmpfs:
       - /tmp:size=64m
-      - /var/log:size=128m
+      # v2.86-PR13.4:/var/log 已改 bind mount 到宿主机 ./logs,不再需要 tmpfs。
+      # 之前 tmpfs 128m 的痛点:重启即丢 + 满了容器内进程写不进去导致 500。
       - /var/run:size=32m
       - /run:size=32m
       # v2.86-PR11.1:strongSwan 必须能写 /etc/swanctl (conf.d + x509 + private),
@@ -139,12 +151,19 @@ services:
       #
       # v2.86-PR12.8:/data 下包含 4 类持久化数据:
       #   - panel.db       SQLite (用户/审计/证书配置)
-      #   - panel-state/   运行时配置 (cert.conf + aliyun.creds)
+      #   - panel-state/   运行时配置 (cert.conf + aliyun.creds + subnet.conf)
       #   - le/            Let's Encrypt 签发的证书 (fullchain + privkey)
       #   - acme-sh/       acme.sh working dir (ca/ + account.json + 域名证书目录)
       #   dnsapi/deploy/notify 是 acme.sh 二进制的伴生文件,在镜像 /opt/acme.sh/
       #   (Dockerfile 里 cp -a 进去的),不随容器重启丢失——跟 /data 无关。
       - ikev2-panel-v2_ikev2-data:/data   # 持久化:DB + 证书 + LE 证书 + acme.sh account
+
+      # v2.86-PR13.4:日志 bind 到宿主机 ./logs,重启不丢 + 可直接 tail -f 排查。
+      # docker daemon 层另加 logging: json-file 轮转做双保险(见下方 logging 段)。
+      # 容器内进程(Go / strongSwan / acme.sh / cron)都需要写 /var/log,
+      # Dockerfile 已经 chmod 1777 /var/log,容器内任何用户都能写。
+      # 宿主机目录 ./logs 由 scripts/up.sh 在启动前 mkdir -p + chmod 1777 创建。
+      - ./logs:/var/log:rw
 
       # v2-79.2：把宿主 /etc/sysctl.d 挂进容器（ro：默认值查询；rw：自愈时持久化）。
       # 容器内 root 通过这条挂载在 /host-sysctl.d 写入 99-ikev2.conf，
