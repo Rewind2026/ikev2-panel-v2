@@ -197,6 +197,46 @@ func (c *AliyunClient) UpdateRecordValue(recordID, rr, recordType, value string,
 	return nil
 }
 
+// AddDomainRecord v2.86-pr23f:在阿里云 DNS 上创建一条新解析记录。
+//
+// 用途:用户首次配置 DDNS,域名下还没有对应记录时,让面板一键创建
+// (而不是只 WARN 让用户去阿里云控制台手动建 — 那是曲线返工的流程)。
+//
+// 参数:
+//   - domainName:主域名(如 "example.com")
+//   - rr:主机记录(如 "vpn" / "@")
+//   - recordType:A / AAAA
+//   - value:记录值(IPv4 / IPv6)
+//   - ttl:缓存秒数(<=0 → 默认 600)
+//
+// 返回:新建记录的 RecordId。
+func (c *AliyunClient) AddDomainRecord(domainName, rr, recordType, value string, ttl int) (string, error) {
+	if !validRecordType(recordType) {
+		return "", fmt.Errorf("invalid recordType %q (supported: %s, %s)",
+			recordType, RecordTypeA, RecordTypeAAAA)
+	}
+	params := url.Values{}
+	params.Set("DomainName", domainName)
+	params.Set("RR", rr)
+	params.Set("Type", recordType)
+	params.Set("Value", value)
+	if ttl <= 0 {
+		ttl = 600
+	}
+	params.Set("TTL", fmt.Sprintf("%d", ttl))
+
+	var resp struct {
+		RecordID string `json:"RecordId"`
+	}
+	if err := c.call("AddDomainRecord", params, &resp); err != nil {
+		return "", fmt.Errorf("AddDomainRecord: %w", err)
+	}
+	if resp.RecordID == "" {
+		return "", fmt.Errorf("AddDomainRecord returned empty RecordId")
+	}
+	return resp.RecordID, nil
+}
+
 // call 通用 alidns API 调用,负责签名 + HTTP POST。
 func (c *AliyunClient) call(action string, params url.Values, result interface{}) error {
 	// 公共参数(签名 v3 必需)

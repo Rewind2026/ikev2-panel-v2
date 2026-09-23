@@ -3,8 +3,12 @@
 // 设计见 docs/design.md §19 + docs/release-notes-v2.82.md
 //
 // 路由:
-//   - GET  /api/ddns/status  返回 {enabled, last_sync, failed}
-//   - POST /api/ddns/toggle  切换开关,form: enabled=true|false
+//   - GET  /api/ddns/status        返回 {enabled, last_sync, failed}
+//   - POST /api/ddns/toggle        切换开关,form: enabled=true|false
+//   - POST /api/ddns/config        v2.86-pr23a:改 RR / EnableA / EnableAAAA / Period
+//   - POST /api/ddns/sync-now      v2.86-pr23a:触发立即 tick
+//   - POST /api/ddns/fetch-remote  v2.86-pr23a:从阿里云查当前记录值
+//   - POST /api/ddns/create-record v2.86-pr23f:在阿里云上创建 A/AAAA 记录(首次配置用)
 package web
 
 import (
@@ -16,6 +20,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/yourname/ikev2-panel-v2/internal/dns"
 )
 
 // DDNSStatusResp GET /api/ddns/status 返回。
@@ -187,9 +193,11 @@ func lastDDNSFailedExists() bool {
 }
 
 // handleDDNSConfig v2.86-pr23a:POST /api/ddns/config,改 RR / EnableA / EnableAAAA / Period。
+// v2.86-pr23f:加 domain 主域名 form 参数(空 = 不改,沿用 env / 当前值)。
 //
 // Form 参数:
 //   - rr             主机记录(空 = "@")
+//   - domain         v2.86-pr23f 主域名(空 = 不改,env 启动值或已配值)
 //   - enable_a       "true"/"1" 勾选 / 不传或 "false" 不勾
 //   - enable_aaaa    "true"/"1" 勾选 / 不传或 "false" 不勾
 //   - period_seconds 同步周期(10-3600)
@@ -214,6 +222,7 @@ func (s *Server) handleDDNSConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rr := strings.TrimSpace(r.PostFormValue("rr"))
+	domain := strings.TrimSpace(r.PostFormValue("domain"))
 	enableA := parseBoolForm(r.PostFormValue("enable_a"))
 	enableAAAA := parseBoolForm(r.PostFormValue("enable_aaaa"))
 
@@ -240,19 +249,26 @@ func (s *Server) handleDDNSConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := s.DDNSSync.SetConfig(rr, enableA, enableAAAA, periodSec); err != nil {
+	// v2.86-pr23f:domain 校验(空 = 不改,跳过校验)
+	if domain != "" && !isValidDomainForPanel(domain) {
+		http.Error(w, "domain 不合法 (形如 example.com,标签 1-63 字符)", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.DDNSSync.SetConfig(rr, enableA, enableAAAA, periodSec, domain); err != nil {
 		s.Logger.Error("ddns config save failed", "err", err)
 		http.Error(w, "保存失败: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	s.Logger.Info("ddns config updated",
-		"rr", rr, "enable_a", enableA, "enable_aaaa", enableAAAA, "period_seconds", periodSec,
+		"domain", domain, "rr", rr,
+		"enable_a", enableA, "enable_aaaa", enableAAAA, "period_seconds", periodSec,
 	)
 	// v2.86-pr23a:审计
 	s.writeAudit(r, "ddns.config.update",
-		fmt.Sprintf("rr=%s,enable_a=%v,enable_aaaa=%v,period_seconds=%d",
-			rr, enableA, enableAAAA, periodSec))
+		fmt.Sprintf("domain=%s,rr=%s,enable_a=%v,enable_aaaa=%v,period_seconds=%d",
+			domain, rr, enableA, enableAAAA, periodSec))
 
 	// flash 成功
 	sess, _ := SessionFrom(r.Context())
@@ -268,6 +284,32 @@ func (s *Server) handleDDNSConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, "/", http.StatusFound)
+}
+
+// isValidDomainForPanel v2.86-pr23f:面板提交前校验主域名(走和 ddns statefile
+// 完全相同的规则,避免面板接受但 Sync 拒绝的不一致)。
+func isValidDomainForPanel(s string) bool {
+	if s == "" || len(s) > 253 {
+		return false
+	}
+	if !strings.Contains(s, ".") {
+		return false
+	}
+	for _, lab := range strings.Split(s, ".") {
+		if len(lab) == 0 || len(lab) > 63 {
+			return false
+		}
+		if lab[0] == '-' || lab[len(lab)-1] == '-' {
+			return false
+		}
+		for _, r := range lab {
+			if !(r >= 'a' && r <= 'z') && !(r >= 'A' && r <= 'Z') &&
+				!(r >= '0' && r <= '9') && r != '-' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // handleDDNSSyncNow v2.86-pr23a:POST /api/ddns/sync-now,触发后台立即 tick。
@@ -400,4 +442,113 @@ func validRRChars(s string) bool {
 		}
 	}
 	return true
+}
+
+// handleDDNSCreateRecord v2.86-pr23f:POST /api/ddns/create-record。
+//
+// 用户首次配置 DDNS 时,域名下还没有对应 A/AAAA 记录 → 阿里云 API 报
+// "SubDomainInvalid.Value"。本 handler 一键创建,绕过"去阿里云控制台手动建"的
+// 曲线返工流程。
+//
+// 参数(form):
+//   - record_type  "A" 或 "AAAA"(必须)
+//   - value        记录值(IPv4 / IPv6 字符串,必须)
+//
+// 行为:
+//   - 复用 DDNS Sync 当前的 Domain / RR / AccessKey 配置
+//   - 调 AddDomainRecord(等同阿里云控制台手动新建)
+//   - 写审计(成功 / 失败都记)
+//   - flash 成功 / 失败 → 302 /
+//
+// 注意:这是**写**操作,RAM 权限需要 alidns:AddDomainRecord(用户配置时已勾)。
+func (s *Server) handleDDNSCreateRecord(w http.ResponseWriter, r *http.Request) {
+	if s.DDNSSync == nil {
+		http.Error(w, "DDNS not configured", http.StatusNotFound)
+		return
+	}
+
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+
+	recordType := strings.TrimSpace(r.PostFormValue("record_type"))
+	value := strings.TrimSpace(r.PostFormValue("value"))
+
+	if recordType != dns.RecordTypeA && recordType != dns.RecordTypeAAAA {
+		http.Error(w, "record_type 必须是 A 或 AAAA", http.StatusBadRequest)
+		return
+	}
+	if value == "" {
+		http.Error(w, "value 不能为空", http.StatusBadRequest)
+		return
+	}
+
+	domain, rr := s.DDNSSync.BaseDomain(), s.DDNSSync.RR()
+	if domain == "" {
+		http.Error(w, "DNS 主域名未配置(env IKEV2_DDNS_DOMAIN 或面板设置)", http.StatusBadRequest)
+		return
+	}
+
+	// 凭证解析:panelstate.aliyun.creds 优先(env 启动值仅作为 fallback)
+	keyID, keySecret, ok := s.ddnsCredentials()
+	if !ok {
+		http.Error(w, "阿里云凭证未配置", http.StatusBadRequest)
+		return
+	}
+
+	client := dns.NewAliyunClient(keyID, keySecret)
+	recordID, err := client.AddDomainRecord(domain, rr, recordType, value, 600)
+	if err != nil {
+		s.Logger.Error("ddns create record failed", "err", err,
+			"domain", domain, "rr", rr, "record_type", recordType, "value", value)
+		s.writeAudit(r, "ddns.create_record",
+			fmt.Sprintf("domain=%s,rr=%s,type=%s,value=%s,err=%q",
+				domain, rr, recordType, value, err.Error()))
+		// flash 失败
+		sess, _ := SessionFrom(r.Context())
+		if sess != nil && s.FlashStore != nil {
+			s.FlashStore.Set(sess.ID, Flash{
+				Message: fmt.Sprintf("创建记录失败: %s", err.Error()),
+			})
+		}
+		http.Redirect(w, r, "/", http.StatusFound)
+		return
+	}
+
+	s.Logger.Info("ddns record created",
+		"record_id", recordID, "domain", domain, "rr", rr,
+		"record_type", recordType, "value", value)
+	s.writeAudit(r, "ddns.create_record",
+		fmt.Sprintf("domain=%s,rr=%s,type=%s,value=%s,record_id=%s",
+			domain, rr, recordType, value, recordID))
+
+	sess, _ := SessionFrom(r.Context())
+	if sess != nil && s.FlashStore != nil {
+		s.FlashStore.Set(sess.ID, Flash{
+			Message: fmt.Sprintf("已在阿里云创建 %s 记录:%s → %s",
+				recordType, rr+"."+domain, value),
+		})
+	}
+
+	if r.Header.Get("Accept") == "application/json" {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"ok":true,"record_id":%q}`, recordID)
+		return
+	}
+	http.Redirect(w, r, "/", http.StatusFound)
+}
+
+// ddnsCredentials v2.86-pr23f:helper 取 DDNS 凭证(panelstate 优先,env 兜底)。
+//
+// 跟 sync.go tick() 内部的 CredentialGetter 同一套 — 但 sync 的 getter 不导出,
+// 所以这里在 handler 层从 Server.PanelState 拿(等同于用户改凭证后立即生效)。
+func (s *Server) ddnsCredentials() (string, string, bool) {
+	if s.PanelState != nil {
+		if creds, _ := s.PanelState.ReadAliyun(); creds != nil &&
+			creds.KeyID != "" && creds.KeySecret != "" {
+			return creds.KeyID, creds.KeySecret, true
+		}
+	}
+	return "", "", false
 }

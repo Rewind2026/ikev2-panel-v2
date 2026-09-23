@@ -218,6 +218,10 @@ func NewSync(cfg Config) *Sync {
 		if rec, readErr := parseStateFile(s.cfg.StateFile, defaultFamily); readErr == nil {
 			s.cfg.Enabled = rec.Enabled
 			s.cfg.Family = rec.Family
+			// v2.86-pr23f:Domain 从 statefile 覆盖(空 = 沿用 env 启动值,向后兼容)
+			if rec.Domain != "" {
+				s.cfg.Domain = rec.Domain
+			}
 			// v2.86-pr23a:RR / EnableA / EnableAAAA / Period 从 statefile 覆盖
 			// (statefile 是 source of truth — writeStateFile 总是写这三个字段,
 			// 所以 rec 里的 zero value 也代表"用户显式关了")
@@ -362,6 +366,7 @@ func (s *Sync) snapshotStateRecord() stateRecord {
 	return stateRecord{
 		Enabled:      s.cfg.Enabled,
 		Family:       s.cfg.Family,
+		Domain:       s.cfg.Domain,
 		RR:           s.cfg.RR,
 		EnableA:      s.cfg.EnableA,
 		EnableAAAA:   s.cfg.EnableAAAA,
@@ -506,6 +511,7 @@ func (s *Sync) PeriodSeconds() int {
 }
 
 // SetConfig v2.86-pr23a:面板改 RR / EnableA / EnableAAAA / Period 的统一入口。
+// v2.86-pr23f:加 Domain 参数(空 = 不改 env fallback 的 domain)。
 //
 // 设计要点:
 //   - 内存立即更新(cfg 字段直接赋值)
@@ -518,10 +524,14 @@ func (s *Sync) PeriodSeconds() int {
 //   - rr:主机记录(空 = "@")
 //   - enableA / enableAAAA:同步哪些 family
 //   - periodSeconds:同步周期(0 = 不改;传有效值时 clamp 到 [10, 3600])
+//   - domain:v2.86-pr23f 主域名(空 = 不改,沿用 env / 已配值)
 //
 // 返回 error:statefile 写失败(内存已更新,只是不持久化)。
-func (s *Sync) SetConfig(rr string, enableA, enableAAAA bool, periodSeconds int) error {
+func (s *Sync) SetConfig(rr string, enableA, enableAAAA bool, periodSeconds int, domain string) error {
 	s.mu.Lock()
+	if domain != "" {
+		s.cfg.Domain = domain
+	}
 	s.cfg.RR = rr
 	s.cfg.EnableA = enableA
 	s.cfg.EnableAAAA = enableAAAA
@@ -542,7 +552,8 @@ func (s *Sync) SetConfig(rr string, enableA, enableAAAA bool, periodSeconds int)
 		return fmt.Errorf("write state file: %w", err)
 	}
 	s.cfg.Logger.Info("ddns: config updated",
-		"rr", rr, "enable_a", enableA, "enable_aaaa", enableAAAA,
+		"domain", domain, "rr", rr,
+		"enable_a", enableA, "enable_aaaa", enableAAAA,
 		"period_seconds", int(s.cfg.Period.Seconds()),
 	)
 	return nil

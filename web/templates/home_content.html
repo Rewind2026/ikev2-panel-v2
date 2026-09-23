@@ -156,7 +156,7 @@
       </span>
     </div>
     <span class="metric-value {{if .DDNSFailed}}danger{{else if .DDNSReady}}ok{{else if and .DDNSEnabled (or .DDNSEnableA .DDNSEnableAAAA)}}warn{{else if .DDNSEnabled}}warn{{else}}muted{{end}}">
-      {{if not .DDNSConfigured}}—{{else if .DDNSFailed}}失败{{else if .DDNSReady}}运行中{{else if not (or .DDNSEnableA .DDNSEnableAAAA)}}已禁用{{else if not .DDNSHasDomain}}待配置域名{{else if not .DDNSHasCreds}}缺凭证{{else if .DDNSEnabled}}已开启{{else}}已关闭{{end}}
+      {{if not .DDNSConfigured}}—{{else if .DDNSFailed}}失败{{else if .DDNSReady}}运行中{{else if not (or .DDNSEnableA .DDNSEnableAAAA)}}已禁用{{else if not .DDNSHasDomain}}待配域名{{else if not .DDNSHasCreds}}缺凭证{{else if and .DDNSReady (or (and .DDNSEnableA (not .DDNSRemoteA)) (and .DDNSEnableAAAA (not .DDNSRemoteAAAA)))}}无记录{{else if .DDNSEnabled}}已开启{{else}}已关闭{{end}}
     </span>
     <span class="metric-hint">
       {{if .DDNSConfigured}}{{if and .DDNSEnableA .DDNSEnableAAAA}}A + AAAA{{else if .DDNSEnableA}}A{{else if .DDNSEnableAAAA}}AAAA{{else}}无记录{{end}}{{else}}未配置{{end}}
@@ -318,7 +318,7 @@
       <div class="side-stat">
         <span class="side-stat-label">DDNS</span>
         <span class="side-stat-value {{if .DDNSFailed}}danger{{else if .DDNSReady}}ok{{else if and .DDNSEnabled (or .DDNSEnableA .DDNSEnableAAAA)}}warn{{else if .DDNSEnabled}}warn{{else}}muted{{end}}">
-          {{if not .DDNSConfigured}}—{{else if .DDNSFailed}}失败{{else if .DDNSReady}}运行中{{else if not (or .DDNSEnableA .DDNSEnableAAAA)}}已禁用{{else if not .DDNSHasDomain}}待配置域名{{else if not .DDNSHasCreds}}缺凭证{{else if .DDNSEnabled}}已开启{{else}}已关闭{{end}}
+          {{if not .DDNSConfigured}}—{{else if .DDNSFailed}}失败{{else if .DDNSReady}}运行中{{else if not (or .DDNSEnableA .DDNSEnableAAAA)}}已禁用{{else if not .DDNSHasDomain}}待配域名{{else if not .DDNSHasCreds}}缺凭证{{else if and .DDNSReady (or (and .DDNSEnableA (not .DDNSRemoteA)) (and .DDNSEnableAAAA (not .DDNSRemoteAAAA)))}}无记录{{else if .DDNSEnabled}}已开启{{else}}已关闭{{end}}
         </span>
       </div>
     </div>
@@ -492,9 +492,19 @@
   </div>
   {{end}}
 
-  {{/* 配置表单 — 一站式 RR/EnableA/EnableAAAA/Period */}}
+  {{/* 配置表单 — 一站式 Domain/RR/EnableA/EnableAAAA/Period */}}
   <form method="POST" action="/api/ddns/config">
     <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+    {{/* v2.86-pr23f:主域名 — 之前只能从 env IKEV2_DDNS_DOMAIN 启动值读,
+       面板现在能改,持久化到 statefile(覆盖 env 启动值)。 */}}
+    <div class="form-section">
+      <label class="form-label" for="ddns-domain">主域名
+        <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(裸 FQDN,如 example.com,不含 RR 前缀)</small>
+      </label>
+      <input id="ddns-domain" type="text" name="domain" placeholder="example.com"
+             value="{{.DDNSBaseDomain}}"
+             pattern="[a-zA-Z0-9.\-]{1,253}" maxlength="253" autocomplete="off">
+    </div>
     <div class="form-section">
       <label class="form-label" for="ddns-rr">主机记录 (RR)
         <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(空或 @ = 主域本身,例如 vpn = vpn.example.com)</small>
@@ -597,6 +607,46 @@
         {{if .DDNSRemoteError}}<div style="color: var(--ikev2-danger); margin-top: 0.25rem;">查询失败:{{.DDNSRemoteError}}</div>{{end}}
       </div>
     </details>
+
+    {{/* v2.86-pr23f:远端查不到 A/AAAA 记录 → 提供 "在阿里云创建" 按钮(独立 form)。
+       用户首次配置 DDNS 时,域名下还没建记录 → 阿里云 API 不让你 Update,
+       提示用户"去阿里云控制台手动建"是曲线返工。本捷径直接走 AddDomainRecord。 */}}
+    {{if and .DDNSHasDomain .DDNSHasCreds}}
+      {{if and .DDNSEnableA (not .DDNSRemoteA)}}
+      <form method="POST" action="/api/ddns/create-record" style="margin: 0.5rem 0;">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <input type="hidden" name="record_type" value="A">
+        <input type="hidden" name="value" value="{{.DDNSV4IP}}">
+        <div class="banner-warn" style="margin: 0; font-size: 0.8125rem;">
+          <div style="display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap;">
+            <span>阿里云上没有 <code>{{.DDNSDomain}}</code> 的 A 记录。</span>
+            {{if .DDNSV4IP}}
+            <button type="submit" class="btn-primary btn-sm">在阿里云创建 A → {{.DDNSV4IP}}</button>
+            {{else}}
+            <span class="text-muted">等待首次 IPv4 探测后再创建。</span>
+            {{end}}
+          </div>
+        </div>
+      </form>
+      {{end}}
+      {{if and .DDNSEnableAAAA (not .DDNSRemoteAAAA)}}
+      <form method="POST" action="/api/ddns/create-record" style="margin: 0.5rem 0;">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <input type="hidden" name="record_type" value="AAAA">
+        <input type="hidden" name="value" value="{{.DDNSV6IP}}">
+        <div class="banner-warn" style="margin: 0; font-size: 0.8125rem;">
+          <div style="display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap;">
+            <span>阿里云上没有 <code>{{.DDNSDomain}}</code> 的 AAAA 记录。</span>
+            {{if .DDNSV6IP}}
+            <button type="submit" class="btn-primary btn-sm">在阿里云创建 AAAA → {{.DDNSV6IP}}</button>
+            {{else}}
+            <span class="text-muted">等待首次 IPv6 探测后再创建。</span>
+            {{end}}
+          </div>
+        </div>
+      </form>
+      {{end}}
+    {{end}}
     {{end}}
 
     <div class="settings-actions settings-actions-end" style="flex-wrap: wrap; gap: 0.5rem;">

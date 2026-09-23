@@ -17,7 +17,7 @@ func TestSync_SetConfig_Basic(t *testing.T) {
 	s := newTestSync(t, func(c *Config) { c.StateFile = sf })
 
 	// 1. 改全套
-	if err := s.SetConfig("edge-vpn", true, false, 90); err != nil {
+	if err := s.SetConfig("edge-vpn", true, false, 90, ""); err != nil {
 		t.Fatalf("SetConfig err = %v", err)
 	}
 
@@ -60,7 +60,7 @@ func TestSync_SetConfig_PeriodClamp(t *testing.T) {
 	s := newTestSync(t)
 
 	// < 10 → clamp 到 10
-	if err := s.SetConfig("vpn", true, true, 5); err != nil {
+	if err := s.SetConfig("vpn", true, true, 5, ""); err != nil {
 		t.Fatalf("SetConfig low: %v", err)
 	}
 	if got := s.PeriodSeconds(); got != 10 {
@@ -68,7 +68,7 @@ func TestSync_SetConfig_PeriodClamp(t *testing.T) {
 	}
 
 	// > 3600 → clamp 到 3600
-	if err := s.SetConfig("vpn", true, true, 9999); err != nil {
+	if err := s.SetConfig("vpn", true, true, 9999, ""); err != nil {
 		t.Fatalf("SetConfig high: %v", err)
 	}
 	if got := s.PeriodSeconds(); got != 3600 {
@@ -80,7 +80,7 @@ func TestSync_SetConfig_PeriodClamp(t *testing.T) {
 func TestSync_SetConfig_PeriodZero(t *testing.T) {
 	s := newTestSync(t)
 	orig := s.PeriodSeconds()
-	if err := s.SetConfig("vpn", true, true, 0); err != nil {
+	if err := s.SetConfig("vpn", true, true, 0, ""); err != nil {
 		t.Fatalf("SetConfig: %v", err)
 	}
 	if got := s.PeriodSeconds(); got != orig {
@@ -223,7 +223,7 @@ func TestSync_SetConfig_AuditPersist(t *testing.T) {
 	if err := s.SetEnabled(false); err != nil {
 		t.Fatalf("SetEnabled: %v", err)
 	}
-	if err := s.SetConfig("vpn", true, true, 60); err != nil {
+	if err := s.SetConfig("vpn", true, true, 60, ""); err != nil {
 		t.Fatalf("SetConfig: %v", err)
 	}
 

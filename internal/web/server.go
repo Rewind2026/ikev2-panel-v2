@@ -193,6 +193,7 @@ func New(srv *Server, staticDir string) http.Handler {
 	mux.Handle("POST /api/ddns/toggle", protectPOST(http.HandlerFunc(srv.handleDDNSToggle)))
 	mux.Handle("POST /api/ddns/family", protectPOST(http.HandlerFunc(srv.handleDDNSFamily)))
 	mux.Handle("POST /api/ddns/config", protectPOST(http.HandlerFunc(srv.handleDDNSConfig)))
+	mux.Handle("POST /api/ddns/create-record", protectPOST(http.HandlerFunc(srv.handleDDNSCreateRecord)))
 	mux.Handle("POST /api/ddns/sync-now", protectPOST(http.HandlerFunc(srv.handleDDNSSyncNow)))
 	mux.Handle("POST /api/ddns/fetch-remote", protectPOST(http.HandlerFunc(srv.handleDDNSFetchRemote)))
 

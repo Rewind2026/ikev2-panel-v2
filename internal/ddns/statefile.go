@@ -62,6 +62,40 @@ func allRRChars(s string) bool {
 	return true
 }
 
+// isValidDomain v2.86-pr23f:校验主域名(裸 FQDN,无 RR 前缀)。
+//
+// 规则:
+//   - 总长 1-253 字符
+//   - 每个 label 1-63 字符
+//   - label 只含 [a-zA-Z0-9-],且不以 - 开头/结尾
+//   - 至少一个 .
+//
+// 不接受 IDN/punycode(避免 ASCII 边界条件) — alidns 也不支持 IDN。
+func isValidDomain(s string) bool {
+	if s == "" || len(s) > 253 {
+		return false
+	}
+	if !strings.Contains(s, ".") {
+		return false
+	}
+	labels := strings.Split(s, ".")
+	for _, lab := range labels {
+		if len(lab) == 0 || len(lab) > 63 {
+			return false
+		}
+		if lab[0] == '-' || lab[len(lab)-1] == '-' {
+			return false
+		}
+		for _, r := range lab {
+			if !(r >= 'a' && r <= 'z') && !(r >= 'A' && r <= 'Z') &&
+				!(r >= '0' && r <= '9') && r != '-' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // boolStr v2.86-pr23a:statefile 输出 "true"/"false" 字符串。
 func boolStr(b bool) string {
 	if b {
@@ -82,9 +116,15 @@ func boolStr(b bool) string {
 // LastSyncA / LastSyncAAAA:节流时间戳(unix 秒)— v2.85-PR6 (Q5-01) 新增,
 // 用于重启后保留 throttle 窗口,避免撞 alidns 30 QPS 限流。
 // Both zero values are valid defaults(调用方决定何时用 env fallback)。
+//
+// Domain:v2.86-pr23f 新增 — 主域名(如 "example.com")。
+// 此前 Domain 只能从 env IKEV2_DDNS_DOMAIN 启动值读取,容器跑起来后无法修改;
+// pr23f 让面板也能改,并持久化到 statefile(用户显式配的 source of truth)。
+// 空字符串 = 用 env fallback(向后兼容老 env-only 部署)。
 type stateRecord struct {
 	Enabled      bool
 	Family       string
+	Domain       string // v2.86-pr23f:主域名(如 "example.com");空 = env fallback
 	RR           string // v2.86-pr23a:主机记录(空 = "@")
 	EnableA      bool   // v2.86-pr23a:同步 A 记录(IPv4)
 	EnableAAAA   bool   // v2.86-pr23a:同步 AAAA 记录(IPv6)
@@ -164,6 +204,11 @@ func parseStateFile(path, defaultFamily string) (stateRecord, error) {
 			if val == "@" || (len(val) <= 63 && allRRChars(val)) {
 				rec.RR = val
 			}
+		case "domain":
+			// v2.86-pr23f:主域名(只接受合法 FQDN 字符;不合法保留空走 env fallback)
+			if isValidDomain(val) {
+				rec.Domain = val
+			}
 		case "enable_a":
 			// v2.86-pr23a:独立 bool("true"/"false"/"1"/"0"/"on"/"off")
 			rec.EnableA = (val == "true" || val == "1" || val == "on")
@@ -210,9 +255,13 @@ func writeStateFile(path string, rec stateRecord) error {
 	}
 	// v2.86-pr23a:面板可配字段(rr / enable_a / enable_aaaa / period_seconds)。
 	// 全部写,即使跟 env 默认值相同 — statefile 是"用户显式配置"的 source of truth。
+	// v2.86-pr23f:加 domain — 面板显式设的主域名(空 = 沿用 env,不写 domain 行避免歧义)。
 	rr := rec.RR
 	if rr == "" {
 		rr = "@"
+	}
+	if rec.Domain != "" {
+		fmt.Fprintf(&b, "domain=%s\n", rec.Domain)
 	}
 	fmt.Fprintf(&b, "rr=%s\n", rr)
 	fmt.Fprintf(&b, "enable_a=%s\n", boolStr(rec.EnableA))
