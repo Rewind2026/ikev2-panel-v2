@@ -380,7 +380,7 @@ func (s *Server) handleUserAndroidConfig(w http.ResponseWriter, r *http.Request)
 		flash = "ServerAddr 未配置（容器未设置 IKEV2_SERVER_ADDR_V6/V4 或 IKEV2_DOMAIN）。"
 	}
 
-	s.RenderPage(w, r, "android", androidConfigData{
+	s.RenderPage(w, r, http.StatusOK, "android", androidConfigData{
 		PageMeta:   PageMeta{Page: "android", Title: "Android 配置", PageKey: "users", AdminUsername: admin.Username, CSRFToken: csrfTokenOf(sess)},
 		User:       u,
 		ServerAddr: s.ServerAddr,

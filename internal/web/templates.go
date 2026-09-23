@@ -286,17 +286,29 @@ type Breadcrumb struct {
 //  1. ExecuteTemplate("<page>_content.html", data)  →  bodyBuf
 //  2. data.BodyHTML = template.HTML(bodyBuf.String())  （用反射注入）
 //  3. data.CSPNonce = CSPNonceFromCtx(r.Context())  （CSP nonce,layout.html <script nonce> 用）
-//  4. ExecuteTemplate("layout", data)  →  w
+//  4. WriteHeader(status)  → 在 ExecuteTemplate 之前显式写入,避免 layout 渲染时
+//     自动写入默认 200 覆盖 caller 已设的状态码（如 422 / 500）。
+//  5. ExecuteTemplate("layout", data)  →  w
 //
 // 关键：Go html/template 不支持 {{template (printf ...) .}} 动态选模板,
 // 也不能用 FuncMap 函数当 template name,
 // 所以只能**两段渲染**:先渲染子模板到 buffer,再把 buffer 注入 layout。
 //
+// v2.86-PR13.0:增加 status 参数。审查报告 M9 指出旧实现先 WriteHeader(422) 再
+// ExecuteTemplate(layout),layout 渲染时 ExecuteTemplate 内部仍尝试 WriteHeader
+// 导致 superfluous header 警告 + 状态码被覆盖为 200。修复:RenderPage 集中处理
+// status,handler 不再手动 WriteHeader。
+//
 // 用法（推荐）：
 //
 //	data := usersListData{PageMeta: PageMeta{Page: "users_list", Title: "用户管理"}, ...}
-//	s.RenderPage(w, r, "users_list", data)
-func (s *Server) RenderPage(w http.ResponseWriter, r *http.Request, page string, data interface{}) {
+//	s.RenderPage(w, r, http.StatusOK, "users_list", data)
+//	s.RenderPage(w, r, http.StatusUnprocessableEntity, "user_new", dataWithError)
+func (s *Server) RenderPage(w http.ResponseWriter, r *http.Request, status int, page string, data interface{}) {
+	// status 兜底:负数 / 0 / 不合法 → 200
+	if status < 100 || status > 599 {
+		status = http.StatusOK
+	}
 	// setBodyHTML 用 reflect.SetField 要求 data 是 non-nil pointer。
 	// 如果 caller 传了值类型,这里自动取地址。
 	v := reflect.ValueOf(data)
@@ -327,8 +339,6 @@ func (s *Server) RenderPage(w http.ResponseWriter, r *http.Request, page string,
 	}
 
 	// Step 2.5: 注入 CSP nonce (per-request,从 r.Context 取)。
-	// 没有 r 时(罕见,如测试手工调)→ nonce 空 → layout <script nonce=""> 仍会
-	// 被 CSP 拒绝,但 layout 不会 panic。这是 fail-closed。
 	if r != nil {
 		if err := setCSPNonce(data, CSPNonceFromCtx(r.Context())); err != nil {
 			if s.Logger != nil {
@@ -338,7 +348,11 @@ func (s *Server) RenderPage(w http.ResponseWriter, r *http.Request, page string,
 		}
 	}
 
-	// Step 3: 渲染 layout 外壳
+	// Step 3: 显式写 status(必须在 ExecuteTemplate(layout) 之前,否则 layout
+	// 渲染时 Go stdlib 默认写 200,覆盖 caller 已设的状态码)。
+	w.WriteHeader(status)
+
+	// Step 4: 渲染 layout 外壳
 	if err := s.Templates.ExecuteTemplate(w, "layout", data); err != nil {
 		if s.Logger != nil {
 			s.Logger.Error("render layout", "page", page, "err", err)

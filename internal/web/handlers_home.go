@@ -139,7 +139,7 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 		NowUnix:         time.Now().Unix(),
 	}
 
-	s.RenderPage(w, r, "home", data)
+	s.RenderPage(w, r, http.StatusOK, "home", data)
 }
 
 // loadActiveSAs 从 swanctl 拿活跃 SA 列表。

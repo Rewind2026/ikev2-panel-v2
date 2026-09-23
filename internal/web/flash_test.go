@@ -397,7 +397,7 @@ func TestRenderPage_FullPipeline(t *testing.T) {
 	}
 
 	rr := httptest.NewRecorder()
-	srv.RenderPage(rr, httptest.NewRequest("GET", "/", nil), "home", data)
+	srv.RenderPage(rr, httptest.NewRequest("GET", "/", nil), http.StatusOK, "home", data)
 
 	body := rr.Body.String()
 	// 验证 layout 套上去了
@@ -431,7 +431,7 @@ func TestLoadTemplates_LoginHasNoNav(t *testing.T) {
 	}
 
 	rr := httptest.NewRecorder()
-	srv.RenderPage(rr, httptest.NewRequest("GET", "/login", nil), "login", data)
+	srv.RenderPage(rr, httptest.NewRequest("GET", "/login", nil), http.StatusOK, "login", data)
 
 	body := rr.Body.String()
 	if strings.Contains(body, "登出") {
@@ -445,7 +445,8 @@ func TestLoadTemplates_LoginHasNoNav(t *testing.T) {
 
 // ---------- P1-C M6 监控测试 ----------
 
-// TestHome_ActiveSAsCount 验证：handleHome 调用 ListSAs 并把活跃连接数渲染到页面。
+// TestHome_ActiveSAsCount 验证：handleHome 调用 ListSAs 并把活跃隧道数渲染到页面。
+// 模板文案:v2.86-pr13.0 重构后 metric-label/side-stat-label 统一为"活跃隧道"。
 func TestHome_ActiveSAsCount(t *testing.T) {
 	srv, sess := newTestServerWithSession(t)
 	// 用真实模板
@@ -466,11 +467,11 @@ func TestHome_ActiveSAsCount(t *testing.T) {
 		t.Fatalf("got %d want 200", rr.Code)
 	}
 	body := rr.Body.String()
-	if !strings.Contains(body, "活跃连接") {
-		t.Errorf("首页应显示'活跃连接'区块:\n%s", body)
+	if !strings.Contains(body, "活跃隧道") {
+		t.Errorf("首页应显示'活跃隧道'区块:\n%s", body)
 	}
-	if !strings.Contains(body, "无活跃连接") {
-		t.Errorf("Swanctl=nil 时应显示'无活跃连接':\n%s", body)
+	if !strings.Contains(body, "无活跃连接") && !strings.Contains(body, "No Active Tunnels") {
+		t.Errorf("Swanctl=nil 时应显示'无活跃连接'(中文模板) 或 'No Active Tunnels'(英文模板):\n%s", body)
 	}
 }
 

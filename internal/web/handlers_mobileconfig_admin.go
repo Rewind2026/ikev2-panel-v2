@@ -76,7 +76,7 @@ func (s *Server) handleAdminMobileconfigDefaults(w http.ResponseWriter, r *http.
 		Flash:   r.URL.Query().Get("flash"),
 		Error:   r.URL.Query().Get("error"),
 	}
-	s.RenderPage(w, r, "admin_mobileconfig_defaults", data)
+	s.RenderPage(w, r, http.StatusOK, "admin_mobileconfig_defaults", data)
 }
 
 // handleAdminMobileconfigDefaultsSave POST /admin/mobileconfig-defaults

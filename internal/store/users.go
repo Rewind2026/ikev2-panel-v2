@@ -173,6 +173,43 @@ func (s *Store) DeleteUser(ctx context.Context, id int64) error {
 	return nil
 }
 
+// RecoverUser 回滚删除：用原 ID 重新插入用户,保留所有累计数据(流量、最近使用时间等)。
+//
+// 设计动机(web/handlers_users DeleteUser 重构):
+//   - 删除事务中,DB DeleteUser 成功但后续 swanctl.RemoveUserConfAndReload 失败时,
+//     需要把用户记录"原样"插回去,包括 bytes_in_total / bytes_out_total / last_used_at。
+//   - 用 INSERT INTO users (... id ...) VALUES (...) 显式指定 id,
+//     避免 AUTOINCREMENT 重新分配 ID(否则其它表的外键引用会断)。
+//   - username 走 UNIQUE 约束,冲突(理论不会发生,刚删的)→ 返回 ErrConflict。
+//
+// 调用方约定:
+//   - u.ID 必须 > 0(回滚场景里是原 ID)
+//   - 其余字段由 GetUserByID 拿到的完整 User 直接传入
+//   - CreatedAt/UpdatedAt/LastUsedAt 用原值,不要刷新(否则审计对不上)
+func (s *Store) RecoverUser(ctx context.Context, u *User) error {
+	if u == nil || u.ID <= 0 {
+		return fmt.Errorf("recover user: id must be > 0")
+	}
+	_, err := s.DB.ExecContext(ctx, `
+		INSERT INTO users
+			(id, username, password, enabled, note, speed_limit_mbps, expires_at,
+			 bytes_in_total, bytes_out_total, created_at, updated_at, last_used_at,
+			 mobileconfig_opts)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		u.ID, u.Username, u.Password, boolToInt(u.Enabled), u.Note, u.SpeedLimitMbps, u.ExpiresAt,
+		u.BytesInTotal, u.BytesOutTotal, u.CreatedAt, u.UpdatedAt, u.LastUsedAt,
+		u.MobileConfigOpts,
+	)
+	if err != nil {
+		if isUniqueViolation(err) {
+			return fmt.Errorf("username %q: %w", u.Username, ErrConflict)
+		}
+		return fmt.Errorf("recover user: %w", err)
+	}
+	return nil
+}
+
 // CountUsers 总用户数（含停用）。
 func (s *Store) CountUsers(ctx context.Context) (int, error) {
 	var n int

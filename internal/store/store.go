@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"path/filepath"
 
 	_ "modernc.org/sqlite"
@@ -20,6 +21,20 @@ type Store struct {
 // 数据库文件路径 = dataDir/panel.db
 func Open(ctx context.Context, dataDir string) (*Store, error) {
 	dbPath := filepath.Join(dataDir, "panel.db")
+
+	// v2.86-PR13.0:审查报告 C2-子。SQLite 文件含全部用户 VPN 密码(明文,设计 §4.3 妥协),
+	// 必须 0600 否则任何同主机 user 都能读 panel.db = 拿到所有用户 VPN 凭证。
+	// DataDir 已在 main.go 用 os.MkdirAll(..., 0o700) 保护,但 panel.db 文件本身
+	// 沿用 umask 022 时是 0644(world-readable),需要显式 chmod。
+	// 先 chmod 既存文件,再 sql.Open(sql.Open 不会对既存文件做 chmod)。
+	if info, statErr := os.Stat(dbPath); statErr == nil {
+		// 只对既存文件操作;新建文件走 sql.Open 后 chmod(下面)
+		if info.Mode().Perm()&0o077 != 0 {
+			if err := os.Chmod(dbPath, 0o600); err != nil {
+				return nil, fmt.Errorf("chmod panel.db 0600: %w (path=%s)", err, dbPath)
+			}
+		}
+	}
 
 	// DSN 说明：
 	//   _pragma=foreign_keys(1)  启用外键（v2 暂未用外键，但开着）
@@ -36,6 +51,18 @@ func Open(ctx context.Context, dataDir string) (*Store, error) {
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("db.Ping: %w (path=%s)", err, dbPath)
+	}
+
+	// 新建文件:sql.Open 后立刻 chmod 0600(此时文件已被创建)。
+	// 注意:sql.Open 在 PingContext 之前可能还没真正 open 文件(惰性连接),
+	// 这里在 PingContext 之后再 chmod 一次,确保覆盖所有路径。
+	if info, statErr := os.Stat(dbPath); statErr == nil {
+		if info.Mode().Perm()&0o077 != 0 {
+			if err := os.Chmod(dbPath, 0o600); err != nil {
+				_ = db.Close()
+				return nil, fmt.Errorf("chmod panel.db 0600 (post-open): %w", err)
+			}
+		}
 	}
 
 	s := &Store{DB: db}

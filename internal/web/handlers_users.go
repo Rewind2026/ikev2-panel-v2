@@ -1,5 +1,10 @@
 // 用户管理 handlers：list / new / create / detail / reset-password / enable / disable / delete。
+//
 // 设计见 docs/design.md §7
+//
+// 重构(v2.86-PR13 重构):所有"会改变外部状态"的 IO 步骤(DB → swanctl conf → reload
+// → limiter file → terminate)集中到 user_pipeline.go 的三个 pipeline 函数。
+// 本文件只剩"参数解析 + 表单渲染 + flash + audit"等纯 HTTP 逻辑。
 package web
 
 import (
@@ -15,6 +20,10 @@ import (
 )
 
 // usernameRe 用户名校验：3-32 位 [a-z0-9_-]。
+//
+// v2.86-PR13.0 注释:这个限制是**业务必需**而非历史妥协——
+// VPN 协议(EAP-MSCHAPv2 / swanctl secrets 块语法)对 username 字符集敏感,
+// 详见 design §9.2。前端表单 placeholder 也明示"仅限小写字母/数字/下划线/连字符"。
 var usernameRe = regexp.MustCompile(`^[a-z0-9_-]{3,32}$`)
 
 // usersListData 列表页模板数据。
@@ -34,6 +43,9 @@ type usersNewData struct {
 	SpeedLimit int
 	ExpiresAt  string // YYYY-MM-DD
 	Enabled    bool
+	// expiresAtUnix 解析后的 unix 时间戳,handler 写入 store.User 时使用。
+	// 模板不引用(模板只用 ExpiresAt 字符串),所以不导出。
+	expiresAtUnix int64
 }
 
 // userDetailData 用户详情页模板数据。
@@ -52,6 +64,24 @@ type userDetailData struct {
 	UserOnline bool
 }
 
+// userDeleteConfirmData 删除确认页模板数据。
+type userDeleteConfirmData struct {
+	PageMeta
+	User *store.User
+}
+
+// pageUsersList 用户列表页元数据常量。
+const (
+	pageUsersList     = "users_list"
+	pageUserNew       = "user_new"
+	pageUserDetail    = "user_detail"
+	pageDeleteConfirm = "user_delete_confirm"
+	defaultSpeedMbps  = 10
+	defaultPasswordLen = 12
+	maxNoteChars      = 200
+	maxSpeedMbps      = 1000
+)
+
 // handleUsersList GET /users
 func (s *Server) handleUsersList(w http.ResponseWriter, r *http.Request) {
 	admin, _ := AdminFrom(r.Context())
@@ -64,7 +94,6 @@ func (s *Server) handleUsersList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// P1-A：消费 session-only flash（一次性,渲染后自动消失）
-	// 防止密码 / 状态消息走 query string（泄露到浏览器历史/日志）
 	var newPassword, msg string
 	if sess != nil && s.FlashStore != nil {
 		if f, err := s.FlashStore.Consume(sess.ID); err == nil {
@@ -73,8 +102,8 @@ func (s *Server) handleUsersList(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	s.RenderPage(w, r, "users_list", usersListData{
-		PageMeta:    PageMeta{Page: "users_list", Title: "用户管理", PageKey: "users", AdminUsername: admin.Username, CSRFToken: csrfTokenOf(sess)},
+	s.RenderPage(w, r, http.StatusOK, pageUsersList, usersListData{
+		PageMeta:    PageMeta{Page: pageUsersList, Title: "用户管理", PageKey: "users", AdminUsername: admin.Username, CSRFToken: csrfTokenOf(sess)},
 		Users:       users,
 		NewPassword: newPassword,
 		Flash:       msg,
@@ -85,154 +114,134 @@ func (s *Server) handleUsersList(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleUserNew(w http.ResponseWriter, r *http.Request) {
 	admin, _ := AdminFrom(r.Context())
 	sess, _ := SessionFrom(r.Context())
-	s.RenderPage(w, r, "user_new", usersNewData{
-		PageMeta:   PageMeta{Page: "user_new", Title: "新增用户", PageKey: "users", AdminUsername: admin.Username, CSRFToken: csrfTokenOf(sess)},
+	s.RenderPage(w, r, http.StatusOK, pageUserNew, usersNewData{
+		PageMeta:   PageMeta{Page: pageUserNew, Title: "新增用户", PageKey: "users", AdminUsername: admin.Username, CSRFToken: csrfTokenOf(sess)},
 		Enabled:    true,
-		SpeedLimit: 10,
+		SpeedLimit: defaultSpeedMbps,
 	})
 }
 
 // handleUserCreate POST /users
 //
-// 关键：DB 写 + 文件写 + swanctl reload 必须事务化
-// （design §3.3 + architecture §6.2）：
+// 关键：DB 写 + 文件写 + swanctl reload 必须事务化（design §3.3 + architecture §6.2）：
 //   - 文件写失败 → 回滚 DB
 //   - swanctl reload 失败 → 删除文件 + 回滚 DB
+//   - limiter file 失败 → 反向 reload 删除用户 conf + 回滚 DB
+//
+// v2.86-PR13.0:全部 IO 步骤抽到 userPipelines.CreateUser,本 handler 只做参数解析/校验/渲染。
 func (s *Server) handleUserCreate(w http.ResponseWriter, r *http.Request) {
 	admin, _ := AdminFrom(r.Context())
 	sess, _ := SessionFrom(r.Context())
-	data := usersNewData{
-		PageMeta:   PageMeta{Page: "user_new", Title: "新增用户", AdminUsername: admin.Username, CSRFToken: csrfTokenOf(sess)},
-		Enabled:    true,
-		SpeedLimit: 10,
-	}
 
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad form", http.StatusBadRequest)
 		return
 	}
 
-	data.Username = r.PostFormValue("username")
-	data.Note = r.PostFormValue("note")
-	data.Enabled = r.PostFormValue("enabled") == "1"
-	data.ExpiresAt = r.PostFormValue("expires_at")
-	speedStr := r.PostFormValue("speed_limit_mbps")
-	if speedStr != "" {
-		if v, err := strconv.Atoi(speedStr); err == nil {
-			data.SpeedLimit = v
-		}
-	}
-
-	// 校验
-	if !usernameRe.MatchString(data.Username) {
-		data.Error = "用户名必须是 3-32 位小写字母、数字、下划线、连字符"
-		w.WriteHeader(http.StatusUnprocessableEntity)
-		// P1-B 后 user_new 走两段渲染:content + layout。直接 ExecuteTemplate
-		// "user_new.html" 在 P1-B 找不到模板(只剩 user_new_content.html),导致
-		// 422 + 空 body + Chrome 显示 "HTTP ERROR 422"。
-		s.RenderPage(w, r, "user_new", data)
+	// 表单解析 + 校验(任何校验失败 → 422 + 渲染表单带 Error)
+	data, valid := parseAndValidateUserNewForm(r)
+	if !valid {
+		data.PageMeta = PageMeta{Page: pageUserNew, Title: "新增用户", AdminUsername: admin.Username, CSRFToken: csrfTokenOf(sess)}
+		s.RenderPage(w, r, http.StatusUnprocessableEntity, pageUserNew, data)
 		return
-	}
-	if data.SpeedLimit < 0 || data.SpeedLimit > 1000 {
-		data.Error = "限速必须在 0-1000 Mbps 之间（0 = 不限速）"
-		w.WriteHeader(http.StatusUnprocessableEntity)
-		s.RenderPage(w, r, "user_new", data)
-		return
-	}
-	if len(data.Note) > 200 {
-		data.Error = "备注最多 200 字"
-		w.WriteHeader(http.StatusUnprocessableEntity)
-		s.RenderPage(w, r, "user_new", data)
-		return
-	}
-
-	// 解析过期时间
-	var expiresAt int64
-	if data.ExpiresAt != "" {
-		t, err := time.Parse("2006-01-02", data.ExpiresAt)
-		if err != nil {
-			data.Error = "过期时间格式错误（YYYY-MM-DD）"
-			w.WriteHeader(http.StatusUnprocessableEntity)
-			s.RenderPage(w, r, "user_new", data)
-			return
-		}
-		expiresAt = t.Unix()
 	}
 
 	// 生成 12 位随机密码
-	password, err := auth.GeneratePassword(12)
+	password, err := auth.GeneratePassword(defaultPasswordLen)
 	if err != nil {
 		s.Logger.Error("generate password", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
-	// 写 DB
 	u := &store.User{
 		Username:       data.Username,
 		Password:       password,
 		Enabled:        data.Enabled,
 		Note:           data.Note,
 		SpeedLimitMbps: data.SpeedLimit,
-		ExpiresAt:      expiresAt,
+		ExpiresAt:      data.expiresAtUnix,
 	}
-	id, err := s.Store.CreateUser(r.Context(), u)
+
+	// 走 pipeline:DB → swanctl → limiter,任一失败自动回滚
+	res, err := s.newUserPipelines().CreateUser(r.Context(), u)
 	if err != nil {
-		if errors.Is(err, store.ErrConflict) {
-			data.Error = "用户名已存在"
-			w.WriteHeader(http.StatusUnprocessableEntity)
-			s.RenderPage(w, r, "user_new", data)
-			return
-		}
-		s.Logger.Error("create user", "err", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		s.Logger.Error("user create pipeline", "err", err, "user", u.Username)
+		// pipeline 已回滚 DB,这里把 Error 反馈给用户
+		data.PageMeta = PageMeta{Page: pageUserNew, Title: "新增用户", AdminUsername: admin.Username, CSRFToken: csrfTokenOf(sess)}
+		data.Error = friendlyUserCreateError(err)
+		s.RenderPage(w, r, http.StatusInternalServerError, pageUserNew, data)
 		return
 	}
 
-	// 写 swanctl 子配置 + ReloadAll（原子组合,P0-4 串行化）：
-	//   - WriteUserConfAndReload 内部用 reloadMu 串行化所有 reload 操作
-	//   - 防止并发请求触发两次 swanctl --load-all 导致 SA 中断两次 / 文件中间态
-	if err := s.Swanctl.WriteUserConfAndReload(r.Context(), u.Username, u.Password); err != nil {
-		s.Logger.Error("write swanctl conf+reload, rolling back DB", "err", err, "user", u.Username)
-		if delErr := s.Store.DeleteUser(r.Context(), id); delErr != nil {
-			s.Logger.Error("rollback delete user failed", "err", delErr, "user", u.Username)
-		}
-		data.Error = fmt.Sprintf("写入 swanctl 配置失败：%v（请检查容器内 /etc/swanctl/conf.d 权限）", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		s.RenderPage(w, r, "user_new", data)
-		return
-	}
-
-	// 写限速文件（updown 脚本读取）—— 不动 swanctl 状态,单独调
-	if err := s.Limiter.WriteLimitFile(u.Username, u.SpeedLimitMbps); err != nil {
-		s.Logger.Error("write limit file, rolling back", "err", err, "user", u.Username)
-		_ = s.Swanctl.RemoveUserConf(u.Username) // 不重载（已 reload 过一次,在前面 WriteUserConfAndReload 里）
-		if delErr := s.Store.DeleteUser(r.Context(), id); delErr != nil {
-			s.Logger.Error("rollback delete user failed", "err", delErr, "user", u.Username)
-		}
-		data.Error = fmt.Sprintf("写入限速文件失败：%v（请检查容器内 /var/lib/ikev2-panel/limits 权限）", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		s.RenderPage(w, r, "user_new", data)
-		return
-	}
-
-	// 成功 → 列表页 + 通过 session-only flash 一次性显示密码（P1-A）
-	//
-	// 不再走 ?flash_new= query string（泄露到 URL/日志/Referer），
-	// 改为：handler Set flash → 302 redirect /users（无 query string）→
-	// handleUsersList 渲染前 Consume → 模板拿到 NewPassword。
+	// P1-A：成功 → session-only flash 一次性显示密码
 	if sess != nil && s.FlashStore != nil {
 		s.FlashStore.Set(sess.ID, Flash{
-			NewPassword: password,
+			NewPassword: res.Password,
 			Message:     fmt.Sprintf("用户 %s 已创建", u.Username),
 		})
-	} else {
-		// Fallback（理论上不会发生，flash store 必装）：记日志便于排查
-		s.Logger.Warn("FlashStore not configured; password only visible in DB")
 	}
-	// v2.85-PR8(U11):审计
 	s.writeAudit(r, "user.create", fmt.Sprintf("username=%s,speed=%d", u.Username, u.SpeedLimitMbps))
 	http.Redirect(w, r, "/users", http.StatusFound)
+}
+
+// parseAndValidateUserNewForm 从 r 抽表单字段 + 校验,返回填充好的 usersNewData
+// (含内部字段 expiresAtUnix) + 校验是否通过。
+//
+// 抽出来是为了让 handleUserCreate 主体只剩"渲染 + pipeline",校验失败时
+// caller 拿到的 data.PageMeta 是占位空值,caller 自己覆盖。
+func parseAndValidateUserNewForm(r *http.Request) (usersNewData, bool) {
+	data := usersNewData{
+		Enabled:    true,
+		SpeedLimit: defaultSpeedMbps,
+	}
+
+	data.Username = r.PostFormValue("username")
+	data.Note = r.PostFormValue("note")
+	data.Enabled = r.PostFormValue("enabled") == "1"
+	data.ExpiresAt = r.PostFormValue("expires_at")
+	if speedStr := r.PostFormValue("speed_limit_mbps"); speedStr != "" {
+		if v, err := strconv.Atoi(speedStr); err == nil {
+			data.SpeedLimit = v
+		}
+	}
+
+	if !usernameRe.MatchString(data.Username) {
+		data.Error = "用户名必须是 3-32 位小写字母、数字、下划线、连字符"
+		return data, false
+	}
+	if data.SpeedLimit < 0 || data.SpeedLimit > maxSpeedMbps {
+		data.Error = fmt.Sprintf("限速必须在 0-%d Mbps 之间（0 = 不限速）", maxSpeedMbps)
+		return data, false
+	}
+	if len(data.Note) > maxNoteChars {
+		data.Error = fmt.Sprintf("备注最多 %d 字", maxNoteChars)
+		return data, false
+	}
+
+	if data.ExpiresAt != "" {
+		t, err := time.Parse("2006-01-02", data.ExpiresAt)
+		if err != nil {
+			data.Error = "过期时间格式错误（YYYY-MM-DD）"
+			return data, false
+		}
+		data.expiresAtUnix = t.Unix()
+	}
+	return data, true
+}
+
+// friendlyUserCreateError 把 pipeline 错误转成用户可见的中文提示。
+//
+// 注意:pipeline 内部错误已含技术细节(如 swanctl conf 路径),
+// 这里只取**第一条**做文案,避免回显内部错误链。
+func friendlyUserCreateError(err error) string {
+	if errors.Is(err, errSwanctlWriteFailed) {
+		return "写入 swanctl 配置失败（请检查容器内 /etc/swanctl/conf.d 权限）"
+	}
+	if errors.Is(err, errLimiterWriteFailed) {
+		return "写入限速文件失败（请检查容器内 /var/lib/ikev2-panel/limits 权限）"
+	}
+	return "创建用户失败,请查看服务日志"
 }
 
 // handleUserDetail GET /users/{id}
@@ -254,7 +263,6 @@ func (s *Server) handleUserDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// P1-A：消费 session-only flash（重置密码后会跳到这里,带密码显示）
 	var newPassword, msg string
 	if sess != nil && s.FlashStore != nil {
 		if f, err := s.FlashStore.Consume(sess.ID); err == nil {
@@ -263,60 +271,55 @@ func (s *Server) handleUserDetail(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	s.RenderPage(w, r, "user_detail", userDetailData{
-		PageMeta:    PageMeta{Page: "user_detail", Title: u.Username, PageKey: "users", AdminUsername: admin.Username, CSRFToken: csrfTokenOf(sess),
+	s.RenderPage(w, r, http.StatusOK, pageUserDetail, userDetailData{
+		PageMeta: PageMeta{Page: pageUserDetail, Title: u.Username, PageKey: "users", AdminUsername: admin.Username, CSRFToken: csrfTokenOf(sess),
 			Breadcrumb: []Breadcrumb{{Label: "用户", Href: "/users"}, {Label: u.Username}}},
 		User:        u,
 		NewPassword: newPassword,
 		Flash:       msg,
 		ServerAddr:  s.ServerAddr,
 		NowUnix:     time.Now().Unix(),
-		UserOnline:  false, // dev 模式无 charon SA 表;production 应查 s.SC.ListSAs() 含此 user
+		UserOnline:  false,
 	})
 }
 
 // handleUserResetPassword POST /users/{id}/reset-password
+//
+// v2.86-PR13.0:走 pipeline,失败自动回滚 DB 密码到旧值。
 func (s *Server) handleUserResetPassword(w http.ResponseWriter, r *http.Request) {
 	id, err := parseInt64(r.PathValue("id"))
 	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
+	sess, _ := SessionFrom(r.Context())
+
 	u, err := s.Store.GetUserByID(r.Context(), id)
 	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
+	oldPassword := u.Password
 
-	// sess 用于 P1-A：把新密码 set 到 session-only flash,不走 URL
-	sess, _ := SessionFrom(r.Context())
-
-	newPw, err := auth.GeneratePassword(12)
+	newPw, err := auth.GeneratePassword(defaultPasswordLen)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	if err := s.Store.UpdateUserPassword(r.Context(), id, newPw); err != nil {
-		s.Logger.Error("update password", "err", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+
+	res, err := s.newUserPipelines().ResetPassword(r.Context(), id, oldPassword, newPw)
+	if err != nil {
+		s.Logger.Error("user reset password pipeline", "err", err, "user_id", id)
+		http.Error(w, "重置密码失败（已自动回滚 DB 状态）", http.StatusInternalServerError)
 		return
 	}
 
-	// 更新 swanctl 子配置 + ReloadAll（原子组合,P0-4 串行化）
-	if err := s.Swanctl.WriteUserConfAndReload(r.Context(), u.Username, newPw); err != nil {
-		s.Logger.Error("update swanctl conf+reload", "err", err)
-		http.Error(w, "swanctl 写入或重载失败", http.StatusInternalServerError)
-		return
-	}
-
-	// P1-A：密码通过 session-only flash 传递,不再走 URL query string
 	if sess != nil && s.FlashStore != nil {
 		s.FlashStore.Set(sess.ID, Flash{
-			NewPassword: newPw,
+			NewPassword: res.NewPassword,
 			Message:     "密码已重置",
 		})
 	}
-	// v2.85-PR8(U11):审计
 	s.writeAudit(r, "user.reset_password", fmt.Sprintf("user_id=%d,username=%s", id, u.Username))
 	http.Redirect(w, r, fmt.Sprintf("/users/%d", id), http.StatusFound)
 }
@@ -332,38 +335,37 @@ func (s *Server) handleUserEnable(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	// P1-A：状态消息走 flash 而非 URL
 	if sess, _ := SessionFrom(r.Context()); sess != nil && s.FlashStore != nil {
 		s.FlashStore.Set(sess.ID, Flash{Message: "已启用"})
 	}
-	// v2.85-PR8(U11):审计
 	s.writeAudit(r, "user.enable", fmt.Sprintf("user_id=%d", id))
 	http.Redirect(w, r, fmt.Sprintf("/users/%d", id), http.StatusFound)
 }
 
 // handleUserDisable POST /users/{id}/disable
+//
+// v2.86-PR13.0:走 pipeline,Terminate 失败时自动回滚 enabled=true。
 func (s *Server) handleUserDisable(w http.ResponseWriter, r *http.Request) {
 	id, err := parseInt64(r.PathValue("id"))
 	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
-	if err := s.Store.SetUserEnabled(r.Context(), id, false); err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
+	if err := s.newUserPipelines().DisableUser(r.Context(), id); err != nil {
+		s.Logger.Error("user disable pipeline", "err", err, "user_id", id)
+		http.Error(w, "停用失败（已自动回滚 DB 状态）", http.StatusInternalServerError)
 		return
 	}
-	// 强制下线（如果连接中）
-	_ = s.Swanctl.Terminate(r.Context(), usernameFromID(r, s.Store, id))
-	// P1-A：状态消息走 flash 而非 URL
 	if sess, _ := SessionFrom(r.Context()); sess != nil && s.FlashStore != nil {
 		s.FlashStore.Set(sess.ID, Flash{Message: "已停用"})
 	}
-	// v2.85-PR8(U11):审计
 	s.writeAudit(r, "user.disable", fmt.Sprintf("user_id=%d", id))
 	http.Redirect(w, r, fmt.Sprintf("/users/%d", id), http.StatusFound)
 }
 
 // handleUserDelete POST /users/{id}/delete
+//
+// v2.86-PR13.0:走 pipeline,RemoveUserConfAndReload 失败时用 store.RecoverUser 原 ID 重建(保留流量)。
 func (s *Server) handleUserDelete(w http.ResponseWriter, r *http.Request) {
 	id, err := parseInt64(r.PathValue("id"))
 	if err != nil {
@@ -376,29 +378,15 @@ func (s *Server) handleUserDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 删除顺序：DB → 文件+reload（原子） → limit → terminate
-	// DB 失败 → 不动文件
-	// 文件+reload 失败 → 回滚 DB
-	if err := s.Store.DeleteUser(r.Context(), id); err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
+	if err := s.newUserPipelines().DeleteUser(r.Context(), id); err != nil {
+		s.Logger.Error("user delete pipeline", "err", err, "user_id", id, "username", u.Username)
+		http.Error(w, "删除失败", http.StatusInternalServerError)
 		return
 	}
-	// 文件 + reload 原子组合（P0-4）
-	if err := s.Swanctl.RemoveUserConfAndReload(r.Context(), u.Username); err != nil {
-		s.Logger.Error("remove swanctl conf+reload, rolling back DB", "err", err)
-		// 重建 user 记录
-		u.ID = 0
-		_, _ = s.Store.CreateUser(r.Context(), u)
-		http.Error(w, "删除文件失败", http.StatusInternalServerError)
-		return
-	}
-	_ = s.Limiter.RemoveLimitFile(u.Username)
-	_ = s.Swanctl.Terminate(r.Context(), u.Username)
-	// P1-A：状态消息走 flash 而非 URL
+
 	if sess, _ := SessionFrom(r.Context()); sess != nil && s.FlashStore != nil {
 		s.FlashStore.Set(sess.ID, Flash{Message: fmt.Sprintf("用户 %s 已删除", u.Username)})
 	}
-	// v2.85-PR8(U11):审计
 	s.writeAudit(r, "user.delete", fmt.Sprintf("user_id=%d,username=%s", id, u.Username))
 	http.Redirect(w, r, "/users", http.StatusFound)
 }
@@ -406,7 +394,6 @@ func (s *Server) handleUserDelete(w http.ResponseWriter, r *http.Request) {
 // handleUserDeleteConfirmPage GET /users/{id}/delete
 //
 // v2.85-PR8(U10):双确认 - 第一步 GET 渲染确认页,不触发实际删除。
-// 关 JS / 屏幕阅读器 / 自动化测试都走标准 HTTP 流程,无 confirm() hack。
 func (s *Server) handleUserDeleteConfirmPage(w http.ResponseWriter, r *http.Request) {
 	id, err := parseInt64(r.PathValue("id"))
 	if err != nil {
@@ -420,16 +407,10 @@ func (s *Server) handleUserDeleteConfirmPage(w http.ResponseWriter, r *http.Requ
 	}
 	admin, _ := AdminFrom(r.Context())
 	sess, _ := SessionFrom(r.Context())
-	s.RenderPage(w, r, "user_delete_confirm", userDeleteConfirmData{
-		PageMeta: PageMeta{Page: "user_delete_confirm", Title: "删除确认", PageKey: "users", AdminUsername: admin.Username, CSRFToken: csrfTokenOf(sess)},
+	s.RenderPage(w, r, http.StatusOK, pageDeleteConfirm, userDeleteConfirmData{
+		PageMeta: PageMeta{Page: pageDeleteConfirm, Title: "删除确认", PageKey: "users", AdminUsername: admin.Username, CSRFToken: csrfTokenOf(sess)},
 		User:     u,
 	})
-}
-
-// userDeleteConfirmData 删除确认页模板数据。
-type userDeleteConfirmData struct {
-	PageMeta
-	User *store.User
 }
 
 func parseInt64(s string) (int64, error) {
@@ -437,6 +418,9 @@ func parseInt64(s string) (int64, error) {
 }
 
 // usernameFromID 用于 disable 时拿 username（terminate 用）。
+//
+// v2.86-PR13.0:disable 已走 pipeline(内部直接 GetUserByID + Terminate),
+// 本函数保留仅为兼容可能的旧引用。
 func usernameFromID(r *http.Request, s *store.Store, id int64) string {
 	u, err := s.GetUserByID(r.Context(), id)
 	if err != nil {

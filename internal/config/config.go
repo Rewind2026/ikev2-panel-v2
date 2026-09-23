@@ -1,5 +1,9 @@
 // 环境变量 + 默认值。
 // 设计见 docs/design.md §5.1
+//
+// v2.86-PR13.0 重构:本包只负责 env 解析,**不再 import panelstate**。
+// panelstate + env 合并逻辑移到 internal/runtime(由 runtime.Merge 完成)。
+// 修复审查报告 C3 提出的"config 反向依赖 panelstate"模块错位。
 package config
 
 import (
@@ -9,8 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/yourname/ikev2-panel-v2/internal/panelstate"
 )
 
 type Config struct {
@@ -38,13 +40,13 @@ type Config struct {
 	DDNSEnabled           bool   // 总开关 (env IKEV2_DDNS_ENABLED,默认 false)
 	DDNSFamily            string // v2-84:同步哪些 family — v4 / v6 / dual(默认 dual)
 	DDNSProbeTarget       string // v2-84:IPv4 探测目标(默认 8.8.8.8,中国大陆可改 223.5.5.5)
-	AliyunAccessKeyID     string // 阿里云 RAM AccessKey ID(优先从 panelstate.aliyun.creds 读,见 v2-83)
+	AliyunAccessKeyID     string // 阿里云 RAM AccessKey ID(env,见 v2-83)
 	AliyunAccessKeySecret string // 阿里云 RAM AccessKey Secret
-	AliyunAccessKeySource string // 凭证来源: panelstate / env-new / env-legacy-ddns / env-legacy-acme.sh / ""
-	// v2.86-PR12.5:CertMode/Domain/CN/Email 字段来源 panelstate / env-default / env-override
+	AliyunAccessKeySource string // 凭证来源: env-new / env-legacy-ddns / env-legacy-acme.sh / ""
+	// v2.86-PR12.5:CertMode/Domain/CN/Email 字段来源 env(panelstate 合并在 runtime 包做)
 	CertConfigSource string
-	AliyunDomain          string // 主域名(如 example.com)
-	AliyunRR              string // 主机记录(如 vpn → vpn.example.com)
+	AliyunDomain     string // 主域名(如 example.com)
+	AliyunRR         string // 主机记录(如 vpn → vpn.example.com)
 
 	// 用户密码
 	DefaultUserPasswordLen int
@@ -59,31 +61,24 @@ type Config struct {
 }
 
 // Load 从环境变量读取配置，必要时填默认值。
+//
+// v2.86-PR13.0 重构:本函数**只读 env**,不再读 panelstate 文件。
+// panelstate 合并由 runtime.Merge(env) 完成。
 func Load() (*Config, error) {
-	// v2-83:阿里云凭证先尝试从面板运行时文件(/data/panel-state/aliyun.creds)读,
-	// 读不到再 fallback 到 env。凭证来源写到 AliyunAccessKeySource,启动日志会输出。
-	aliyunID, aliyunSecret, aliyunSource := loadAliyunCreds()
-
-	// v2.86-PR12.5:证书配置(模式/域名/CN/邮箱)从面板运行时文件读优先,
-	// fallback 到 env。跟 aliyun.creds 同优先级链风格,启动日志输出来源。
-	certMode, certDomain, certCN, certEmail, certSource := loadCertConfig()
-
 	c := &Config{
 		DataDir:                getenv("IKEV2_DATA_DIR", "/data"),
 		ListenAddr:             getenv("IKEV2_LISTEN_ADDR", "0.0.0.0:8443"),
 		HTTPListenAddr:         getenv("IKEV2_HTTP_LISTEN_ADDR", ""),
 		LogLevel:               getenv("IKEV2_LOG_LEVEL", "info"),
 		LogFormat:              getenv("IKEV2_LOG_FORMAT", "text"),
-		// v2.86-PR12.5:ServerCN 优先 panelstate,降级 env。
-		ServerCN:               orDefault(certCN, getenv("IKEV2_SERVER_CN", "ikev2.local")),
+		ServerCN:               getenv("IKEV2_SERVER_CN", "ikev2.local"),
 		ServerAddrV6:           getenv("IKEV2_SERVER_ADDR_V6", ""),
 		ServerAddrV4:           getenv("IKEV2_SERVER_ADDR_V4", ""),
 		IPv6Only:               getbool("IKEV2_IPV6_ONLY", true),
 		OutIf:                  getenv("IKEV2_OUT_IF", "eth0"),
-		// v2.86-PR12.5:CertMode/Domain/ACMEEmail 优先 panelstate。
-		CertMode:               orDefault(certMode, getenv("IKEV2_CERT_MODE", "self-signed")),
-		Domain:                 orDefault(certDomain, getenv("IKEV2_DOMAIN", "")),
-		ACMEEmail:              orDefault(certEmail, getenv("IKEV2_ACME_EMAIL", "")),
+		CertMode:               getenv("IKEV2_CERT_MODE", "self-signed"),
+		Domain:                 getenv("IKEV2_DOMAIN", ""),
+		ACMEEmail:              getenv("IKEV2_ACME_EMAIL", ""),
 		ACMEWebroot:            getenv("IKEV2_ACME_WEBROOT", "/var/www/acme"),
 		DefaultUserPasswordLen: getint("IKEV2_DEFAULT_USER_PASSWORD_LEN", 12),
 		SessionTTL:             getdur("IKEV2_SESSION_TTL", 24*time.Hour),
@@ -93,18 +88,21 @@ func Load() (*Config, error) {
 		DDNSEnabled:           getbool("IKEV2_DDNS_ENABLED", false),
 		DDNSFamily:            parseFamily(getenv("IKEV2_DDNS_FAMILY", "dual")),
 		DDNSProbeTarget:       getenv("IKEV2_DDNS_PROBE_TARGET", "8.8.8.8"),
-		AliyunAccessKeyID:     aliyunID,
-		AliyunAccessKeySecret: aliyunSecret,
-		AliyunAccessKeySource: aliyunSource,
-		// v2.86-PR12.5:CertMode/Domain/CN/Email 来源 panelstate 还是 env。
-		CertConfigSource: certSource,
 		AliyunDomain:          getenv("ALIYUN_DOMAIN", ""),
 		AliyunRR:              getenv("ALIYUN_RR", "vpn"),
 
 		// v2.85-PR3:显示时区。LoadLocation 失败时 fallback UTC + stderr WARN
-		//(跟 parseFamily 失败时的 fallback 策略一致,启动不 fatal)。
 		DisplayTimezone: loadDisplayTimezone(),
 	}
+
+	// Aliyun 凭证(env 4 级优先级):从 env 读,不在 Load 里碰 panelstate
+	aliyunID, aliyunSecret, aliyunSource := loadAliyunCredsFromEnv()
+	c.AliyunAccessKeyID = aliyunID
+	c.AliyunAccessKeySecret = aliyunSecret
+	c.AliyunAccessKeySource = aliyunSource
+
+	// Cert 配置(env 来源标记,实际值可能被 runtime.Merge 用 panelstate 覆盖)
+	c.CertConfigSource = "env-default"
 
 	if err := c.validate(); err != nil {
 		return nil, err
@@ -112,49 +110,11 @@ func Load() (*Config, error) {
 	return c, nil
 }
 
-// loadDisplayTimezone 读取 IKEV2_DISPLAY_TIMEZONE,LoadLocation 失败时
-// fallback UTC 并打 stderr WARN(不 fatal,容器仍能起来)。
+// loadAliyunCredsFromEnv 从 env 读阿里云凭证(env 4 级优先级,跟 v2 一致)。
 //
-// 为什么 fallback 而非 fatal:
-//   - 配置错误不应阻止容器启动;admin 还能从面板看到 UTC,只是没那么友好
-//   - 跟 parseFamily 失败时的处理一致
-func loadDisplayTimezone() string {
-	tz := getenv("IKEV2_DISPLAY_TIMEZONE", "UTC")
-	if _, err := time.LoadLocation(tz); err != nil {
-		fmt.Fprintf(os.Stderr,
-			"WARN: IKEV2_DISPLAY_TIMEZONE=%q invalid (%v); falling back to UTC\n",
-			tz, err)
-		return "UTC"
-	}
-	return tz
-}
-
-// loadAliyunCreds 解析阿里云凭证(4 级优先级,v2-83 设计)。
-//
-// 优先级(高 → 低):
-//  1. /data/panel-state/aliyun.creds  (面板 UI 填的,运行时可改,需重启才注入到 acme.sh)
-//  2. IKEV2_ALIYUN_KEY_ID           (v2-83 新统一命名)
-//  3. ALIYUN_ACCESS_KEY_ID          (v2-82 DDNS 用名,deprecate)
-//  4. Ali_Key                        (acme.sh dns_ali 插件用名,deprecate)
-//
-// 返回值:
-//   - id:     AccessKey ID(空 = 没设)
-//   - secret: 对应 Secret
-//   - source: 来源描述,空 = 没找到(便于启动日志/面板显示)
-//
-// 设计见 docs/design.md §19.6(v2-83)。
-func loadAliyunCreds() (id, secret, source string) {
-	// 1. 面板运行时文件(最高优先级)
-	credStore := panelstate.NewStore()
-	if c, err := credStore.LoadAliyun(); err == nil && c != nil {
-		return c.KeyID, c.KeySecret, "panelstate"
-	} else if err != nil {
-		// 文件存在但解析失败 → 报错(让用户知道凭证坏了),不静默 fallback
-		// 这里用 stderr 直接打,不 slog(因为 logger 还没构造)
-		fmt.Fprintf(os.Stderr, "WARN: panelstate aliyun.creds parse failed: %v\n", err)
-	}
-
-	// 2-4. env 优先级链
+// v2.86-PR13.0:从原 config.go 抽出,只读 env,不碰 panelstate。
+// panelstate 读盘交给 runtime.Merge。
+func loadAliyunCredsFromEnv() (id, secret, source string) {
 	type envSrc struct {
 		idEnv, secretEnv, label string
 	}
@@ -167,7 +127,7 @@ func loadAliyunCreds() (id, secret, source string) {
 		id = getenv(e.idEnv, "")
 		secret = getenv(e.secretEnv, "")
 		if id != "" && secret != "" {
-			// 用 deprecated 名时,启动时 WARN 一次(评审 C 建议)
+			// 用 deprecated 名时,启动时 WARN 一次
 			if e.label != "env-new" {
 				fmt.Fprintf(os.Stderr,
 					"WARN: aliyun credentials using deprecated env %s; rename to IKEV2_ALIYUN_KEY_ID/IKEV2_ALIYUN_KEY_SECRET (will be removed in v3.0.0)\n",
@@ -176,50 +136,20 @@ func loadAliyunCreds() (id, secret, source string) {
 			return id, secret, e.label
 		}
 	}
-
 	return "", "", ""
 }
 
-// orDefault v2.86-PR12.5:panelstate 值优先;为空才用 env fallback。
-//
-// 用 *string 不优雅,直接判断空字符串够用——empty cert.conf 字段视为"未设"。
-func orDefault(panelstateVal, envVal string) string {
-	if panelstateVal != "" {
-		return panelstateVal
+// loadDisplayTimezone 读取 IKEV2_DISPLAY_TIMEZONE,LoadLocation 失败时
+// fallback UTC 并打 stderr WARN(不 fatal,容器仍能起来)。
+func loadDisplayTimezone() string {
+	tz := getenv("IKEV2_DISPLAY_TIMEZONE", "UTC")
+	if _, err := time.LoadLocation(tz); err != nil {
+		fmt.Fprintf(os.Stderr,
+			"WARN: IKEV2_DISPLAY_TIMEZONE=%q invalid (%v); falling back to UTC\n",
+			tz, err)
+		return "UTC"
 	}
-	return envVal
-}
-
-// loadCertConfig v2.86-PR12.5:从 /data/panel-state/cert.conf 读证书配置,
-//
-// fallback 到环境变量。
-//
-// 优先级链(高 → 低):
-//  1. /data/panel-state/cert.conf   (面板 UI 填的,运行时改,需重启容器)
-//  2. IKEV2_CERT_MODE / IKEV2_DOMAIN / IKEV2_SERVER_CN / IKEV2_ACME_EMAIL env
-//
-// 返回 (certMode, domain, serverCN, acmeEmail, source):
-//   - source = "panelstate" (面板填的) / "env-default" (全用 env) / "" (都没设)
-//   - 文件损坏 → 返回 env 值 + stderr WARN,不 fatal
-//     (跟 loadAliyunCreds 策略一致:面板坏了降级到 env 继续跑)
-func loadCertConfig() (certMode, domain, serverCN, acmeEmail, source string) {
-	// 1. panelstate 优先
-	certStore := panelstate.NewCertConfigStore()
-	if c, err := certStore.LoadCertConfig(); err == nil && c != nil {
-		return c.CertMode, c.Domain, c.ServerCN, c.ACMEEmail, "panelstate"
-	} else if err != nil {
-		// 文件存在但解析失败 → 报错降级(env 兜底)
-		fmt.Fprintf(os.Stderr, "WARN: panelstate cert.conf parse failed: %v\n", err)
-	}
-	// 2. env fallback(从 env 读,标注来源)
-	cm := getenv("IKEV2_CERT_MODE", "")
-	d := getenv("IKEV2_DOMAIN", "")
-	cn := getenv("IKEV2_SERVER_CN", "")
-	em := getenv("IKEV2_ACME_EMAIL", "")
-	if cm == "" && d == "" && cn == "" && em == "" {
-		return "", "", "", "", ""
-	}
-	return cm, d, cn, em, "env-default"
+	return tz
 }
 
 func (c *Config) validate() error {
@@ -230,10 +160,6 @@ func (c *Config) validate() error {
 	}
 	if c.CertMode == "letsencrypt" && c.Domain == "" {
 		return fmt.Errorf("IKEV2_DOMAIN is required when IKEV2_CERT_MODE=letsencrypt")
-	}
-	if c.IPv6Only && c.ServerAddrV6 == "" {
-		// 仅在生产启动时硬校验；本地开发可不填（entrypoint 不跑 IPv6 校验）
-		// 这里允许空，启动后会由 caller 决定是否 fatal
 	}
 	if c.DefaultUserPasswordLen < 6 || c.DefaultUserPasswordLen > 64 {
 		return fmt.Errorf("IKEV2_DEFAULT_USER_PASSWORD_LEN must be in [6,64], got %d", c.DefaultUserPasswordLen)
@@ -306,10 +232,6 @@ func getdur(k string, def time.Duration) time.Duration {
 }
 
 // parseFamily v2-84:校验 + 规范化 DDNS family 值。
-//
-// 合法:"v4" / "v6" / "dual"。
-// 空 → 默认 "dual"。
-// 非法 → "dual" + stderr WARN(不 fatal,跟 v2-84 plan 一致)。
 func parseFamily(s string) string {
 	switch s {
 	case "", "v4", "v6", "dual":

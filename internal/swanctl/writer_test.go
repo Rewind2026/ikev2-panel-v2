@@ -284,7 +284,7 @@ func TestReloadAll_DefaultTimeout(t *testing.T) {
 // 如果 reloadMu 失效（被误删、误改为 RWMutex 不当用）,此测试会发现。
 func TestReloadMu_Serialize(t *testing.T) {
 	m := New().WithConfDir(t.TempDir())
-	mu := m.reloadMu
+	mu := &m.reloadMu // 指针避免 sync.Mutex copy（vet copylocks 警告）
 
 	holder := make(chan struct{})
 	released := make(chan struct{})

@@ -51,7 +51,10 @@ func TestPR8_E2E_HealthzMetrics(t *testing.T) {
 		t.Errorf("readyz: got %d, want 200", resp.StatusCode)
 	}
 
-	resp, _ = http.Get(ts.URL + "/metrics")
+	resp, err = http.Get(ts.URL + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Errorf("metrics: got %d, want 200", resp.StatusCode)
@@ -118,10 +121,16 @@ func TestPR8_E2E_OnboardingChecklist(t *testing.T) {
 	jar, _ := cookiejar.New(nil)
 	client := &http.Client{Jar: jar}
 	form := url.Values{"username": {"admin"}, "password": {"test123"}}
-	resp, _ := client.PostForm(ts.URL+"/login", form)
+	resp, err := client.PostForm(ts.URL+"/login", form)
+	if err != nil {
+		t.Fatal(err)
+	}
 	resp.Body.Close()
 
-	resp, _ = client.Get(ts.URL + "/")
+	resp, err = client.Get(ts.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	html := string(body)
@@ -134,6 +143,7 @@ func TestPR8_E2E_OnboardingChecklist(t *testing.T) {
 }
 
 // TestPR8_E2E_DeleteConfirmPage 验证 U10:GET /users/{id}/delete 渲染确认页不真删。
+// 模板文案:v2.86-PR-Redesign 后页面标题为 "Delete User"（英文）,按钮为 "Confirm Delete"。
 func TestPR8_E2E_DeleteConfirmPage(t *testing.T) {
 	e := newPR8Env(t)
 	ts := httptest.NewServer(e.httpHandler)
@@ -160,8 +170,11 @@ func TestPR8_E2E_DeleteConfirmPage(t *testing.T) {
 	resp, _ = client.Get(ts.URL + "/users/" + intToStr(id) + "/delete")
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if !strings.Contains(string(body), "确认删除用户") {
+	if !strings.Contains(string(body), "Delete User") {
 		t.Errorf("U10: confirm page not rendered:\n%s", string(body))
+	}
+	if !strings.Contains(string(body), "Confirm Delete") {
+		t.Errorf("U10: confirm button not rendered:\n%s", string(body))
 	}
 
 	// DB 校验:bob 仍在(GET 不能删)
@@ -232,7 +245,10 @@ func TestPR8_E2E_HealthzJSON(t *testing.T) {
 	ts := httptest.NewServer(e.httpHandler)
 	defer ts.Close()
 
-	resp, _ := http.Get(ts.URL + "/healthz")
+	resp, err := http.Get(ts.URL + "/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 

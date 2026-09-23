@@ -36,7 +36,7 @@ func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 	if host == "" {
 		host = r.Host // fallback 到请求 host,admin 可看到当前访问的 url
 	}
-	s.RenderPage(w, r, "login", loginPageData{
+	s.RenderPage(w, r, http.StatusOK, "login", loginPageData{
 		PageMeta: PageMeta{Page: "login", PageKey: "login", Title: "登录"},
 		Host:       host,
 		Version:    s.Version,
@@ -137,13 +137,13 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) renderLoginError(w http.ResponseWriter, r *http.Request, username, msg string) {
-	w.WriteHeader(http.StatusUnauthorized)
-	// v2.86-PR18:同上,补 PageKey 让 layout 给 body 加 .login-page。
+	// v2.86-PR13.0:不再写 WriteHeader(401) 后 RenderPage,改为 RenderPage 集中处理 status。
+	// 旧实现审查报告 M9 指出 layout 渲染时 ExecuteTemplate 会再 WriteHeader,导致状态码被覆盖为 200。
 	host := s.PanelHost
 	if host == "" {
 		host = r.Host
 	}
-	s.RenderPage(w, r, "login", loginPageData{
+	s.RenderPage(w, r, http.StatusUnauthorized, "login", loginPageData{
 		PageMeta: PageMeta{Page: "login", PageKey: "login", Title: "登录"},
 		Error:      msg,
 		Username:   username,

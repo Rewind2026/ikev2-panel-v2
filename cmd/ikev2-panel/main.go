@@ -29,19 +29,29 @@ import (
 	"github.com/yourname/ikev2-panel-v2/internal/limit"
 	"github.com/yourname/ikev2-panel-v2/internal/metrics"
 	"github.com/yourname/ikev2-panel-v2/internal/panelstate"
+	rt "github.com/yourname/ikev2-panel-v2/internal/runtime"
 	"github.com/yourname/ikev2-panel-v2/internal/store"
 	"github.com/yourname/ikev2-panel-v2/internal/swanctl"
 	"github.com/yourname/ikev2-panel-v2/internal/web"
 )
 
 func main() {
-	cfg, err := config.Load()
+	envCfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
 		os.Exit(1)
 	}
 
-	logger := cfg.NewLogger()
+	// v2.86-PR13.0:env + panelstate 合并集中在 runtime 包。
+	// 之前是 config.Load() 内部直接 import panelstate,造成模块反向依赖。
+	cfg, err := rt.Merge(envCfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "runtime merge error: %v\n", err)
+		os.Exit(1)
+	}
+	// cfg.CookieSecure / cfg.DisplayTimezone 等都从嵌入的 *config.Config 直接读
+	// 这里用 cfg.NewLogger() 时 cfg 是 *Runtime,*config.Config 的方法集是 promoted 的
+	logger := cfg.Config.NewLogger()
 	slog.SetDefault(logger)
 
 	// v2.85-PR1:从 /etc/ikev2-panel-version 读构建期注入的版本号。
@@ -437,8 +447,8 @@ func main() {
 		// v2.86-PR12.23:PayloadIdentifier 反向 DNS 前缀。空 → cert 内 fallback 默认值。
 		// env IKEV2_PAYLOAD_ID_BASE 覆盖(给有自有反向域名的用户用)。
 		PayloadIdentifierBase: os.Getenv("IKEV2_PAYLOAD_ID_BASE"),
-		InstallTokens: installTokens,
-		FlashStore:    flashStore,
+		InstallTokens:         installTokens,
+		FlashStore:            flashStore,
 		// P1-C：M6 监控所需的服务端信息。
 		//   - CertMode: "self-signed" / "letsencrypt"
 		//   - DataDir:  持久化目录,LE 证书路径 = {DataDir}/le/fullchain.pem
@@ -449,12 +459,12 @@ func main() {
 		// v2-83:面板运行时状态(凭证卡用)+ 凭证来源
 		PanelState: panelstate.NewStore(),
 		// v2.86-PR12.5:证书配置运行时持久化(模式/域名/CN/邮箱)
-		CertConfigStore:       certCfgStore,
+		CertConfigStore: certCfgStore,
 		// v2.86-PR12.22:管理员全局 mobileconfig 默认值,运行时热改无需重启。
-		MobileConfigDefaults: mcDefaultsStore,
+		MobileConfigDefaults:  mcDefaultsStore,
 		AliyunAccessKeySource: cfg.AliyunAccessKeySource,
 		// v2.86-PR12.5:证书配置来源(启动日志用)
-		CertConfigSource:      cfg.CertConfigSource,
+		CertConfigSource: cfg.CertConfigSource,
 		// v2.85-PR3:显示时区(handler 渲染 DDNS / mobileconfig 时间字符串用)
 		DisplayTimezone: cfg.DisplayTimezone,
 		// v2.85-PR8(U04):Prometheus-style metrics registry。
@@ -509,16 +519,7 @@ func main() {
 	signal.Notify(sighup, syscall.SIGHUP)
 	defer signal.Stop(sighup)
 
-	go func() {
-		for {
-			select {
-			case <-rootCtx.Done():
-				return
-			case <-sighup:
-				reloadPanelTLSCert(logger, panelCertPath, panelKeyPath, &certCache)
-			}
-		}
-	}()
+	// (sighup startBG 在 startBG helper 定义之后追加 — 见下面"sighup reload"块)
 
 	// ---------- 后台 goroutines ----------
 	// v2.85-PR4 (Q2-01):6 个后台 goroutine 用 sync.WaitGroup 跟踪 + 命名,
@@ -546,6 +547,40 @@ func main() {
 		}()
 	}
 
+	// v2.86-PR13.0:审查报告 C4。SIGHUP 监听改走 startBG 框架,获得 panic recover +
+	// WaitGroup 跟踪 + 统一日志格式。原裸 go func() 无这层防御,SIGHUP reload
+	// 路径 panic 会让整个进程挂掉。
+	startBG("sighup", func() {
+		for {
+			select {
+			case <-rootCtx.Done():
+				return
+			case <-sighup:
+				reloadPanelTLSCert(logger, panelCertPath, panelKeyPath, &certCache)
+			}
+		}
+	})
+
+	// v2.86-PR13.0:审查报告 C4。HTTPS / 明文 HTTP server 也走 startBG。
+	// 之前是裸 go func(),ListenAndServe 阻塞 panic 会让进程挂掉。
+	// startBG 的 panic recover 兜住,但因为 ListenAndServe 是阻塞的,这个 fn() 永远
+	// 不返回 — SIGTERM 时 Shutdown 让它自然退出,startBG 的 bgWg.Done() 才会执行。
+	startBG("http-listener", func() {
+		if tlsCert != nil {
+			logger.Info("https listening", "addr", cfg.ListenAddr, "tls_reload", "SIGHUP")
+			if err := httpSrv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+				logger.Error("https server error", "err", err)
+				stop()
+			}
+		} else {
+			logger.Info("http listening (no TLS)", "addr", cfg.ListenAddr)
+			if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				logger.Error("http server error", "err", err)
+				stop()
+			}
+		}
+	})
+
 	// 1) 流量采集（每 5 分钟）
 	startBG("collector", func() {
 		c := limit.NewCollector(scm, st, logger)
@@ -555,6 +590,26 @@ func main() {
 	startBG("expiry", func() {
 		c := expiry.NewChecker(scm, st, logger)
 		c.Run(rootCtx)
+	})
+	// 2.5) sessions 表 GC（每 15 分钟清理已过期 session 记录,避免无限增长）
+	// v2.86-PR13.0 审查项 C3:DeleteExpiredSessions 已存在但无调度器,
+	// 现按 15min 周期调用,DELETE 量小且已建 idx_sessions_expires 索引,O(过期数)。
+	startBG("session-gc", func() {
+		ticker := time.NewTicker(15 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-rootCtx.Done():
+				return
+			case <-ticker.C:
+				n, err := st.DeleteExpiredSessions(rootCtx, time.Now())
+				if err != nil {
+					logger.Warn("session gc failed", "err", err)
+				} else if n > 0 {
+					logger.Info("session gc", "deleted", n)
+				}
+			}
+		}
 	})
 	// 3) LE 续签健康检查（每 60 秒,仅 LE 模式启用）
 	if cfg.CertMode == "letsencrypt" {
@@ -675,12 +730,14 @@ func main() {
 			ReadHeaderTimeout: 5 * time.Second,
 			// 故意不带 TLSConfig → 走 ListenAndServe() 明文
 		}
-		go func() {
+		// v2.86-PR13.0:明文 HTTP 监听走 startBG 框架,获得 panic recover。
+		// 跟 https listener 同模式:fn() 阻塞在 ListenAndServe 直到 Shutdown。
+		startBG("http-plain-listener", func() {
 			if err := httpPlainSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				logger.Error("http (plaintext) server error", "err", err, "addr", cfg.HTTPListenAddr)
 				stop()
 			}
-		}()
+		})
 		// 优雅关闭时也要 Shutdown 第二个 server
 		defer func() {
 			shutdownCtx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
@@ -691,23 +748,8 @@ func main() {
 		}()
 	}
 
-	go func() {
-		if tlsCert != nil {
-			logger.Info("https listening", "addr", cfg.ListenAddr, "tls_reload", "SIGHUP")
-			// v2-83: TLSConfig 非 nil 时 ListenAndServeTLS(cert,key) 会忽略这两个参数,
-			// 改用 "" "" 让 GetCertificate 生效(atomic.Load 当前 cert)。
-			if err := httpSrv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
-				logger.Error("https server error", "err", err)
-				stop()
-			}
-		} else {
-			logger.Info("http listening (no TLS)", "addr", cfg.ListenAddr)
-			if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				logger.Error("http server error", "err", err)
-				stop()
-			}
-		}
-	}()
+	// v2.86-PR13.0:HTTP server 监听已走 startBG("http-listener") 启动,这里不再裸 go func。
+	// SIGTERM 时 rootCtx.Done() 触发后续 Shutdown 序列。
 
 	<-rootCtx.Done()
 	logger.Info("shutdown signal received, draining",
@@ -724,6 +766,11 @@ func main() {
 	// rootCtx 已 cancel,所有 watch rootCtx.Done() 的 goroutine **理论上**会立即 return。
 	// bgWg.Wait() 给 5s 兜底:如果某个 goroutine 卡在系统调用(磁盘 IO / network),等它完成。
 	// 超时只 log error,不再强制 kill(docker stop SIGKILL 在外层 10s 后兜底,本进程不重复)。
+	//
+	// 注意:此处刻意不用 startBG——startBG 内部会调 bgWg.Done(),
+	// 而本 goroutine 自身就是 bgWg 的等待者,改用 startBG 会导致死锁
+	// (bgWg.Wait() 永远等不到自身 Done)。这是协调器语义,不是普通后台任务,
+	// 唯一职责是把 bgWg 收敛信号从 sync.WaitGroup 转换成 channel close。
 	done := make(chan struct{})
 	go func() {
 		bgWg.Wait()
