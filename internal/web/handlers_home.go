@@ -63,6 +63,19 @@ type homeData struct {
 	SubnetIPv6       string // panelstate 里的 IPv6 ULA pool
 	SubnetSource     string // panelstate / runtime-default / dev-unknown
 	SubnetUpdatedAt  int64  // unix seconds,面板最后修改时间
+
+	// v2.86-pr22:证书有效期(LE 模式才有值)
+	CertDaysLeft   int    // 距过期天数(自签模式 = -1 表示不适用)
+	CertExpiresAt  string // "YYYY-MM-DD" 格式;自签模式 = ""
+	CertLastRenewFailed bool // true = 续签失败标志存在
+
+	// v2.86-pr22:DDNS 同步参数(给面板显示探测目标 / cron 间隔 / 域名 / RR)
+	DDNSDomain       string // 完整域名(vpn.example.com)
+	DDNSBaseDomain   string // 裸域名(example.com)
+	DDNSRR           string // 主机记录(vpn / @)
+	DDNSDetectTarget string // IPv4 探测目标(8.8.8.8)
+	DDNSPeriod       string // 人类可读周期(60s / 5m)
+	DDNSIface        string // 监听接口(空 = any)
 	// 当前 swanctl.conf 正在生效的值(独立于 panelstate,看运行态)
 	SubnetCurrentIPv4 string
 	SubnetCurrentIPv6 string
@@ -158,6 +171,30 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 		TopologyClients: buildHomeTopology(r.Context(), s, activeSAs),
 		RecentEvents:    loadRecentAudit(r.Context(), s, 8),
 		NowUnix:         time.Now().Unix(),
+	}
+
+	// v2.86-pr22:证书有效期(LE 模式从 acme 包拿)
+	if s.CertMode == "letsencrypt" {
+		certPath := filepath.Join(s.DataDir, "le", "fullchain.pem")
+		st := cert.CheckLERenewStatus(certPath)
+		data.CertDaysLeft = st.DaysLeft
+		data.CertLastRenewFailed = st.LastRenewFailed
+		if !st.CertExpires.IsZero() {
+			data.CertExpiresAt = st.CertExpires.Format("2006-01-02")
+		}
+	} else {
+		// 自签模式:证书永不"过期",DaysLeft = -1 标记不适用
+		data.CertDaysLeft = -1
+	}
+
+	// v2.86-pr22:DDNS 同步参数(给面板显示探测目标 / cron 间隔 / 域名)
+	if s.DDNSSync != nil {
+		data.DDNSDomain = s.DDNSSync.Domain()
+		data.DDNSBaseDomain = s.DDNSSync.BaseDomain()
+		data.DDNSRR = s.DDNSSync.RR()
+		data.DDNSDetectTarget = s.DDNSSync.DetectTarget()
+		data.DDNSPeriod = s.DDNSSync.Period().String()
+		data.DDNSIface = s.DDNSSync.Iface()
 	}
 
 	s.RenderPage(w, r, http.StatusOK, "home", data)

@@ -89,6 +89,44 @@ func TestSync_SetFamilyRejectsInvalid(t *testing.T) {
 	}
 }
 
+// v2.86-pr22:Domain / RR / BaseDomain / DetectTarget / Period / Iface getter 测试
+func TestSync_ConfigGetters_RRWithDomain(t *testing.T) {
+	s := newTestSync(t)
+	if got := s.Domain(); got != "vpn.example.com" {
+		t.Errorf("Domain() = %q, want vpn.example.com", got)
+	}
+	if got := s.BaseDomain(); got != "example.com" {
+		t.Errorf("BaseDomain() = %q, want example.com", got)
+	}
+	if got := s.RR(); got != "vpn" {
+		t.Errorf("RR() = %q, want vpn", got)
+	}
+}
+
+func TestSync_ConfigGetters_RRAtSign(t *testing.T) {
+	s := newTestSync(t, func(c *Config) { c.RR = "@" })
+	if got := s.Domain(); got != "example.com" {
+		t.Errorf("Domain() with RR=@ should be example.com, got %q", got)
+	}
+}
+
+func TestSync_ConfigGetters_PeriodAndTarget(t *testing.T) {
+	s := newTestSync(t, func(c *Config) {
+		c.Period = 5 * time.Minute
+		c.DetectTarget = "223.5.5.5"
+		c.Iface = "eth0"
+	})
+	if got := s.Period(); got != 5*time.Minute {
+		t.Errorf("Period() = %v, want 5m", got)
+	}
+	if got := s.DetectTarget(); got != "223.5.5.5" {
+		t.Errorf("DetectTarget() = %q, want 223.5.5.5", got)
+	}
+	if got := s.Iface(); got != "eth0" {
+		t.Errorf("Iface() = %q, want eth0", got)
+	}
+}
+
 // TestSync_MigrateLegacyStateFile v2-83 裸 "true" 文件 → 自动迁移到 INI 格式。
 func TestSync_MigrateLegacyStateFile(t *testing.T) {
 	tmp := t.TempDir()

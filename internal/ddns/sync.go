@@ -267,6 +267,54 @@ func (s *Sync) Family() string {
 	return s.cfg.Family
 }
 
+// Domain v2.86-pr22:返回完整域名(RR + "." + Domain,如 "vpn.example.com")。
+// 供面板 DDNS 卡展示当前同步目标。
+func (s *Sync) Domain() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cfg.RR == "" || s.cfg.RR == "@" {
+		return s.cfg.Domain
+	}
+	return s.cfg.RR + "." + s.cfg.Domain
+}
+
+// DetectTarget v2.86-pr22:返回 IPv4 探测目标(如 8.8.8.8)。
+// 供面板 DDNS 卡展示探测参数。
+func (s *Sync) DetectTarget() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cfg.DetectTarget
+}
+
+// Period v2.86-pr22:返回同步周期(如 60s)。
+// 供面板 DDNS 卡展示调度间隔。
+func (s *Sync) Period() time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cfg.Period
+}
+
+// RR v2.86-pr22:返回主机记录名(如 "vpn" / "@")。
+func (s *Sync) RR() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cfg.RR
+}
+
+// BaseDomain v2.86-pr22:返回裸域名(如 "example.com",不含 RR)。
+func (s *Sync) BaseDomain() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cfg.Domain
+}
+
+// Iface v2.86-pr22:返回监听的网络接口名(空 = 任意)。
+func (s *Sync) Iface() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cfg.Iface
+}
+
 // Run 启动后台循环,阻塞到 ctx.Done 或 stopCh。
 //
 // 行为:
