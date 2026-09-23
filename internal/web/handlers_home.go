@@ -84,6 +84,12 @@ type homeData struct {
 	DDNSPeriod        string // 人类可读周期(60s / 5m)
 	DDNSPeriodSeconds int    // v2.86-pr23a:周期秒数(给 input number 默认值用)
 	DDNSIface         string // 监听接口(空 = any)
+
+	// v2.86-pr23d:细粒度"是否真的会跑"派生字段,给顶部 metric + 右侧 HUD 用。
+	// 比 DDNSEnabled 更严:还要看 BaseDomain / AccessKey / 至少一个 checkbox。
+	DDNSHasDomain bool // BaseDomain != ""(env IKEV2_DDNS_DOMAIN 或 panelstate)
+	DDNSHasCreds  bool // 阿里云 AccessKey 已配(panelstate / env 至少一处)
+	DDNSReady     bool // "真的能跑":Enabled && HasDomain && HasCreds && (EnableA || EnableAAAA)
 	// 当前 swanctl.conf 正在生效的值(独立于 panelstate,看运行态)
 	SubnetCurrentIPv4 string
 	SubnetCurrentIPv6 string
@@ -211,6 +217,15 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 		data.DDNSPeriod = s.DDNSSync.Period().String()
 		data.DDNSPeriodSeconds = s.DDNSSync.PeriodSeconds()
 		data.DDNSIface = s.DDNSSync.Iface()
+		// v2.86-pr23d:细粒度"是否会真正 tick"派生字段。
+		// BaseDomain 来自 env IKEV2_DDNS_DOMAIN(必要时由 panelstate 覆盖);空字符串就是没配。
+		data.DDNSHasDomain = data.DDNSBaseDomain != ""
+		// AccessKey 已配就等价于 aliyunConfigured(panelstate 文件 / env 任一处)。
+		data.DDNSHasCreds = aliyunConfigured
+		// "真的会跑"= 总开关 + 至少一个 checkbox + 主域名 + AccessKey。
+		data.DDNSReady = data.DDNSEnabled &&
+			(data.DDNSEnableA || data.DDNSEnableAAAA) &&
+			data.DDNSHasDomain && data.DDNSHasCreds
 	}
 
 	s.RenderPage(w, r, http.StatusOK, "home", data)

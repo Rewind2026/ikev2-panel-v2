@@ -155,8 +155,8 @@
         </svg>
       </span>
     </div>
-    <span class="metric-value {{if .DDNSFailed}}danger{{else if and .DDNSEnabled (or .DDNSEnableA .DDNSEnableAAAA)}}ok{{else if .DDNSEnabled}}warn{{else}}muted{{end}}">
-      {{if not .DDNSConfigured}}—{{else if .DDNSFailed}}失败{{else if not (or .DDNSEnableA .DDNSEnableAAAA)}}已禁用{{else if .DDNSEnabled}}运行中{{else}}已关闭{{end}}
+    <span class="metric-value {{if .DDNSFailed}}danger{{else if .DDNSReady}}ok{{else if and .DDNSEnabled (or .DDNSEnableA .DDNSEnableAAAA)}}warn{{else if .DDNSEnabled}}warn{{else}}muted{{end}}">
+      {{if not .DDNSConfigured}}—{{else if .DDNSFailed}}失败{{else if .DDNSReady}}运行中{{else if not (or .DDNSEnableA .DDNSEnableAAAA)}}已禁用{{else if not .DDNSHasDomain}}待配置域名{{else if not .DDNSHasCreds}}缺凭证{{else if .DDNSEnabled}}已开启{{else}}已关闭{{end}}
     </span>
     <span class="metric-hint">
       {{if .DDNSConfigured}}{{if and .DDNSEnableA .DDNSEnableAAAA}}A + AAAA{{else if .DDNSEnableA}}A{{else if .DDNSEnableAAAA}}AAAA{{else}}无记录{{end}}{{else}}未配置{{end}}
@@ -317,8 +317,8 @@
       </div>
       <div class="side-stat">
         <span class="side-stat-label">DDNS</span>
-        <span class="side-stat-value {{if .DDNSFailed}}danger{{else if and .DDNSEnabled (or .DDNSEnableA .DDNSEnableAAAA)}}ok{{else if .DDNSEnabled}}warn{{else}}muted{{end}}">
-          {{if not .DDNSConfigured}}—{{else if .DDNSFailed}}失败{{else if not (or .DDNSEnableA .DDNSEnableAAAA)}}已禁用{{else if .DDNSEnabled}}运行中{{else}}已关闭{{end}}
+        <span class="side-stat-value {{if .DDNSFailed}}danger{{else if .DDNSReady}}ok{{else if and .DDNSEnabled (or .DDNSEnableA .DDNSEnableAAAA)}}warn{{else if .DDNSEnabled}}warn{{else}}muted{{end}}">
+          {{if not .DDNSConfigured}}—{{else if .DDNSFailed}}失败{{else if .DDNSReady}}运行中{{else if not (or .DDNSEnableA .DDNSEnableAAAA)}}已禁用{{else if not .DDNSHasDomain}}待配置域名{{else if not .DDNSHasCreds}}缺凭证{{else if .DDNSEnabled}}已开启{{else}}已关闭{{end}}
         </span>
       </div>
     </div>
@@ -529,12 +529,19 @@
         当前状态:
         {{if .DDNSFailed}}
           <span class="chip danger no-dot">同步失败</span>
-        {{else if .DDNSEnabled}}
+        {{else if .DDNSReady}}
           <span class="chip ok no-dot">运行中</span>
+        {{else if not (or .DDNSEnableA .DDNSEnableAAAA)}}
+          <span class="chip warn no-dot">已全部禁用</span>
+        {{else if not .DDNSHasDomain}}
+          <span class="chip warn no-dot">待配置域名</span>
+        {{else if not .DDNSHasCreds}}
+          <span class="chip warn no-dot">缺凭证</span>
+        {{else if .DDNSEnabled}}
+          <span class="chip warn no-dot">已开启</span>
         {{else}}
           <span class="chip warn no-dot">已关闭</span>
         {{end}}
-        {{if not (or .DDNSEnableA .DDNSEnableAAAA)}}<span class="chip warn no-dot">已全部禁用</span>{{end}}
       </div>
       {{if .DDNSFailed}}<p class="banner-danger" style="font-size: 0.8125rem;">{{.DDNSLastError}}</p>{{end}}
       {{if .DDNSLastTime}}<p style="font-size: 0.8125rem; margin: 0.25rem 0;">最近同步:<code>{{.DDNSLastTime}}</code></p>{{end}}
