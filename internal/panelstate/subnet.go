@@ -89,12 +89,18 @@ func (s *SubnetConfigStore) subnetConfPath() string {
 //     防止用户填错成公网段(会被路由器拦掉)
 //
 // 返回错误是用户输入错误(400),不是内部错误。
+//
+// v2.86-PR13.3 改造:IPv6Subnet 允许为空(用户可能在面板只改了 v4,
+// v6 保留 entrypoint §0.6b / env 的值)。空时不校验、不写 swanctl.conf,
+// runtime.Merge 会 fallback 到 env 的 v6。
 func (c *SubnetConfig) Validate() error {
 	if err := validatePoolCIDR(c.IPv4Subnet, 24, 4); err != nil {
 		return fmt.Errorf("ipv4_subnet 不合法: %w", err)
 	}
-	if err := validatePoolCIDR(c.IPv6Subnet, 64, 6); err != nil {
-		return fmt.Errorf("ipv6_subnet 不合法: %w", err)
+	if c.IPv6Subnet != "" {
+		if err := validatePoolCIDR(c.IPv6Subnet, 64, 6); err != nil {
+			return fmt.Errorf("ipv6_subnet 不合法: %w", err)
+		}
 	}
 	return nil
 }

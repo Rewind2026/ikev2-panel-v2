@@ -72,6 +72,36 @@ if [ -f "$CERT_CONF" ]; then
   echo "${LOG_PREFIX} [cert.conf] applied: cert_mode=${IKEV2_CERT_MODE} domain=${IKEV2_DOMAIN:-<empty>} server_cn=${IKEV2_SERVER_CN:-<empty>}"
 fi
 
+# ---------- §-0.5: v2.86-PR13.3:面板运行时 subnet 配置(优先级最高,对称 cert.conf)----------
+# 背景:subnet.conf 已经在 panelstate 里实现(v2.86-PR13.2),但 entrypoint §0.6 完全没读这个文件,
+# 重启容器后 entrypoint 会用 env / auto 探测覆盖 swanctl.conf,丢失面板用户的设定。
+# v2.86-PR13.3 把 subnet.conf 提到 entrypoint §-0.5 优先级最高(对称 cert.conf 模式):
+#
+#   1. /data/panel-state/subnet.conf (面板 UI 填的,运行时改,需重启容器生效)
+#   2. IKEV2_VPN_SUBNET / IKEV2_VPN_SUBNET_V6 env (老用户兼容,启动期生效)
+#   3. entrypoint §0.6 自动探测 (没填没传时)
+#
+# 注意:运行时(handler "保存并立即生效"按钮)走的 UpdatePoolsAndReload 路径不需要重启,
+# 已经能立即改 swanctl.conf。本节只解决"重启容器后值不被 entrypoint 覆盖"。
+SUBNET_CONF="/data/panel-state/subnet.conf"
+SUBNET_CONF_USED=0
+if [ -f "$SUBNET_CONF" ]; then
+  # 用 grep + sed 简单提取(镜像没装 jq)。字段顺序不重要。
+  subnet_v4_conf=$(grep -E '"ipv4_subnet"[[:space:]]*:' "$SUBNET_CONF" | sed -nE 's/.*"ipv4_subnet"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' | head -1)
+  subnet_v6_conf=$(grep -E '"ipv6_subnet"[[:space:]]*:' "$SUBNET_CONF" | sed -nE 's/.*"ipv6_subnet"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' | head -1)
+  if [ -n "$subnet_v4_conf" ]; then
+    IKEV2_VPN_SUBNET="$subnet_v4_conf"
+    # v6 允许为空(用户可能只在面板改了 v4);空时保留 env 的 v6,不动
+    if [ -n "$subnet_v6_conf" ]; then
+      IKEV2_VPN_SUBNET_V6="$subnet_v6_conf"
+    fi
+    SUBNET_CONF_USED=1
+    echo "${LOG_PREFIX} [subnet.conf] applied: ipv4=${IKEV2_VPN_SUBNET} ipv6=${IKEV2_VPN_SUBNET_V6}"
+  else
+    echo "${LOG_PREFIX} WARN: $SUBNET_CONF exists but ipv4_subnet missing or invalid, fallback to env/auto" >&2
+  fi
+fi
+
 # ====================================================================
 # §0 自动探测链（v2-79）
 # 任何"用户环境相关"的参数都不应该写死。探测顺序：环境变量 → 自动探测 → FATAL
@@ -215,7 +245,12 @@ LAN_V6_ULAS="$(detect_lan_v6_ulas || true)"
 # 选第一个不与 LAN_SUBNETS 重叠的
 VPN_SUBNET_CANDIDATES=("10.10.0.0/24" "10.13.0.0/24" "10.17.0.0/24" "10.42.0.0/24" "10.66.0.0/24")
 
-if [ "$IKEV2_VPN_SUBNET" = "auto" ]; then
+# v2.86-PR13.3:subnet.conf 已应用 → 跳过 auto-detect,保留面板用户的值。
+# 候选检测只对 "auto" 字符串有意义;IKEV2_VPN_SUBNET 被 §-0.5 覆盖后是 "10.10.20.0/24"
+# 这种具体值,本来就走不到 auto 分支,但加双保险避免脚本未来误改 env 路径时回归。
+if [ "${SUBNET_CONF_USED}" = "1" ]; then
+  echo "${LOG_PREFIX} [subnet.conf] skip auto-detect for v4 subnet (panel state wins)"
+elif [ "$IKEV2_VPN_SUBNET" = "auto" ]; then
   IKEV2_VPN_SUBNET=""
   for cand in "${VPN_SUBNET_CANDIDATES[@]}"; do
     # cand / LAN_SUBNETS 是否重叠？这里只做简单匹配（家用 LAN 都是 /24）
@@ -253,7 +288,10 @@ VPN_SERVER_VIP="${IKEV2_VPN_SUBNET%.*}.1"   # server 的 ipsec0 地址（强Swan
 IKEV2_VPN_SUBNET_V6="${IKEV2_VPN_SUBNET_V6:-auto}"
 VPN_V6_CANDIDATES=("fd00:1::/64" "fd00:2::/64" "fd00:3::/64" "fd00:10::/64" "fd00:20::/64")
 
-if [ "$IKEV2_VPN_SUBNET_V6" = "auto" ]; then
+# v2.86-PR13.3:对称 v4,v6 同样在 subnet.conf 应用时跳过 auto-detect。
+if [ "${SUBNET_CONF_USED}" = "1" ]; then
+  echo "${LOG_PREFIX} [subnet.conf] skip auto-detect for v6 subnet (panel state wins)"
+elif [ "$IKEV2_VPN_SUBNET_V6" = "auto" ]; then
   IKEV2_VPN_SUBNET_V6=""
   for cand in "${VPN_V6_CANDIDATES[@]}"; do
     # 候选的 /48（取前 3 段，fd00:1::/48）

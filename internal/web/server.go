@@ -86,6 +86,15 @@ type Server struct {
 	// v2.86-PR12.5:证书配置来源(从 main.go 注入,启动日志 + 面板显示)
 	CertConfigSource string
 
+	// v2.86-PR13.3:启动时生效的 IP 段(由 main.go 注入,合并 env+panelstate 后的最终值)。
+	// handlers_subnet.clear 用它作为"清除按钮立即生效"的目标,不需要重启容器。
+	//
+	// 跟 SubnetConfigStore 的区别:
+	//   - SubnetConfigStore:用户面板配置(可能为空)
+	//   - BootIPv4Subnet:启动时**实际生效**值(entrypoint §-0.5 / §0.6 决定的)
+	StartupIPv4Subnet string
+	StartupIPv6Subnet string
+
 	// v2.85-PR3:面板/DDNS/mobileconfig 时间显示时区(IANA TZ 名)。
 	// 从 cfg.DisplayTimezone 注入;handler 渲染时间字符串时用 s.DisplayTimezone。
 	DisplayTimezone string

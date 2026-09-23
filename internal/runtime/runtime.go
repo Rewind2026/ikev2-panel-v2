@@ -29,6 +29,9 @@ type Runtime struct {
 	AliyunAccessKeySecret string
 	AliyunAccessKeySource string // "panelstate" / "env-new" / "env-legacy-ddns" / "env-legacy-acme.sh" / ""
 	CertConfigSource      string // "panelstate" / "env-default" / ""
+	// v2.86-PR13.3:客户端虚拟 IP 段配置来源标记(对称 cert.conf / aliyun.creds)。
+	// 启动日志 / 面板显示告诉用户"现在用的 IP 段是哪来的"。
+	SubnetConfigSource string // "panelstate" / "env-default" / ""
 }
 
 // Merge 合并 env 配置和 panelstate 文件,返回最终 Runtime。
@@ -78,6 +81,26 @@ func Merge(env *config.Config) (*Runtime, error) {
 		r.ServerCN = env.ServerCN
 		r.ACMEEmail = env.ACMEEmail
 		r.CertConfigSource = env.CertConfigSource
+	}
+
+	// 3. v2.86-PR13.3:客户端虚拟 IP 段(panelstate → env)。
+	// 对称 cert.conf / aliyun.creds 模式:启动期从 subnet.conf 读,运行时(handler "保存并立即生效"按钮)
+	// 直接 sed /etc/swanctl/swanctl.conf 不需要重启。本节只决定"启动期 panelstate 优先"。
+	//
+	// v6 允许 panelstate 字段为空(用户可能只在面板改了 v4);空时保留 env 的 v6,不动。
+	subnetStore := panelstate.NewSubnetConfigStore()
+	if c, err := subnetStore.LoadSubnetConfig(); err == nil && c != nil {
+		r.IPv4Subnet = pickStr(c.IPv4Subnet, env.IPv4Subnet)
+		r.IPv6Subnet = pickStr(c.IPv6Subnet, env.IPv6Subnet)
+		r.SubnetConfigSource = "panelstate"
+	} else {
+		// 文件不存在(err==nil, c==nil) 或 解析失败(err!=nil) → 用 env
+		if err != nil {
+			stderrWarn("panelstate subnet.conf parse failed", err)
+		}
+		r.IPv4Subnet = env.IPv4Subnet
+		r.IPv6Subnet = env.IPv6Subnet
+		r.SubnetConfigSource = env.SubnetConfigSource
 	}
 
 	return r, nil

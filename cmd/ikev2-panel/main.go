@@ -443,6 +443,9 @@ func main() {
 	installTokens := installtoken.New(10 * time.Minute)
 	// P1-A：flash 存储（5 分钟 TTL,跟 install token 一致）
 	flashStore := web.NewFlashStore(5 * time.Minute)
+	// v2.86-PR13.3:读 swanctl.conf 当前 addrs 段,作为"清除面板配置"按钮的恢复值。
+	// dev 模式下文件不存在 → 空,handler 走 "重启回 env" 路径。
+	startupV4, startupV6 := scm.ReadCurrentPoolsFromFile()
 	srv := &web.Server{
 		Store:         st,
 		Swanctl:       scm,
@@ -475,6 +478,11 @@ func main() {
 		CertConfigStore: certCfgStore,
 		// v2.86-PR13.2:客户端虚拟 IP 段运行时持久化(IPv4 pool + IPv6 ULA pool)
 		SubnetConfigStore: subnetCfgStore,
+		// v2.86-PR13.3:启动时生效的 IP 段(读 swanctl.conf 当前 addrs 段)。
+		// 供 handlers_subnet.clear 用 — 用户点"清除面板配置"时立即改回这个值,
+		// 不需要重启容器。dev 模式下文件不存在 → 空,handler 走 "重启回 env" 路径。
+		StartupIPv4Subnet: startupV4,
+		StartupIPv6Subnet: startupV6,
 		// v2.86-PR12.22:管理员全局 mobileconfig 默认值,运行时热改无需重启。
 		MobileConfigDefaults:  mcDefaultsStore,
 		AliyunAccessKeySource: cfg.AliyunAccessKeySource,

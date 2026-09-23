@@ -48,6 +48,18 @@ type Config struct {
 	AliyunDomain     string // 主域名(如 example.com)
 	AliyunRR         string // 主机记录(如 vpn → vpn.example.com)
 
+	// v2.86-PR13.3:客户端虚拟 IP 段(IPv4 pool CIDR / IPv6 ULA pool CIDR)
+	//
+	// 来源链(env → panelstate → entrypoint auto-detect):
+	//   1. /data/panel-state/subnet.conf (面板运行时,需重启容器生效)
+	//   2. IKEV2_VPN_SUBNET / IKEV2_VPN_SUBNET_V6 env (老用户兼容,启动期生效)
+	//   3. entrypoint §0.6 自动探测 (没填没传时)
+	//
+	// 这里只存 env 直读值;panelstate 合并由 runtime.Merge 完成(对称 cert.conf)。
+	IPv4Subnet         string // IKEV2_VPN_SUBNET(默认空 = 让 entrypoint auto-detect)
+	IPv6Subnet         string // IKEV2_VPN_SUBNET_V6(默认空)
+	SubnetConfigSource string // 来源标记: panelstate / env-default / ""
+
 	// 用户密码
 	DefaultUserPasswordLen int
 
@@ -103,6 +115,12 @@ func Load() (*Config, error) {
 
 	// Cert 配置(env 来源标记,实际值可能被 runtime.Merge 用 panelstate 覆盖)
 	c.CertConfigSource = "env-default"
+
+	// v2.86-PR13.3:客户端虚拟 IP 段 env 直读;空 = 让 entrypoint §0.6 auto-detect。
+	// panelstate 合并在 runtime.Merge(env) 里做(对称 cert.conf)。
+	c.IPv4Subnet = getenv("IKEV2_VPN_SUBNET", "")
+	c.IPv6Subnet = getenv("IKEV2_VPN_SUBNET_V6", "")
+	c.SubnetConfigSource = "env-default"
 
 	if err := c.validate(); err != nil {
 		return nil, err

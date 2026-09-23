@@ -1452,6 +1452,19 @@ FATAL 退出（带明确错误提示 + 修复指引）
 | **LAN 网段** | 容器内 `ip -4 addr` 聚合 /24 | 用于检测 VPN 内部段冲突 |
 | **VPN 内部虚拟 IP 段** | 候选 `10.10.0.0/24 → 10.13.0.0/24 → 10.17.0.0/24 → 10.42.0.0/24 → 10.66.0.0/24`，选第一个不与 LAN 重叠 | 默认 `10.10.0.0/24`（有 WARN） |
 
+**v2.86-PR13.3:面板运行时 subnet 配置重启保持**
+
+`/data/panel-state/subnet.conf` 启动期优先级最高（对称 cert.conf / aliyun.creds）:
+
+1. `/data/panel-state/subnet.conf`（面板 UI 填的，运行期可改，**重启仍生效**）
+2. `IKEV2_VPN_SUBNET` / `IKEV2_VPN_SUBNET_V6` env
+3. entrypoint §0.6 自动探测
+
+面板"保存并立即生效"按钮走的 handler（`Manager.UpdatePoolsAndReload`）运行期 sed `/etc/swanctl/swanctl.conf` 立即生效。
+面板"清除"按钮恢复 startup 池段（`Server.StartupIPv4Subnet`/`StartupIPv6Subnet`，由 main.go 启动期读 swanctl.conf 注入），不需重启容器。
+
+详细设计见 [docs/release-notes-v2.86-pr13.3.md](release-notes-v2.86-pr13.3.md)。
+
 ### 16.3 关键改动文件
 
 | 文件 | v2-78 | v2-79 |

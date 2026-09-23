@@ -84,9 +84,10 @@ func (s *Server) handleSubnetStatus(w http.ResponseWriter, r *http.Request) {
 
 // handleSubnetSave POST /api/subnet/save
 //
-// Form 参数:
+// Form 参数(v2.86-PR13.3 改造):
 //   - ipv4_subnet   必填,合法 IPv4 CIDR (/24)
-//   - ipv6_subnet   必填,合法 IPv6 ULA CIDR (/64, fd00::/8)
+//   - ipv6_subnet   可空,v2.86-PR13.3 允许留空(只改 v4 时);空 → 用 StartupIPv6Subnet
+//     注入,不让 UpdatePoolsAndReload 把当前 v6 改成空串。
 //
 // 副作用:
 //   - 写 /data/panel-state/subnet.conf (atomic rename, 0600)
@@ -122,18 +123,23 @@ func (s *Server) handleSubnetSave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2. 立即改 swanctl.conf + reload
-	if err := s.Swanctl.UpdatePoolsAndReload(r.Context(), cfg.IPv4Subnet, cfg.IPv6Subnet); err != nil {
+	// 2. 立即改 swanctl.conf + reload。
+	// v6 字段为空时用 StartupIPv6Subnet 兜底,避免把当前 v6 覆盖成空串。
+	effectiveV6 := cfg.IPv6Subnet
+	if effectiveV6 == "" {
+		effectiveV6 = s.StartupIPv6Subnet
+	}
+	if err := s.Swanctl.UpdatePoolsAndReload(r.Context(), cfg.IPv4Subnet, effectiveV6); err != nil {
 		s.Logger.Error("swanctl pool update failed (panelstate saved but charon not reloaded)",
 			"err", err,
 			"ipv4", cfg.IPv4Subnet,
-			"ipv6", cfg.IPv6Subnet,
+			"ipv6", effectiveV6,
 		)
 		http.Error(w, "panelstate 已保存,但 swanctl reload 失败: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	masked := fmt.Sprintf("ipv4=%s ipv6=%s", cfg.IPv4Subnet, cfg.IPv6Subnet)
+	masked := fmt.Sprintf("ipv4=%s ipv6=%s ipv6_panel=%s", cfg.IPv4Subnet, effectiveV6, cfg.IPv6Subnet)
 	s.Logger.Info("subnet config saved + reloaded via panel", "masked", masked)
 	s.writeAudit(r, "subnet.save", masked)
 
@@ -148,31 +154,58 @@ func (s *Server) handleSubnetSave(w http.ResponseWriter, r *http.Request) {
 
 // handleSubnetClear POST /api/subnet/clear
 //
-// 副作用:
+// 副作用(v2.86-PR13.3 改造):
 //   - 删除 /data/panel-state/subnet.conf
-//   - 重启后 Go 进程从 env 读 IKEV2_VPN_SUBNET / IKEV2_VPN_SUBNET_V6(老用户兼容)
-//   - **不**改 swanctl.conf 当前值(已生效的值保留)
+//   - **立即**调 Manager.UpdatePoolsAndReload 把 swanctl.conf 的 pool 段改回"启动时
+//     实际生效的值"(由 main.go 启动期从 swanctl.conf 读出,作为 Server.StartupIPv4Subnet
+//     注入)。这样用户点"清除"后客户端不需要等重启,立即用回上一段。
+//   - 行为对齐 cert.conf / aliyun.creds 的 clear("清掉 panelstate + 立即生效")
 //   - 不需要二次确认(用户主动点"清除"按钮,意图明确)
 //
-// 注意:clear 不会把 swanctl.conf 改回 entrypoint 启动时的初始值。
-// entrypoint 启动时已经写入并 reload 过一次;那时的 pool 段是当时决定的。
-// 想要"回到 entrypoint 启动值"需要重启容器(或者再次调 save 用之前那段)。
+// 边界:
+//   - StartupIPv4Subnet 为空(dev 模式 / swanctl.conf 不可读)→ 不动 swanctl.conf,
+//     返回 msg 提示用户"重启容器后回 env"。老语义保留,避免 dev 模式 crash。
 func (s *Server) handleSubnetClear(w http.ResponseWriter, r *http.Request) {
 	if s.SubnetConfigStore == nil {
 		http.Error(w, "subnet config store not initialized", http.StatusInternalServerError)
 		return
 	}
+
+	// 1. 先读"启动时生效值"快照,clear 之后要立即 sed 回这个值。
+	// 注意:必须在 ClearSubnetConfig 之前读;清了 SubnetConfigStore 后内存缓存会被清空。
+	targetV4 := s.StartupIPv4Subnet
+	targetV6 := s.StartupIPv6Subnet
+
 	if err := s.SubnetConfigStore.ClearSubnetConfig(); err != nil {
 		s.Logger.Error("subnet config clear failed", "err", err)
 		http.Error(w, "清除失败: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	s.Logger.Info("subnet config cleared via panel (swanctl.conf current pool unchanged)")
-	s.writeAudit(r, "subnet.clear", "")
+	s.Logger.Info("subnet config cleared via panel", "audit", "subnet.clear")
+	s.writeAudit(r, "subnet.clear", fmt.Sprintf("target_v4=%s target_v6=%s", targetV4, targetV6))
+
+	// 2. 立即把 swanctl.conf 改回启动时的 pool 段,确保"清掉 panelstate 后
+	//    客户端不需要重启就能拿到上一段"。
+	if s.Swanctl != nil && targetV4 != "" && targetV6 != "" {
+		if err := s.Swanctl.UpdatePoolsAndReload(r.Context(), targetV4, targetV6); err != nil {
+			s.Logger.Error("swanctl pool revert failed after subnet.clear (panelstate removed but charon not reloaded)",
+				"err", err,
+				"target_v4", targetV4,
+				"target_v6", targetV6,
+			)
+			http.Error(w, "panelstate 已清除,但 swanctl 回滚失败: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		s.Logger.Info("subnet config cleared + swanctl reverted to startup pools",
+			"v4", targetV4, "v6", targetV6)
+	} else {
+		// dev 模式或 swanctl 不可用,告诉用户需要重启。
+		s.Logger.Info("subnet config cleared (swanctl not reverted; dev mode or unavailable)")
+	}
 
 	if r.Header.Get("Accept") == "application/json" {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"ok":true,"restart_required":false,"msg":"已清除,重启容器后回到 env / auto 默认段(当前 swanctl.conf 值不变)"}`))
+		_, _ = w.Write([]byte(`{"ok":true,"restart_required":false,"msg":"已清除,客户端 IP 段已立即回到上一段"}`))
 		return
 	}
 	http.Redirect(w, r, "/", http.StatusFound)

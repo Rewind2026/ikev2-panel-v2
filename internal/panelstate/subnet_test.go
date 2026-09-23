@@ -32,10 +32,9 @@ func TestSubnetConfigValidate(t *testing.T) {
 			errSub:  "ipv4_subnet",
 		},
 		{
-			name:    "v6 空失败",
+			name:    "v6 空 OK(v2.86-PR13.3:允许只改 v4)",
 			cfg:     SubnetConfig{IPv4Subnet: "10.13.0.0/24", IPv6Subnet: ""},
-			wantErr: true,
-			errSub:  "ipv6_subnet",
+			wantErr: false,
 		},
 		{
 			name:    "v4 非 CIDR 失败",
