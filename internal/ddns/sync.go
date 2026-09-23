@@ -246,6 +246,9 @@ func NewSync(cfg Config) *Sync {
 	// 1. caller 显式传了 EnableA 或 EnableAAAA → 用之
 	// 2. statefile 写了这俩字段(不管是 true/false)→ 用之
 	// 3. 都没有 → 按 cfg.Family 翻译;fallback 到 dual 全开
+	//
+	// v2.86-pr23b:无改动(parseStateFile 已经无条件覆盖 cfg.EnableA/EnableAAAA,
+	// 即使 statefile 显式写 enable_aaaa=false 也会落到 cfg,不会进 fallback)。
 	if !s.cfg.EnableA && !s.cfg.EnableAAAA {
 		switch s.cfg.Family {
 		case "v4":

@@ -155,11 +155,11 @@
         </svg>
       </span>
     </div>
-    <span class="metric-value {{if .DDNSFailed}}danger{{else if .DDNSEnabled}}ok{{end}}">
-      {{if not .DDNSConfigured}}—{{else if .DDNSFailed}}失败{{else if .DDNSEnabled}}运行中{{else}}已关闭{{end}}
+    <span class="metric-value {{if .DDNSFailed}}danger{{else if and .DDNSEnabled (or .DDNSEnableA .DDNSEnableAAAA)}}ok{{else if .DDNSEnabled}}warn{{else}}muted{{end}}">
+      {{if not .DDNSConfigured}}—{{else if .DDNSFailed}}失败{{else if not (or .DDNSEnableA .DDNSEnableAAAA)}}已禁用{{else if .DDNSEnabled}}运行中{{else}}已关闭{{end}}
     </span>
     <span class="metric-hint">
-      {{if .DDNSConfigured}}{{if eq .DDNSFamily "v4"}}A{{else if eq .DDNSFamily "v6"}}AAAA{{else}}A + AAAA{{end}}{{else}}未配置{{end}}
+      {{if .DDNSConfigured}}{{if and .DDNSEnableA .DDNSEnableAAAA}}A + AAAA{{else if .DDNSEnableA}}A{{else if .DDNSEnableAAAA}}AAAA{{else}}无记录{{end}}{{else}}未配置{{end}}
     </span>
   </div>
 </div>
@@ -317,8 +317,8 @@
       </div>
       <div class="side-stat">
         <span class="side-stat-label">DDNS</span>
-        <span class="side-stat-value {{if .DDNSFailed}}danger{{else if .DDNSEnabled}}ok{{end}}">
-          {{if not .DDNSConfigured}}—{{else if .DDNSFailed}}失败{{else if .DDNSEnabled}}运行中{{else}}已关闭{{end}}
+        <span class="side-stat-value {{if .DDNSFailed}}danger{{else if and .DDNSEnabled (or .DDNSEnableA .DDNSEnableAAAA)}}ok{{else if .DDNSEnabled}}warn{{else}}muted{{end}}">
+          {{if not .DDNSConfigured}}—{{else if .DDNSFailed}}失败{{else if not (or .DDNSEnableA .DDNSEnableAAAA)}}已禁用{{else if .DDNSEnabled}}运行中{{else}}已关闭{{end}}
         </span>
       </div>
     </div>
