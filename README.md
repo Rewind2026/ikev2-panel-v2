@@ -32,7 +32,7 @@
 | M7 | LE 模式：acme.sh 集成 + 续签健康检查 + 失败回退 | ✅ |
 | M8 | Dockerfile 自编译强Swan + libipsec + govici VICI 协议 | ✅ |
 | **M9** | **v2-79 零硬编码部署 + 公网 IPv6 自动变化感知（ipv6watch）** | ✅ |
-| **M10** | **v2-81 自动网络模式选择(host/bridge/ipvlan)+ v2-82 阿里云 DDNS 自动同步** | ✅ |
+| **M10** | **v2-82 阿里云 DDNS 自动同步** (v2.86-PR14 收敛:网络模式只保留 host) | ✅ |
 | **M11** | **v2-83 阿里云凭证统一(面板 UI 卡)+ 面板 HTTPS 证书热重载** | ✅ |
 | **M12** | **v2-84 DDNS 支持 IPv4 / IPv6 / 双栈可选(family 枚举)** | ✅ |
 | **M13** | **v2.85 综合质量提升(8 PR)+ Phase 5 A+B(audit retention cron + TCP MSS clamp)** | ✅ |
@@ -49,7 +49,7 @@
 2. **网卡名硬编码**（ens18 / eth0 因部署环境而异） → §0.1 自动探测（`ip -4 route show default`）
 3. **网关 / 网段变化** → §0.4 / §0.5 自动探测 + §0.6 自动选不冲突的 VPN 虚拟 IP 段
 4. **"改了宿主机配置"误解** → §19.4 文档明确：只改容器内，绝不动宿主
-5. **host 网络不允许怎么办** → §18 文档化 + v2-85 `./scripts/up.sh` 自动探测（host/bridge/ipvlan 三选一）
+5. **host 网络不允许怎么办** → v2.86-PR14 收敛:已不支持其他模式,host 仍不允许请换宿主
 
 **v2-79 关键文件改动清单**：
 
@@ -57,7 +57,7 @@
 |---|---|
 | `scripts/entrypoint.sh` | §0.1~§0.6 自动探测链 + §3.5 MASQUERADE 源用 `%IKEV2_VPN_SUBNET%` + §5 占位符替换扩展 |
 | `configs/swanctl-ipv6-only.conf` | `local_addrs = %IKEV2_LOCAL_ADDRS_DIRECTIVE%`（可省略） + `local_ts = %IKEV2_LOCAL_TS%` + `addrs = %IKEV2_VPN_SUBNET%, fd00:1::/64` |
-| `docker-compose.yml` | `IKEV2_SERVER_ADDR_V6=` / `IKEV2_OUT_IF=` 留空 + 新增 `IKEV2_NETWORK_MODE=auto` + `IKEV2_VPN_SUBNET=auto` |
+| `docker-compose.yml` | `IKEV2_SERVER_ADDR_V6=` / `IKEV2_OUT_IF=` 留空 + 新增 `IKEV2_VPN_SUBNET=auto`(v2.86-PR14 删了 IKEV2_NETWORK_MODE 默认) |
 | `.env` / `.env.example` | 所有字段都注释"留空 → 自动探测" |
 | `internal/cert/mobileconfig.go` | `PanelVersion = "v2-79"` |
 | `internal/swanctl/ipv6watch.go` | 不动（v2-72 已就位，v2-79 文档化） |
@@ -102,7 +102,7 @@ v2-79.2 移除 `docker compose sysctls:` 配置。原因：host 网络 + user na
    net.ipv4.ip_forward = 1
    ```
 
-3. **docker compose sysctls**（传统方式，但 user namespace 下被禁，**仅 bridge/ipvlan 模式可用**）
+3. **docker compose sysctls**（传统方式，v2.86-PR14 后不再使用，仅 host 模式 entrypoint 自愈）
 
 ```yaml
 # docker-compose.yml 里 sysctls 块已注释：
@@ -216,16 +216,10 @@ tail -f ./logs/audit.log
 docker logs -f ikev2-panel
 ```
 
-**v2.85 新增：自动网络模式切换** —— `./scripts/up.sh` 会探测宿主网络环境：
-
-| 探测结果 | 选择的模式 | 说明 |
-|---|---|---|
-| OUT_IF 有公网 IPv6 (`2000::/3`) | `host` | 直绑宿主网卡（推荐） |
-| 只有公网 IPv4 | `bridge` + libipsec | UDP 500/4500 端口映射 |
-| 都没有 | `bridge` + ipvlan | 容器直接拿公网 IP（自动建 ipvlan 网络） |
-
-探测结果写到 `docker-compose.override.yml`，docker compose 自动合并。
-**老用户继续 `docker compose up -d` 仍然 100% 兼容**（默认 host 网络）。
+**v2.86-PR14 收敛**：网络模式固定 `host`(`docker-compose.yml` 已写死 `network_mode: host`)。
+不再支持 bridge / ipvlan 模式（v2-79 写过但 2025 实机验证多用户并发丢包严重，已下线）。
+`./scripts/up.sh` 不再调用探测脚本，只负责 `./logs` 目录准备 + `docker compose up -d`。
+**老用户继续 `docker compose up -d` 仍然 100% 兼容**（默认 host 网络，无需任何 override）。
 
 预期启动日志：
 
@@ -345,14 +339,14 @@ v2 设计上**不适用于对外提供服务**：
 
 ### 3. 网络模式（关键决策）
 
-**M8 commit 24 后的最终结论**：**默认 `network_mode: host`**。
+**M8 commit 24 后的最终结论 + v2.86-PR14 收敛**：**唯一支持 `network_mode: host`**。
 
-| 网络模式 | 公网 IPv6 可达 | ESP 兼容 | 端口冲突风险 | 推荐度 |
-|---|---|---|---|---|
-| **`network_mode: host`**（默认） | ✅ 直接共享宿主网卡 | ✅ libipsec 走 UDP/4500 | ⚠️ 与宿主机其他服务抢 UDP 500/4500 | ⭐⭐⭐ |
-| bridge + `ipvlan`（L2） | ✅ 子网内可路由 | ✅ libipsec | ⚠️ 需手工建 ipvlan 网络 | ⭐⭐ |
-| bridge（docker 默认） | ❌ **不可达** | ✅ libipsec | ✅ 无冲突 | ❌ **禁用**：docker 给容器分配 fd00::/8 ULA |
-| bridge + macvlan | ⚠️ 不支持多 MAC | ✅ libipsec | — | — |
+| 网络模式 | 状态 | 原因 |
+|---|---|---|
+| **`network_mode: host`**（唯一） | ✅ 强制默认 | 直绑宿主网卡，公网 IPv6 直达 + UDP 500/4500 不需要端口映射 |
+| bridge + `ipvlan` | ❌ 已下线 | v2-79 写过但 2025 实机验证多用户并发丢包严重 |
+| bridge（docker 默认） | ❌ **不可用** | docker 给容器分配 fd00::/8 ULA，公网不可达 |
+| bridge + macvlan | ❌ 不支持 | 不提供模板 |
 
 **为什么 docker 默认 bridge 不可用**（实机验证 192.168.50.176）：
 ```
@@ -360,31 +354,19 @@ $ docker exec ikev2-panel ip -6 addr show eth0
 inet6 fd00:d0c::242:ac11:2/64 scope global nodad  ← ULA，公网不可达！
 ```
 
-Docker bridge 默认从 `fd00::/8` ULA 段分配 IPv6，**即使是 global scope 也无法在公网路由**。即便配置 `daemon.json` 开启 IPv6 + `ip6tables`，仍然只会得到 ULA 段。唯一解法是 host 网络或 ipvlan。
+Docker bridge 默认从 `fd00::/8` ULA 段分配 IPv6，**即使是 global scope 也无法在公网路由**。即便配置 `daemon.json` 开启 IPv6 + `ip6tables`，仍然只会得到 ULA 段。**唯一解法是 host 网络**。
 
-**ipvlan 启用方法**（如需网络隔离）：
-```bash
-# 1. 宿主上建 ipvlan 网络（替换 ens18 和子网为你自己的）
-docker network create -d ipvlan \
-  --subnet=2408:832e:8a5:1000::/64 \
-  --gateway=2408:832e:8a5:1000::1 \
-  -o ipvlan_mode=l2 \
-  -o parent=ens18 \
-  ikev2-ipvlan
-
-# 2. 取消 docker-compose.yml 顶部 network_mode: host 注释，并启用 networks 块
-#    （ipv4_address / ipv6_address 替换成你的地址）
-```
+> v2.86-PR14 后:`.env` 里设 `IKEV2_NETWORK_MODE=bridge|ipvlan` 会被 entrypoint.sh §0.7 FATAL 拒绝并明确报错。
 
 ### 4. 容器 capabilities
 
-| Capability | host 模式 | bridge+ipvlan | 用途 |
-|---|---|---|---|
-| `NET_ADMIN` | ✅ 必需 | ✅ 必需 | iptables MASQUERADE、ip link 探测、ip route |
-| `NET_BIND_SERVICE` | ✅ 必需 | ✅ 必需 | 监听 privileged 端口 500/4500 |
-| `SYS_ADMIN` | ✅ 必需 | ❌ 不需要 | host 模式下 tc 限速、ip rule 路由 |
-| `NET_RAW` | ❌ 不需要 | ❌ 不需要 | libipsec 走 TUN，不需要 raw socket |
-| `cap_drop ALL` | ✅ 强烈推荐 | ✅ 强烈推荐 | 最小权限原则 |
+| Capability | host 模式（唯一） | 用途 |
+|---|---|---|
+| `NET_ADMIN` | ✅ 必需 | iptables MASQUERADE、ip link 探测、ip route |
+| `NET_BIND_SERVICE` | ✅ 必需 | 监听 privileged 端口 500/4500 |
+| `SYS_ADMIN` | ✅ 必需 | host 模式下 tc 限速、ip rule 路由 |
+| `NET_RAW` | ❌ 不需要 | libipsec 走 TUN，不需要 raw socket |
+| `cap_drop ALL` | ✅ 强烈推荐 | 最小权限原则 |
 
 ### 5. 设备
 
@@ -677,11 +659,13 @@ docker run --rm -v ikev2-panel-v2_ikev2-data:/from -v $(pwd):/to alpine cp -a /f
 
 ## 常见问题（FAQ）
 
-### Q1：docker 默认 bridge 模式下，容器内能看到 IPv6 地址但客户端连不上？
+### Q1：怎么把已部署容器从 bridge 模式迁到 host（v2.86-PR14）？
 
-**A**：Docker 给容器分配的 `fd00::/8` 是 ULA（RFC 4193），公网不可达。
-- 验证：`docker exec ikev2-panel ip -6 addr show eth0`，看地址是否以 `fd` / `fc` 开头
-- 解法：改用 `network_mode: host`（默认）或 ipvlan，详见上文部署矩阵 §3
+**A**：v2.86-PR14 后唯一支持 `network_mode: host`。如果你之前用 bridge / ipvlan：
+1. 停掉容器：`docker compose down`
+2. 编辑 `.env`，删掉 `IKEV2_NETWORK_MODE=` 那行（或改成 `host`）
+3. 删 `docker-compose.override.yml`（如有）
+4. 重新启动：`./scripts/up.sh`
 
 ### Q2：charon.vici socket permission denied？
 
@@ -694,69 +678,40 @@ docker run --rm -v ikev2-panel-v2_ikev2-data:/from -v $(pwd):/to alpine cp -a /f
   ```
 - 或在 `charon.conf` 里改 `vici { socket = unix:///var/run/charon.vici }` 加权限
 
-### Q3：ipvlan 网络下容器拿不到 IPv6 地址？
-
-**A**：检查 3 件事：
-1. 宿主机网卡是否开启 `accept_ra=2` 和 `forwarding=1`：
-   ```bash
-   sysctl net.ipv6.conf.ens18.accept_ra=2
-   sysctl net.ipv6.conf.all.forwarding=1
-   ```
-2. docker daemon 是否配置 IPv6：
-   ```json
-   // /etc/docker/daemon.json
-   {
-     "ipv6": true,
-     "fixed-cidr-v6": "fd00:d0c::/64",
-     "ip6tables": true,
-     "experimental": true   // docker 26.x 需要
-   }
-   ```
-   重启：`systemctl restart docker`
-3. ipvlan parent 接口是否正确（必须是宿主物理网卡，不能是 bridge/vlan 子接口）
-
-### Q4：docker daemon IPv6 报 `ip6tables rules are only available if experimental features are enabled`？
-
-**A**：docker v26+ 把 ip6tables 移到了 experimental：
-```bash
-nohup dockerd --experimental > /tmp/dockerd.log 2>&1 &
-```
-或 daemon.json 里加 `"experimental": true`。
-
-### Q5：strongSwan 6.0.1 编译报 `undefined reference to gmp_*`？
+### Q3：strongSwan 6.0.1 编译报 `undefined reference to gmp_*`？
 
 **A**：build stage 缺 `libgmp-dev`，在 Dockerfile 的 `apt-get install` 段加上：
 ```dockerfile
 libgmp-dev
 ```
 
-### Q6：list-sas 显示空但实际有客户端连上？
+### Q4：list-sas 显示空但实际有客户端连上？
 
 **A**：可能是 charon 启动竞态。第一次 reload `swanctl --load-all` 在 entrypoint 里做了，Go 进程的 `ListSAs()` 调用是异步的。
 - 容器内日志看 `vici list-sas stream: ...` 错误
 - 验证 socket：`docker exec ikev2-panel ls -l /var/run/charon.vici`
 - 验证 charon 进程：`docker exec ikev2-panel ps aux | grep charon`
 
-### Q7：dev 模式（容器外）启动后日志一直刷 "vici NewSession failed"？
+### Q5：dev 模式（容器外）启动后日志一直刷 "vici NewSession failed"？
 
 **A**：dev 模式下 charon 不存在是正常的。Go 进程会用 `WithSkipVici()` 静默跳过所有 VICI 操作（仅记 warn 日志）。
 - 确认 dev 模式检测：日志里搜 `skip vici` 或 `charon.vici not found`
-- 如果是生产模式（容器内）报错，那就是真实问题，看上面 Q2/Q6
+- 如果是生产模式（容器内）报错，那就是真实问题，看上面 Q2/Q4
 
-### Q8：libipsec 启用后 strongSwan 报 `no matching peer config found`？
+### Q6：libipsec 启用后 strongSwan 报 `no matching peer config found`？
 
 **A**：99% 是 swanctl.conf 里 `local_addrs` 配置错。`%IKEV2_SERVER_ADDR_V6%` 占位符没替换成实际公网 IPv6。
 - 验证：`docker exec ikev2-panel cat /etc/swanctl/swanctl.conf | grep local_addrs`
 - 应该看到 `local_addrs = 2001:db8::75`（实际地址），不是 `%IKEV2_SERVER_ADDR_V6%`
 
-### Q9：升级 strongSwan 6.0.1 → 6.1.0 后编译失败？
+### Q7：升级 strongSwan 6.0.1 → 6.1.0 后编译失败？
 
 **A**：6.1.0 的 tar.bz2 在官方下载源经常 404。建议保持 6.0.1（已生产验证）。如必须升级：
 1. 修改 `Dockerfile` 的 `STRONGSWAN_VERSION` + `STRONGSWAN_MD5`
 2. MD5 从 https://download.strongswan.org/strongswan-X.Y.Z.tar.bz2.md5 获取
 3. 跑 `docker build --no-cache` 重编译
 
-### Q10：怎么从内核 XFRM 切到 libipsec（或反过来）？
+### Q8：怎么从内核 XFRM 切到 libipsec（或反过来）？
 
 **A**：都是修改 `/etc/strongswan.d/charon/` 下 plugin 配置：
 ```bash

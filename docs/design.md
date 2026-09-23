@@ -325,11 +325,15 @@ Docker `network_mode: host` 理论上可绕过 ESP 转发问题，但会带来�
 
 **v2 推荐范围**：≤20 用户 + ≤5 Mbps/用户 = 总带宽 ≤100 Mbps。**超出此范围的用户应该选方案 A（宿主机 systemd）**。这点会在 README 明确标注。
 
-#### 1.5.4 专家模式：仍然支持 host 网络
+#### 1.5.4 网络模式（v2.86-PR14 收敛：仅 host）
 
-保留 `IKEV2_NETWORK_MODE=host` 环境变量作为可选开关，**仅在 KVM/Xen 硬件虚拟化 + 已知宿主 ESP 转发正常**的 VPS 上使用。Dockerfile 同时编译 `kernel-libipsec` 与 `kernel-netlink`，运行时由 strongSwan `charon.plugins.kernel-libipsec.use_netlink` 选择后端。
+v2.86-PR14 后**唯一支持 `network_mode: host`**。理由：
 
-**默认行为**：`IKEV2_NETWORK_MODE=bridge` + libipsec 后端（兼容性优先）。
+- 必须监听公网 IPv6 地址（ULA 段 fd00::/8 公网不可达），docker 默认 bridge 不行
+- 直绑宿主网卡 → UDP 500/4500 不需要端口映射（NAT-T 兼容性最好）
+- bridge + libipsec / ipvlan 模式历史上写过但 2025 实机多用户并发丢包严重，已下线
+
+Dockerfile 编译 `kernel-libipsec`（ESD+ 在 UDP/4500 里封装，绕开 IP 协议 50 在容器宿主上的可用性问题）。
 
 #### 1.5.5 与 §1.3 IPv6-only 默认的协同
 
@@ -1578,57 +1582,58 @@ v2-72 之前没有 ipv6watch，ISP 重拨后用户必须手动改 .env + 重 bui
 
 ---
 
-## 18. 网络模式自动选择（v2-80 实现）
+## 18. 网络模式：v2.86-PR14 收敛到 host 唯一
 
-### 18.1 四种模式对比
+### 18.1 为什么只支持 host
 
-| 模式 | 适用场景 | 公网 IP | 端口冲突风险 | v2-80 支持 |
-|---|---|---|---|---|
-| **`network_mode: host`** | 主流推荐，宿主有公网 IP | ✅ 直绑 | ⚠️ UDP 500/4500 与宿主机其他服务冲突 | ✅ 默认 + auto 探测首选 |
-| **`bridge` + libipsec** | 端口冲突时 fallback；ESP 走 UDP/4500 绕过 XFRM | ⚠️ 需要端口映射 | ✅ 无冲突 | ✅ auto 探测 fallback（仅有公网 v4 时） |
-| **`bridge` + ipvlan** | 想做网络隔离 + 有公网 IPv6 子网 | ✅ | ⚠️ 需手工建 ipvlan 网络 | ✅ auto 探测 fallback + auto-create ipvlan 网络 |
-| **`bridge` + macvlan** | fallback for ipvlan 不支持的环境 | ⚠️ 父接口是宿主物理网卡 | — | ❌ 不提供模板 |
+| 模式 | 状态 | 原因 |
+|---|---|---|
+| **`network_mode: host`** | ✅ 唯一支持 | 直绑宿主网卡 + 公网 IPv6 直达 + UDP 500/4500 不需要端口映射 |
+| bridge + libipsec | ❌ 已下线 | 2025 实机测试:多用户并发丢包严重 + iptables FORWARD/MASQUERADE 链路复杂 |
+| bridge + ipvlan | ❌ 已下线 | 需手工建 ipvlan 网络 + docker daemon 需 ipv6+experimental 配项 |
+| bridge（docker 默认） | ❌ 不可用 | docker 分配 fd00::/8 ULA,公网不可达 |
 
-**v2-80 默认 host 网络**（docker-compose.yml `network_mode: host`），但推荐用 `./scripts/up.sh` 自动探测。
+**结论**:v2.86-PR14 把 v2-79~v2-85 时期的 bridge / ipvlan / libipsec 多模式探测砍掉,**只保留 host**。
+理由简单粗暴 — 历史测试多用户并发不稳定 + 维护多套模式代码成本不值得。
 
-### 18.2 自动选择策略（v2-80 实现）
+### 18.2 启动流程（v2.86-PR14 收敛后）
 
 ```bash
-# 探测逻辑（v2-80 scripts/auto-network.sh 实现）
-# 规则严格按 design.md §18.2 优先级:
-if OUT_IF 上有 2000::/3 公网 IPv6:
-    IKEV2_NETWORK_MODE=host          # 直绑宿主网卡
-elif OUT_IF 上有公网 IPv4:
-    IKEV2_NETWORK_MODE=bridge        # + libipsec + 端口映射 500:500/udp 4500:4500/udp
-else:
-    IKEV2_NETWORK_MODE=ipvlan        # 自动 docker network create -d ipvlan
+# 唯一推荐:
+./scripts/up.sh
+#   1. mkdir -p ./logs && chmod 1777      (v2.86-PR13.4)
+#   2. docker compose up -d               (host 网络写死在 compose.yml)
+
+# 等价(老用户):
+docker compose up -d
 ```
 
-**实现机制**：业界标准做法（`docker-compose.override.yml`）。
+**实现机制**:
+- `docker-compose.yml` 写死 `network_mode: host`,无需 override
+- `scripts/up.sh` 只做 `./logs` 目录准备 + `docker compose up -d`,不再调用探测脚本
+- `scripts/auto-network.sh` **已删除**(不再需要)
+- `entrypoint.sh` §0.7 改为"host 强制 + 校验":传 bridge|ipvlan → FATAL 拒绝 + 明确报错
 
-- 探测脚本 `scripts/auto-network.sh` 在 docker compose 启动**前**（宿主上）跑
-- 探测结果写到 `docker-compose.override.yml`，docker compose 自动合并
-- 用户命令从 `docker compose up -d` 改成 `./scripts/up.sh`（包了一层探测）
-- 老用户继续 `docker compose up -d` 100% 兼容（docker-compose.yml 默认 host 网络）
+### 18.3 v2.86-PR14 之前的实现状态(历史回顾)
 
-### 18.3 v2-80 实现状态
-
-- ✅ `scripts/auto-network.sh` 实现探测 + 生成 override
+- ✅ `scripts/auto-network.sh` 实现探测 + 生成 override (v2-80 加)
 - ✅ `scripts/up.sh` 包装探测 + 启动
-- ✅ `docker-compose.yml` 头部注释引用 `./scripts/up.sh`
-- ✅ `entrypoint.sh` §0.7 校验实际模式 vs 声明模式（不匹配时 WARN 提示跑 up.sh）
-- ✅ docker-compose.override.yml 加入 `.gitignore`（每次自动生成，不入库）
-- ✅ ipvlan 网络 auto-create（幂等；失败时退回 bridge+libipsec）
-- ✅ 用户显式 `IKEV2_NETWORK_MODE=host|bridge|ipvlan` 完全尊重
+- ✅ `docker-compose.yml` 默认 host,override 可覆盖
+- ✅ `entrypoint.sh` §0.7 校验实际模式 vs 声明模式 (WARN 提示跑 up.sh)
+- ✅ docker-compose.override.yml 不入库 (每次自动生成)
+- ✅ ipvlan 网络 auto-create(幂等;失败时退回 bridge+libipsec)
+- ❌ bridge / ipvlan 模式**实机多用户并发丢包严重**,2025 测试后退役
+- ✅ v2.86-PR14:**全部下线,只保留 host**
 
-### 18.4 跟原 §18.3 的对比
+### 18.4 历史对照表
 
-| 项 | v2-79 | v2-80 |
-|---|---|---|
-| `IKEV2_NETWORK_MODE` | docker-compose.yml 加了字段但没读 | `./scripts/up.sh` 真正使用 |
-| 探测逻辑位置 | 设计文档占位 | `scripts/auto-network.sh` 实际跑 |
-| ipvlan 网络 | 用户手工建 | auto-create |
-| 用户体验 | 改 docker-compose.yml 注释 | `./scripts/up.sh` 一行 |
+| 项 | v2-79 | v2-80 | v2.86-PR14 |
+|---|---|---|---|
+| `IKEV2_NETWORK_MODE` | 默认值字段但未读 | auto 探测 + 写 override | **删除** |
+| 探测脚本 | ❌ 无 | ✅ `auto-network.sh` | ❌ 已删除 |
+| override 文件 | ❌ 无 | ✅ `docker-compose.override.yml` | ❌ 已删除 |
+| bridge / ipvlan | 设计文档占位 | 实装但未充分验证 | ❌ 下线 |
+| 用户体验 | 改 yml 注释 | `./scripts/up.sh` 自动 | `./scripts/up.sh` 简化 |
 
 ---
 

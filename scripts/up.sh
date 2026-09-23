@@ -1,20 +1,22 @@
 #!/usr/bin/env bash
-# up.sh - 一键启动容器(自动探测网络模式)
+# up.sh - 一键启动容器(host 网络唯一模式)
 #
-# 设计见 docs/design.md §18.2 / scripts/auto-network.sh
+# 设计见 docs/design.md §10.2
 #
 # 为什么需要这个脚本:
-#   docker compose 启动前就要决定 network_mode (host/bridge/ipvlan),
-#   entrypoint.sh 在容器内运行无法热切换。所以探测 + 生成 override 必须
-#   在宿主上跑一次 → 这个脚本就是封装 "探测 + 启动" 两步。
+#   - 自动 ./logs bind mount 目录准备(避免 docker compose up 因目录不存在失败)
+#   - docker compose up -d 的薄封装,加 stderr 染色 + 错误处理
+#
+# v2.86-PR14 收敛:删除网络模式探测(v2-79~v2-85 时期的 auto-network.sh 已删除)。
+# 唯一支持 host 网络,无需探测。
 #
 # 用法:
-#   ./scripts/up.sh                  # 自动探测 + 启动
-#   ./scripts/up.sh --no-detect      # 跳过探测(直接用 docker-compose.yml 默认 host)
-#   IKEV2_NETWORK_MODE=host ./scripts/up.sh   # 显式指定模式(给 auto-network.sh)
+#   ./scripts/up.sh                  # 默认启动
+#   ./scripts/up.sh --no-detect      # 兼容老用户参数(已 no-op,保留)
+#   ./scripts/up.sh --help           # 看帮助
 #
 # 等价于:
-#   ./scripts/auto-network.sh && docker compose up -d
+#   mkdir -p logs && chmod 1777 logs && docker compose up -d
 
 set -euo pipefail
 
@@ -32,26 +34,19 @@ ok()   { echo -e "${GREEN}[up.sh] ✓${NC} $*" >&2; }
 warn() { echo -e "${YELLOW}[up.sh] !${NC} $*" >&2; }
 
 # ---------- 解析参数 ----------
-NO_DETECT=0
 for arg in "$@"; do
   case "$arg" in
-    --no-detect) NO_DETECT=1 ;;
+    --no-detect) warn "--no-detect 已是 no-op(v2.86-PR14 删了网络模式探测)" ;;
     -h|--help)
       cat <<EOF
 用法: ./scripts/up.sh [选项]
 
 选项:
-  --no-detect    跳过网络模式探测(直接用 docker-compose.yml 默认 host 网络)
+  --no-detect    兼容老参数(已 no-op)
   -h, --help     显示这个帮助
 
-环境变量:
-  IKEV2_NETWORK_MODE    auto (默认) | host | bridge | ipvlan
-                        auto 模式由 scripts/auto-network.sh 探测;显式指定时直接尊重
-
-示例:
-  ./scripts/up.sh                          # 日常启动(自动探测)
-  IKEV2_NETWORK_MODE=host ./scripts/up.sh  # 强制 host 网络
-  ./scripts/up.sh --no-detect              # 跳过探测(老用户习惯)
+v2.86-PR14 后:网络模式固定 host,docker-compose.yml 已写死 network_mode: host,
+                不再需要探测 / override 文件。
 EOF
       exit 0
       ;;
@@ -59,7 +54,7 @@ EOF
   esac
 done
 
-# ---------- 0.5 准备 ./logs bind mount 目标(v2.86-PR13.4)----------
+# ---------- 准备 ./logs bind mount 目标(v2.86-PR13.4)----------
 # docker-compose.yml 把容器内 /var/log bind 到宿主 ./logs。
 # 如果宿主目录不存在或权限不对,容器启动会 mount 失败 / 容器内进程写不进去。
 # 必须在 docker compose up 之前建好。
@@ -75,22 +70,6 @@ else
   fi
 fi
 
-# ---------- 1. 探测网络模式(生成 override) ----------
-if [ "$NO_DETECT" = "1" ]; then
-  warn "--no-detect passed, skipping auto-network.sh (using docker-compose.yml default = host)"
-else
-  if [ "${IKEV2_NETWORK_MODE:-auto}" = "auto" ]; then
-    log "IKEV2_NETWORK_MODE=auto, running auto-network.sh..."
-  else
-    log "IKEV2_NETWORK_MODE=${IKEV2_NETWORK_MODE}, running auto-network.sh (will respect user choice)..."
-  fi
-  if bash "${SCRIPT_DIR}/auto-network.sh"; then
-    ok "auto-network.sh done"
-  else
-    warn "auto-network.sh failed (exit=$?), continuing with docker-compose.yml default"
-  fi
-fi
-
-# ---------- 2. docker compose up ----------
+# ---------- docker compose up ----------
 log "running: docker compose up -d"
 exec docker compose up -d "$@"
