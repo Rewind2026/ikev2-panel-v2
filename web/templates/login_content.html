@@ -1,6 +1,7 @@
 {{/*
-  web/templates/login_content.html — v2.86-PR-Redesign
+  web/templates/login_content.html — v2.86-pr23e
   EZZON 风格：深黑底 + 双 radial-gradient + grid mask + 居中深色玻璃卡 + 青色发光 mark
+  v2.86-pr23e:密码框加 eye toggle (复用 password widget 的 .password-toggle)
 */}}
 <section class="login-card">
   <div class="login-card-mark" aria-hidden="true">
@@ -48,6 +49,16 @@
         </svg>
         <input name="password" type="password" autocomplete="current-password" required
                placeholder="••••••••">
+        {{/* v2.86-pr23e:复用 password widget 的 eye toggle(.password-toggle 由 layout.html 里的 initPasswordWidget 接管) */}}
+        <button type="button" class="password-toggle" aria-label="显示密码" aria-pressed="false">
+          <svg class="icon-show" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>
+          </svg>
+          <svg class="icon-hide" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M17.94 17.94A10.94 10.94 0 0 1 12 19c-6.5 0-10-7-10-7a18.45 18.45 0 0 1 4.06-5.06M9.9 4.24A10.94 10.94 0 0 1 12 4c6.5 0 10 7 10 7a18.5 18.5 0 0 1-2.16 3.19M14.12 14.12a3 3 0 1 1-4.24-4.24"/>
+            <path d="M1 1l22 22"/>
+          </svg>
+        </button>
       </span>
     </label>
 

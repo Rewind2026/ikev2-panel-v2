@@ -1,21 +1,27 @@
 {{/*
-  web/templates/account_content.html — v2.86-pr21
+  web/templates/account_content.html — v2.86-pr23e
   Admin 自助改密页（仅 admin 自身可用）。
+  使用密码组件 (data-password-shell):
+    - 强度计分(0-4 档)
+    - 5 条规则实时翻转
+    - 确认密码一致性实时校验
+    - eye toggle 显示明文
+    - 提交按钮按规则 + 一致性锁定
 
-  字段：
+  字段:
     - 旧密码
-    - 新密码（>=8 位）
+    - 新密码 (>=8 位 + 5 规则全中)
     - 确认新密码
 
-  提交目标：POST /api/account/password
-  CSRF：模板从 .CSRFToken 拿。
-  成功 flash：redirect 回来显示 banner-success。
-  失败：当前页 422 + Error 字段 + banner-danger。
+  提交目标:POST /api/account/password
+  CSRF:模板从 .CSRFToken 拿。
+  成功 flash:redirect 回来显示 banner-success。
+  失败:当前页 422 + Error 字段 + banner-danger。
 */}}
 <section class="settings-shell">
   <header class="settings-header">
     <h1>账号设置</h1>
-    <p class="settings-sub">修改当前管理员 <code>{{.Username}}</code> 的登录密码。</p>
+    <p class="settings-sub">修改当前管理员 <code>{{.Username}}</code> 的登录密码。修改会立即生效,所有活跃会话保持不变(密码只在下次登录时校验)。</p>
   </header>
 
   {{if .Error}}
@@ -27,34 +33,140 @@
   </div>
   {{end}}
 
-  <form method="POST" action="/api/account/password" class="settings-form-shell" autocomplete="off" novalidate>
+  <form method="POST" action="/api/account/password" class="settings-form-shell" autocomplete="off" novalidate data-password-shell>
     <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
 
-    <div class="form-section">
-      <label class="form-label" for="acct-old">旧密码</label>
-      <input id="acct-old" type="password" name="old_password" autocomplete="current-password"
-             required autofocus placeholder="••••••••">
-    </div>
+    <div class="password-shell">
+      {{/* 左:表单主体 */}}
+      <div class="password-shell-main">
 
-    <div class="form-section">
-      <label class="form-label" for="acct-new">新密码 <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(至少 8 位)</small></label>
-      <input id="acct-new" type="password" name="new_password" autocomplete="new-password"
-             required minlength="8" placeholder="••••••••">
-    </div>
+        <div class="password-field">
+          <label class="password-field-label" for="acct-old">
+            当前密码
+            <small>用于验证管理员身份</small>
+          </label>
+          <span class="password-input-wrap">
+            <input id="acct-old" type="password" name="old_password" autocomplete="current-password"
+                   required autofocus placeholder="••••••••" data-password-input="old">
+            <button type="button" class="password-toggle" aria-label="显示密码" aria-pressed="false">
+              <svg class="icon-show" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>
+              </svg>
+              <svg class="icon-hide" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M17.94 17.94A10.94 10.94 0 0 1 12 19c-6.5 0-10-7-10-7a18.45 18.45 0 0 1 4.06-5.06M9.9 4.24A10.94 10.94 0 0 1 12 4c6.5 0 10 7 10 7a18.5 18.5 0 0 1-2.16 3.19M14.12 14.12a3 3 0 1 1-4.24-4.24"/>
+                <path d="M1 1l22 22"/>
+              </svg>
+            </button>
+          </span>
+        </div>
 
-    <div class="form-section">
-      <label class="form-label" for="acct-confirm">确认新密码</label>
-      <input id="acct-confirm" type="password" name="confirm_password" autocomplete="new-password"
-             required minlength="8" placeholder="再次输入新密码">
-    </div>
+        <div class="password-field">
+          <label class="password-field-label" for="acct-new">
+            新密码
+            <small>≥ 8 位 · 五条规则需全部满足</small>
+          </label>
+          <span class="password-input-wrap">
+            <input id="acct-new" type="password" name="new_password" autocomplete="new-password"
+                   required minlength="8" placeholder="••••••••" data-password-input="new">
+            <button type="button" class="password-toggle" aria-label="显示密码" aria-pressed="false">
+              <svg class="icon-show" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>
+              </svg>
+              <svg class="icon-hide" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M17.94 17.94A10.94 10.94 0 0 1 12 19c-6.5 0-10-7-10-7a18.45 18.45 0 0 1 4.06-5.06M9.9 4.24A10.94 10.94 0 0 1 12 4c6.5 0 10 7 10 7a18.5 18.5 0 0 1-2.16 3.19M14.12 14.12a3 3 0 1 1-4.24-4.24"/>
+                <path d="M1 1l22 22"/>
+              </svg>
+            </button>
+          </span>
 
-    <p class="text-muted" style="margin: 0.5rem 0 1rem; font-size: 0.8125rem;">
-      密码以 bcrypt cost=12 哈希存储。修改成功后审计日志会记一条 <code>admin.password.change</code>。
-    </p>
+          {{/* 强度计分条 + 文案 */}}
+          <div class="password-strength" data-password-strength data-score="0">
+            <div class="password-strength-bars" aria-hidden="true">
+              <span></span><span></span><span></span><span></span><span></span>
+            </div>
+            <span class="password-strength-label">输入密码</span>
+          </div>
 
-    <div class="settings-actions settings-actions-end">
-      <a href="/" class="btn-secondary">取消</a>
-      <button type="submit" class="btn-primary">保存新密码</button>
+          {{/* 5 条规则 checklist */}}
+          <ul class="password-rules" data-password-rules>
+            <li class="password-rule" data-rule-id="len">
+              <span class="rule-mark" aria-hidden="true"></span>至少 8 位
+            </li>
+            <li class="password-rule" data-rule-id="lower">
+              <span class="rule-mark" aria-hidden="true"></span>包含小写 (a-z)
+            </li>
+            <li class="password-rule" data-rule-id="upper">
+              <span class="rule-mark" aria-hidden="true"></span>包含大写 (A-Z)
+            </li>
+            <li class="password-rule" data-rule-id="digit">
+              <span class="rule-mark" aria-hidden="true"></span>包含数字 (0-9)
+            </li>
+            <li class="password-rule" data-rule-id="special">
+              <span class="rule-mark" aria-hidden="true"></span>包含特殊 (!@#$)
+            </li>
+          </ul>
+        </div>
+
+        <div class="password-field">
+          <label class="password-field-label" for="acct-confirm">
+            确认新密码
+            <small>再次输入防止输错</small>
+          </label>
+          <span class="password-input-wrap">
+            <input id="acct-confirm" type="password" name="confirm_password" autocomplete="new-password"
+                   required minlength="8" placeholder="再次输入新密码" data-password-input="confirm">
+            <button type="button" class="password-toggle" aria-label="显示密码" aria-pressed="false">
+              <svg class="icon-show" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>
+              </svg>
+              <svg class="icon-hide" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M17.94 17.94A10.94 10.94 0 0 1 12 19c-6.5 0-10-7-10-7a18.45 18.45 0 0 1 4.06-5.06M9.9 4.24A10.94 10.94 0 0 1 12 4c6.5 0 10 7 10 7a18.5 18.5 0 0 1-2.16 3.19M14.12 14.12a3 3 0 1 1-4.24-4.24"/>
+                <path d="M1 1l22 22"/>
+              </svg>
+            </button>
+          </span>
+          <div class="password-match" data-password-match data-state="empty">
+            <span class="match-mark" aria-hidden="true"></span>
+            <span class="match-text">请再次输入新密码</span>
+          </div>
+        </div>
+
+        <div class="settings-actions settings-actions-end">
+          <a href="/" class="btn-secondary">取消</a>
+          <button type="submit" class="btn-primary" data-password-submit disabled data-password-lock="true">保存新密码</button>
+        </div>
+      </div>
+
+      {{/* 右:安全说明卡 */}}
+      <aside class="password-shell-aside" aria-label="密码安全说明">
+        <h3>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+          </svg>
+          密码安全建议
+        </h3>
+        <ul class="tip-list">
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg>
+            <span><strong>长度优先</strong> — 12 位以上的密码显著强于 8 位,即使字符集更小</span>
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg>
+            <span><strong>避免复用</strong> — 不要与其它服务(邮箱、GitHub 等)共用密码</span>
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg>
+            <span><strong>使用密码管理器</strong> — 让 1Password / Bitwarden 生成并保管随机密码</span>
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg>
+            <span><strong>定期更换</strong> — 每 90 天更换一次,并立即撤销旧密码</span>
+          </li>
+        </ul>
+        <div class="security-note">
+          密码以 <code>bcrypt cost=12</code> 哈希存储 · 修改成功后审计日志会记一条 <code>admin.password.change</code>
+        </div>
+      </aside>
     </div>
   </form>
 </section>

@@ -1473,6 +1473,11 @@ body.login-page main#main{
   background:rgba(34,211,238,0.06);
   box-shadow:0 0 0 3px var(--ikev2-brand-ring);
 }
+/* v2.86-pr23e:login 页 password 框右侧嵌入 .password-toggle,
+   把 input padding-right 加大避免文字被按钮盖住(其它类型 input 不受影响) */
+.login-field-input input[name="password"]{
+  padding-right:3rem;
+}
 
 .login-submit{
   margin-top:0.4rem;
@@ -1884,3 +1889,245 @@ body.login-page main#main{
 
 /* action buttons inline forms (users list) */
 form[style*="display:inline"]{ display:inline-flex;}
+
+/* ============================================================================
+   29. Password widget — strong-password composition with strength meter
+       + rules checklist + match indicator + show toggle.
+       Reusable on /account (改密) / /users (重置) / future signup pages.
+       设计 token 完全沿用 --ikev2-*,不引入新色。
+   ========================================================================== */
+.password-field{
+  display:flex; flex-direction:column; gap:0.45rem;
+  margin-bottom:1.25rem;
+}
+.password-field-label{
+  font-size:0.6875rem; font-weight:700;
+  text-transform:uppercase; letter-spacing:0.10em;
+  color:var(--ikev2-fg-muted);
+  display:flex; align-items:center; justify-content:space-between; gap:0.5rem;
+}
+.password-field-label small{
+  font-weight:500; color:var(--ikev2-fg-subtle);
+  text-transform:none; letter-spacing:0; font-size:0.75rem;
+}
+
+/* input wrapper — 让 eye 按钮贴在右侧,不影响 padding-left */
+.password-input-wrap{
+  position:relative; display:flex; align-items:center;
+}
+.password-input-wrap input[type="password"],
+.password-input-wrap input[type="text"]{
+  width:100%;
+  padding:0.6rem 3rem 0.6rem 0.95rem;
+  font-family:var(--ikev2-font-mono);
+  font-size:0.9375rem; letter-spacing:0.04em;
+}
+/* eye toggle — 纯按钮,absolute 定位不影响 layout */
+.password-toggle{
+  position:absolute; right:0.45rem; top:50%; transform:translateY(-50%);
+  display:inline-flex; align-items:center; justify-content:center;
+  width:34px; height:34px;
+  background:transparent; border:1px solid transparent;
+  color:var(--ikev2-fg-muted);
+  border-radius:var(--ikev2-radius);
+  cursor:pointer; padding:0;
+  transition:color .12s, background-color .12s, border-color .12s;
+}
+.password-toggle:hover{
+  color:var(--ikev2-brand);
+  background:rgba(34,211,238,0.10);
+  border-color:rgba(34,211,238,0.30);
+}
+.password-toggle[aria-pressed="true"]{
+  color:var(--ikev2-brand);
+  background:rgba(34,211,238,0.14);
+  border-color:rgba(34,211,238,0.40);
+}
+.password-toggle svg{ width:18px; height:18px;}
+.password-toggle .icon-hide{ display:none;}
+.password-toggle[aria-pressed="true"] .icon-show{ display:none;}
+.password-toggle[aria-pressed="true"] .icon-hide{ display:block;}
+
+/* strength meter — 5 段条 */
+.password-strength{
+  display:flex; align-items:center; gap:0.6rem;
+  margin-top:0.15rem;
+  font-size:0.75rem; color:var(--ikev2-fg-muted);
+}
+.password-strength-bars{
+  display:grid; grid-template-columns:repeat(5, 1fr); gap:3px;
+  flex:1 1 auto; max-width:160px;
+  height:6px;
+}
+.password-strength-bars > span{
+  background:rgba(255,255,255,0.08);
+  border-radius:2px;
+  transition:background-color .18s ease, box-shadow .18s ease;
+}
+.password-strength-label{
+  font-weight:700; font-size:0.6875rem;
+  text-transform:uppercase; letter-spacing:0.06em;
+  white-space:nowrap;
+  font-family:var(--ikev2-font-mono);
+}
+/* 0 段(empty):无颜色 */
+.password-strength[data-score="0"] .password-strength-label{ color:var(--ikev2-fg-subtle);}
+/* 1 段:弱(red) */
+.password-strength[data-score="1"] .password-strength-bars > span:nth-child(-n+1){
+  background:var(--ikev2-danger);
+  box-shadow:0 0 6px rgba(248,113,113,0.40);
+}
+.password-strength[data-score="1"] .password-strength-label{ color:var(--ikev2-danger-fg);}
+/* 2 段:偏弱(amber) */
+.password-strength[data-score="2"] .password-strength-bars > span:nth-child(-n+2){
+  background:var(--ikev2-warn);
+  box-shadow:0 0 6px rgba(251,191,36,0.40);
+}
+.password-strength[data-score="2"] .password-strength-label{ color:var(--ikev2-warn-fg);}
+/* 3 段:中(info blue) */
+.password-strength[data-score="3"] .password-strength-bars > span:nth-child(-n+3){
+  background:var(--ikev2-info);
+  box-shadow:0 0 6px rgba(96,165,250,0.40);
+}
+.password-strength[data-score="3"] .password-strength-label{ color:var(--ikev2-info-fg);}
+/* 4 段:强(brand cyan) — 已满足所有 5 条规则,长度 ≥ 12 奖励 */
+.password-strength[data-score="4"] .password-strength-bars > span{
+  background:var(--ikev2-brand);
+  box-shadow:0 0 8px rgba(34,211,238,0.50);
+}
+.password-strength[data-score="4"] .password-strength-label{ color:var(--ikev2-brand-hover);}
+
+/* rules checklist — 4-5 项,实时翻转 ok/fail */
+.password-rules{
+  display:grid; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr));
+  gap:0.35rem 0.85rem;
+  margin-top:0.4rem;
+  font-size:0.75rem; color:var(--ikev2-fg-subtle);
+}
+.password-rule{
+  display:inline-flex; align-items:center; gap:0.4rem;
+  line-height:1.4;
+}
+.password-rule .rule-mark{
+  display:inline-flex; align-items:center; justify-content:center;
+  width:14px; height:14px;
+  border-radius:50%;
+  border:1px solid rgba(255,255,255,0.14);
+  color:transparent;
+  font-size:0.625rem; font-weight:800;
+  transition:background-color .15s, border-color .15s, color .15s;
+  flex-shrink:0;
+}
+.password-rule.met{
+  color:var(--ikev2-ok-fg);
+}
+.password-rule.met .rule-mark{
+  background:var(--ikev2-ok); border-color:var(--ikev2-ok);
+  color:#04140a;
+}
+.password-rule.met .rule-mark::after{ content:"✓";}
+.password-rule.failed{
+  color:var(--ikev2-danger-fg);
+}
+.password-rule.failed .rule-mark{
+  background:var(--ikev2-danger-soft); border-color:rgba(248,113,113,0.45);
+  color:var(--ikev2-danger-fg);
+}
+.password-rule.failed .rule-mark::after{ content:"✕";}
+
+/* match indicator (确认密码行) */
+.password-match{
+  display:inline-flex; align-items:center; gap:0.45rem;
+  font-size:0.75rem; font-weight:600;
+  margin-top:0.2rem;
+  min-height:18px;
+}
+.password-match .match-mark{
+  display:inline-flex; align-items:center; justify-content:center;
+  width:14px; height:14px;
+  border-radius:50%;
+  font-size:0.625rem; font-weight:800;
+  transition:background-color .15s, border-color .15s, color .15s;
+}
+.password-match[data-state="empty"]{ color:var(--ikev2-fg-subtle);}
+.password-match[data-state="empty"] .match-mark{
+  border:1px solid rgba(255,255,255,0.14);
+  background:transparent; color:transparent;
+}
+.password-match[data-state="ok"]{
+  color:var(--ikev2-ok-fg);
+}
+.password-match[data-state="ok"] .match-mark{
+  background:var(--ikev2-ok); border-color:var(--ikev2-ok);
+  color:#04140a;
+}
+.password-match[data-state="ok"] .match-mark::after{ content:"✓";}
+.password-match[data-state="mismatch"]{
+  color:var(--ikev2-danger-fg);
+}
+.password-match[data-state="mismatch"] .match-mark{
+  background:var(--ikev2-danger-soft); border-color:rgba(248,113,113,0.45);
+  color:var(--ikev2-danger-fg);
+}
+.password-match[data-state="mismatch"] .match-mark::after{ content:"✕";}
+
+/* action button — disabled state 在 password 不可提交时显示 */
+.password-submit[disabled],
+button.password-submit[disabled],
+.btn-primary[disabled][data-password-lock="true"]{
+  opacity:0.45; cursor:not-allowed; filter:saturate(0.6);
+}
+
+/* 双列布局:account 页里 form + 右侧规则卡片 */
+.password-shell{
+  display:grid;
+  grid-template-columns:minmax(0, 1.3fr) minmax(0, 1fr);
+  gap:1.5rem;
+  align-items:start;
+}
+.password-shell-main{ min-width:0;}
+.password-shell-aside{
+  background:rgba(255,255,255,0.025);
+  border:1px solid var(--ikev2-bg-rule);
+  border-radius:var(--ikev2-radius-lg);
+  padding:1.25rem 1.4rem;
+  box-shadow:var(--ikev2-shadow-card);
+}
+.password-shell-aside h3{
+  margin:0 0 0.6rem; font-size:0.6875rem;
+  text-transform:uppercase; letter-spacing:0.10em;
+  color:var(--ikev2-fg-strong);
+  display:flex; align-items:center; gap:0.5rem;
+}
+.password-shell-aside h3 svg{ width:14px; height:14px; color:var(--ikev2-brand);}
+.password-shell-aside .tip-list{
+  list-style:none; padding:0; margin:0;
+  display:flex; flex-direction:column; gap:0.55rem;
+  font-size:0.8125rem; color:var(--ikev2-fg-muted); line-height:1.55;
+}
+.password-shell-aside .tip-list li{
+  display:flex; gap:0.55rem; align-items:flex-start;
+}
+.password-shell-aside .tip-list li svg{
+  flex-shrink:0; width:14px; height:14px;
+  color:var(--ikev2-brand); margin-top:3px;
+}
+.password-shell-aside .security-note{
+  margin-top:0.85rem;
+  padding-top:0.85rem;
+  border-top:1px solid var(--ikev2-bg-rule);
+  font-size:0.75rem; color:var(--ikev2-fg-subtle);
+  font-family:var(--ikev2-font-mono);
+  line-height:1.55;
+}
+.password-shell-aside .security-note code{
+  background:rgba(34,211,238,0.08);
+  border:1px solid rgba(34,211,238,0.25);
+  color:var(--ikev2-brand-hover);
+  padding:0.05em 0.45em;
+  border-radius:3px;
+  font-size:0.6875rem;
+}
+@media (max-width: 960px){
+  .password-shell{ grid-template-columns:1fr;}
+}
