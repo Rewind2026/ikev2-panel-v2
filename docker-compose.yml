@@ -223,7 +223,22 @@ services:
       IKEV2_DISPLAY_TIMEZONE: "${IKEV2_DISPLAY_TIMEZONE:-UTC}"
 
 volumes:
-  # 用 external 锁死旧 volume 名（跨项目名升级时不会创建新空 volume）。
-  # 创建方式：docker volume create ikev2-panel-v2_ikev2-data
+  # v2.86-PR17:去掉 external: true,改成 docker compose 自动建命名 volume。
+  #
+  # 之前 v2-72 加 external 的理由:锁死 volume 名(ikev2-panel-v2_ikev2-data),
+  # 防止跨项目名升级(比如项目目录从 ikev2-panel-v2 改成 ikev2-panel-v2-v2-86)
+  # 时 docker 自动建一个同名新空 volume,老 LE 证书 + panel.db 全丢。
+  #
+  # 这次去掉的原因:docker compose pull 成功,但 up -d 报 "external volume not
+  # found" —— fresh deploy(全新机器)没建过这个 volume,每次都要手动
+  # docker volume create 太反直觉。改成非 external 后:
+  #   - fresh deploy:`git clone + up.sh` 一次过,零额外步骤
+  #   - 老用户跨项目名升级:docker 会建一个空的 project_volume_name 同名
+  #     volume,老数据留在老 volume 里不丢(没被 mount → 不会被容器清空),
+  #     需要 `docker volume rename old new` 后再 `up -d` 才能复用。
+  #
+  # volume 名规则:`{project_dir_name}_ikev2-data`。项目目录名稳定为
+  # `ikev2-panel-v2` 时,volume 名恒为 `ikev2-panel-v2_ikev2-data`,
+  # 老用户数据可继续复用。
   ikev2-panel-v2_ikev2-data:
-    external: true
+    # 无需 external;docker compose 自动建。
