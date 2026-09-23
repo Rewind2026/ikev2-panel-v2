@@ -1,0 +1,52 @@
+{{/*
+  web/templates/user_new_content.html — v2.86-PR-Redesign
+*/}}
+<header class="page-header">
+  <hgroup>
+    <h1>New User</h1>
+    <p class="page-sub">创建一个新的 VPN 用户</p>
+  </hgroup>
+  <div class="page-actions">
+    <a href="/users" class="btn-secondary">← Back</a>
+  </div>
+</header>
+
+{{if .Error}}<div class="banner-danger alert-danger">{{.Error}}</div>{{end}}
+
+<form method="POST" action="/users" class="card card-pad" style="max-width: 640px;">
+  <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+
+  <div class="form-section">
+    <label class="form-label" for="new-username">Username</label>
+    <input id="new-username" name="username" value="{{.Username}}" required autofocus
+           placeholder="3-32 chars · [a-z0-9_-]">
+  </div>
+
+  <div class="form-section">
+    <label class="form-label" for="new-note">Note <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(≤200 字)</small></label>
+    <input id="new-note" name="note" value="{{.Note}}" maxlength="200">
+  </div>
+
+  <div class="form-row">
+    <div class="form-section">
+      <label class="form-label" for="new-speed">Speed Limit <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(Mbps, 0 = unlimited)</small></label>
+      <input id="new-speed" name="speed_limit_mbps" type="number" min="0" max="1000" value="{{.SpeedLimit}}">
+    </div>
+    <div class="form-section">
+      <label class="form-label" for="new-expires">Expires <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(YYYY-MM-DD, empty = never)</small></label>
+      <input id="new-expires" name="expires_at" type="text" placeholder="2026-12-31" value="{{.ExpiresAt}}">
+    </div>
+  </div>
+
+  <div class="form-section">
+    <label style="display:flex; align-items:center; gap:0.5rem;">
+      <input type="checkbox" name="enabled" value="1" {{if .Enabled}}checked{{end}}>
+      <span style="font-size:0.875rem;">Enabled immediately</span>
+    </label>
+  </div>
+
+  <div class="settings-actions settings-actions-end">
+    <a href="/users" class="btn-secondary">Cancel</a>
+    <button type="submit" class="btn-primary">Create User (auto 12-char password)</button>
+  </div>
+</form>

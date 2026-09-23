@@ -1,0 +1,71 @@
+{{/*
+  web/templates/users_list_content.html — v2.86-PR-Redesign
+  EZZON 风格 page-header + 卡片化表格 + 胶囊操作按钮
+*/}}
+<header class="page-header">
+  <hgroup>
+    <h1>Users</h1>
+    <p class="page-sub">{{len .Users}} 个账号 · 管理签发的证书、限速、流量</p>
+  </hgroup>
+  <div class="page-actions">
+    <a href="/users/new" class="btn-primary">+ New User</a>
+  </div>
+</header>
+
+{{if .Flash}}<div class="banner-warn alert-warn">{{.Flash}}</div>{{end}}
+{{if .NewPassword}}
+<div class="banner-warn alert-warn">
+  <div>
+    <strong>用户密码已生成:</strong><code style="font-size: 0.9375rem;">{{.NewPassword}}</code>
+    <small style="display: block; margin-top: 0.4rem;">⚠️ 仅显示这一次，请记录后再关闭。</small>
+  </div>
+</div>
+{{end}}
+
+{{if .Users}}
+<div class="users-table">
+  <div class="users-grid users-grid-head" role="row">
+    <div class="cell cell-id">ID</div>
+    <div class="cell cell-name">Username</div>
+    <div class="cell cell-status">Status</div>
+    <div class="cell cell-limit">Limit</div>
+    <div class="cell cell-expires">Expires</div>
+    <div class="cell cell-traffic">Traffic</div>
+    <div class="cell cell-seen">Last Seen</div>
+    <div class="cell cell-note">Note</div>
+    <div class="cell cell-actions">Actions</div>
+  </div>
+  {{range .Users}}
+  <div class="users-grid users-grid-row" role="row">
+    <div class="cell cell-id user-id" data-label="ID">#{{.ID}}</div>
+    <div class="cell cell-name user-name" data-label="Username"><a href="/users/{{.ID}}">{{.Username}}</a></div>
+    <div class="cell cell-status" data-label="Status">
+      {{if .Enabled}}<span class="chip ok no-dot">Enabled</span>
+      {{else}}<span class="chip muted no-dot">Disabled</span>{{end}}
+    </div>
+    <div class="cell cell-limit" data-label="Limit">{{if eq .SpeedLimitMbps 0}}<span class="text-muted">unlimited</span>{{else}}<code>{{.SpeedLimitMbps}} Mbps</code>{{end}}</div>
+    <div class="cell cell-expires" data-label="Expires">{{if eq .ExpiresAt 0}}<span class="text-muted">never</span>{{else}}<code>{{formatTime .ExpiresAt}}</code>{{end}}</div>
+    <div class="cell cell-traffic" data-label="Traffic"><code>↓ {{formatBytes .BytesInTotal}} / ↑ {{formatBytes .BytesOutTotal}}</code></div>
+    <div class="cell cell-seen" data-label="Last Seen">{{if eq .LastUsedAt 0}}<span class="text-muted">never</span>{{else}}<code>{{formatTime .LastUsedAt}}</code>{{end}}</div>
+    <div class="cell cell-note" data-label="Note">{{.Note}}</div>
+    <div class="cell cell-actions user-actions" data-label="Actions">
+      <a href="/users/{{.ID}}" class="btn-secondary btn-sm">View</a>
+      <a href="/users/{{.ID}}/delete" class="btn-danger btn-sm">Delete</a>
+    </div>
+  </div>
+  {{end}}
+</div>
+{{else}}
+<article>
+  <div class="empty-state">
+    <svg class="empty-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/>
+      <circle cx="9" cy="7" r="4"/>
+      <path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>
+    </svg>
+    <div class="empty-title">No Users Yet</div>
+    <div class="empty-hint">创建用户后会出现在这里，他们可以在 iOS / macOS / Android / Linux 上扫码配置 VPN</div>
+    <a href="/users/new" class="btn-primary">+ Create First User</a>
+  </div>
+</article>
+{{end}}

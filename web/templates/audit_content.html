@@ -1,0 +1,51 @@
+{{/*
+  web/templates/audit_content.html — v2.86-PR-Redesign
+*/}}
+<header class="page-header">
+  <hgroup>
+    <h1>Audit Log</h1>
+    <p class="page-sub">最近 {{len .Events}} 条 · SA 生命周期 + 用户/凭证变更 + 管理员操作</p>
+  </hgroup>
+  <div class="page-actions">
+    <span class="chip muted">{{len .Events}} entries</span>
+  </div>
+</header>
+
+{{if .Events}}
+<div class="timeline">
+  {{range .Events}}
+  <div class="timeline-row">
+    <span class="timeline-dot {{auditSeverity .Event}}"></span>
+    <span class="timeline-time">{{formatUnixNano .Timestamp}}</span>
+    <span class="timeline-event">
+      <span class="chip {{auditSeverity .Event}} no-dot">{{.Event}}</span>
+    </span>
+    <span class="timeline-actor">
+      {{if .Actor}}<code>{{.Actor}}</code>{{else}}<span class="text-muted">system</span>{{end}}
+    </span>
+    <span class="timeline-detail">
+      {{$kv := parseAuditDetails .Details}}
+      {{range $kv}}<span class="kv-inline"><span class="k">{{.K}}</span>{{.V}}</span> {{end}}
+    </span>
+  </div>
+  {{end}}
+</div>
+{{else}}
+<article>
+  <div class="empty-state">
+    <svg class="empty-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+      <polyline points="14 2 14 8 20 8"/>
+      <line x1="9" y1="13" x2="15" y2="13"/>
+      <line x1="9" y1="17" x2="13" y2="17"/>
+    </svg>
+    <div class="empty-title">No Logs Yet</div>
+    <div class="empty-hint">用户创建 / 删除、阿里云凭证变更、DDNS 切换、SA 生命周期事件都会自动写入审计。
+       详情见 <a href="/docs/TROUBLESHOOTING.md" target="_blank" rel="noopener">TROUBLESHOOTING</a>。</div>
+  </div>
+</article>
+{{end}}
+
+<div class="mt-5">
+  <a href="/" class="btn-secondary">← Back to Home</a>
+</div>

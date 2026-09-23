@@ -1,0 +1,314 @@
+{{/*
+  web/templates/user_detail_content.html — v2.86-PR-Redesign
+  EZZON 风格：发光 avatar + 顶部 cyan 高光线 + SideStats + OS Tabs
+*/}}
+
+<div class="user-detail-header">
+  <div class="user-avatar" aria-hidden="true">{{slice .User.Username 0 1}}</div>
+  <div class="user-meta">
+    <h1>
+      <span>{{.User.Username}}</span>
+      {{if .User.Enabled}}<span class="chip ok no-dot">Enabled</span>{{else}}<span class="chip danger no-dot">Disabled</span>{{end}}
+      {{if .UserOnline}}<span class="chip brand no-dot">Online</span>{{end}}
+    </h1>
+    <p class="page-sub">
+      <code>#{{.User.ID}}</code>
+      {{if .User.Note}}· {{.User.Note}}{{end}}
+    </p>
+    <div class="user-quick-stats">
+      {{if gt .User.SpeedLimitMbps 0}}
+      <div class="user-quick-stat">
+        <span class="qs-label">Speed Limit</span>
+        <span class="qs-value">{{.User.SpeedLimitMbps}} Mbps</span>
+      </div>
+      {{end}}
+      <div class="user-quick-stat">
+        <span class="qs-label">Expires</span>
+        <span class="qs-value">{{if eq .User.ExpiresAt 0}}never{{else}}{{formatTime .User.ExpiresAt}}{{end}}</span>
+      </div>
+      <div class="user-quick-stat">
+        <span class="qs-label">Bytes In</span>
+        <span class="qs-value">{{formatBytes .User.BytesInTotal}}</span>
+      </div>
+      <div class="user-quick-stat">
+        <span class="qs-label">Bytes Out</span>
+        <span class="qs-value">{{formatBytes .User.BytesOutTotal}}</span>
+      </div>
+      <div class="user-quick-stat">
+        <span class="qs-label">Created</span>
+        <span class="qs-value">{{if .User.CreatedAt}}{{formatTime .User.CreatedAt}}{{else}}—{{end}}</span>
+      </div>
+      <div class="user-quick-stat">
+        <span class="qs-label">Last Seen</span>
+        <span class="qs-value {{if .UserOnline}}ok{{end}}">{{if eq .User.LastUsedAt 0}}never{{else}}{{formatTime .User.LastUsedAt}}{{end}}</span>
+      </div>
+    </div>
+  </div>
+  <div class="user-detail-actions">
+    <a href="/users" class="btn-secondary btn-sm">← Back</a>
+    <form method="POST" action="/users/{{.User.ID}}/reset" style="display:inline-flex;">
+      <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+      <button type="submit" class="btn-secondary btn-sm" onclick="return confirm('重置 {{.User.Username}} 的密码?')">Reset Password</button>
+    </form>
+    <a href="/users/{{.User.ID}}/delete" class="btn-danger btn-sm" onclick="return confirm('确认删除 {{.User.Username}}?此操作不可逆。')">Delete</a>
+  </div>
+</div>
+
+{{if .Flash}}<div class="banner-warn alert-warn">{{.Flash}}</div>{{end}}
+{{if .NewPassword}}
+<div class="banner-warn alert-warn">
+  <div>
+    <strong>用户密码已重置:</strong><code style="font-size: 0.9375rem;">{{.NewPassword}}</code>
+    <small style="display: block; margin-top: 0.4rem;">⚠️ 仅显示这一次，请记录后再关闭。</small>
+  </div>
+</div>
+{{end}}
+{{if .Error}}<div class="banner-danger alert-danger">{{.Error}}</div>{{end}}
+
+<div class="dashboard-grid">
+  <div class="dashboard-main">
+
+    {{/* 拓扑画布 (此用户聚焦) */}}
+    <div class="topology"
+         data-server-addr="{{.ServerAddr}}"
+         data-server-state="{{if .User.Enabled}}ok{{else}}warn{{end}}"
+         data-clients='{{jsonOneClient .User .UserOnline}}'
+         data-focus-user="{{.User.Username}}"
+         data-height="280">
+    </div>
+
+    {{/* 客户端配置 */}}
+    <div class="card-head" style="margin-top: 1.5rem; margin-bottom: 0; padding-left: 0; padding-right: 0; border: 0; background: transparent;">
+      <h2 style="font-size: 0.875rem; text-transform: uppercase; letter-spacing: 0.10em;">Client Config</h2>
+    </div>
+    <article class="card card-pad">
+      <div class="os-tabs">
+        <button type="button" data-os-key="apple">
+          <span>iOS / macOS</span>
+          <span class="os-hint">QR 最简</span>
+        </button>
+        <button type="button" data-os-key="android-native">
+          <span>Android 11+</span>
+          <span class="os-hint">no app</span>
+        </button>
+        <button type="button" data-os-key="android-app">
+          <span>Android strongSwan</span>
+          <span class="os-hint">legacy / pro</span>
+        </button>
+        <button type="button" data-os-key="linux">
+          <span>Linux</span>
+          <span class="os-hint">CLI</span>
+        </button>
+        <button type="button" data-os-key="ca">
+          <span>CA Cert</span>
+          <span class="os-hint">verify</span>
+        </button>
+      </div>
+
+      <div class="os-panel" data-os-key="apple">
+        <div class="qr-card">
+          <div class="qr-img"><img src="/users/{{.User.ID}}/mobileconfig.qr.png" alt="mobileconfig QR"></div>
+          <div class="qr-info">
+            <div class="qr-title">iOS / macOS</div>
+            <p class="text-sm">用 Safari 打开链接 → 设置 → 通用 → VPN 与设备管理 → 安装描述文件。</p>
+            <a href="/users/{{.User.ID}}/mobileconfig" class="btn-primary btn-sm" role="button">Download .mobileconfig</a>
+          </div>
+        </div>
+
+        <details class="mobileconfig-options">
+          <summary>⚙️ 高级选项（每用户 mobileconfig 覆盖）</summary>
+          <p class="text-sm text-muted">
+            这些参数只影响本用户下载的 .mobileconfig，不影响其他人。
+            修改后下次扫码 / 下载自动生效，无需重新配置服务端。
+            优先级：<strong>本用户 overlay &gt; 管理员全局默认 &gt; 出厂</strong>。
+            想改所有用户的默认值，到 <a href="/admin/mobileconfig-defaults">管理员后台 → 配置 → Mobileconfig 默认值</a>。
+          </p>
+
+          <form method="POST" action="/users/{{.User.ID}}/mobileconfig-options" id="mc-opts-form">
+            <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+
+            <div class="form-section">
+              <label class="form-label" for="mco-name">连接显示名</label>
+              <input id="mco-name" type="text" name="user_defined_name" maxlength="64"
+                     placeholder="留空 = IKEv2 VPN"
+                     title="iOS 设置里的连接名称，留空用默认（不能含 < > & 等特殊字符）">
+            </div>
+
+            <div class="form-section">
+              <label class="form-label" for="mco-profile">按需连接场景 (OnDemand)</label>
+              <select id="mco-profile" name="on_demand_profile">
+                <option value="">— 使用全局默认（始终连接）—</option>
+                <option value="always">始终连接（任何网络都连）</option>
+                <option value="home_wifi_disconnect">家里 Wi-Fi 断开 VPN（填 SSID）</option>
+                <option value="cellular_only">仅蜂窝连接 VPN，Wi-Fi 不连</option>
+                <option value="captive_probe">智能判断（能上 internet.apple.com 不连，否则连）</option>
+                <option value="manual">完全手动（关闭按需，自己点连接）</option>
+              </select>
+            </div>
+
+            <div class="form-section">
+              <label class="form-label" for="mco-ssid">家里 Wi-Fi SSID <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(仅 home_wifi_disconnect 模式用)</small></label>
+              <input id="mco-ssid" type="text" name="ondemand_ssid" maxlength="32" placeholder="例如 Home-5G">
+            </div>
+
+            <div class="form-row">
+              <div class="form-section">
+                <label class="form-label" for="mco-on-demand">启用按需自动连接</label>
+                <select id="mco-on-demand" name="on_demand_enabled">
+                  <option value="">— 用全局默认 —</option>
+                  <option value="1">启用</option>
+                  <option value="0">停用</option>
+                </select>
+              </div>
+              <div class="form-section">
+                <label class="form-label" for="mco-sleep">睡眠时断开 VPN</label>
+                <select id="mco-sleep" name="disconnect_on_sleep">
+                  <option value="">— 用全局默认 —</option>
+                  <option value="1">是（锁屏断 VPN，省电）</option>
+                  <option value="0">否（锁屏保持连接，推送及时）</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="form-row">
+              <div class="form-section">
+                <label class="form-label" for="mco-keepalive">NAT 保活</label>
+                <select id="mco-keepalive" name="nat_keepalive_enabled">
+                  <option value="">— 用全局默认 —</option>
+                  <option value="1">启用（防运营商 NAT 过期）</option>
+                  <option value="0">停用</option>
+                </select>
+              </div>
+              <div class="form-section">
+                <label class="form-label" for="mco-keepalive-int">NAT 保活间隔 <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(秒)</small></label>
+                <input id="mco-keepalive-int" type="number" name="nat_keepalive_interval" min="20" max="600"
+                       placeholder="20–600，默认 60">
+              </div>
+            </div>
+
+            <div class="form-row">
+              <div class="form-section">
+                <label class="form-label" for="mco-include-all">全局路由（全部流量进 VPN）</label>
+                <select id="mco-include-all" name="include_all_networks">
+                  <option value="">— 用全局默认 —</option>
+                  <option value="1">是（推荐，iOS 17+ 默认行为）</option>
+                  <option value="0">否（split tunnel，部分流量直连）</option>
+                </select>
+              </div>
+              <div class="form-section">
+                <label class="form-label" for="mco-exclude-lan">排除局域网（192.168/10/172.16）</label>
+                <select id="mco-exclude-lan" name="exclude_local_networks">
+                  <option value="">— 用全局默认 —</option>
+                  <option value="1">是（保留局域网访问，推荐）</option>
+                  <option value="0">否（所有流量走 VPN）</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="form-section">
+              <label class="form-label" for="mco-dns">DNS 服务器 <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(每行一个 IP，最多 6 个)</small></label>
+              <textarea id="mco-dns" name="dns_servers" rows="4" placeholder="1.1.1.1&#10;8.8.8.8&#10;2606:4700:4700::1111"></textarea>
+            </div>
+
+            <div class="form-section">
+              <label class="form-label" for="mco-dpd">DPD 心跳速率</label>
+              <select id="mco-dpd" name="dead_peer_detection_rate">
+                <option value="">— 用全局默认 —</option>
+                <option value="None">None（不检测）</option>
+                <option value="Low">Low（30 分钟）</option>
+                <option value="Medium">Medium（10 分钟，默认）</option>
+                <option value="High">High（1 分钟）</option>
+              </select>
+            </div>
+
+            <div class="settings-actions settings-actions-end">
+              <button type="submit" name="clear" value="1" class="btn-danger"
+                      onclick="return confirm('清空所有覆盖项，回到全局默认?')">Reset to Defaults</button>
+              <button type="submit" class="btn-primary">Save（next download effective）</button>
+            </div>
+          </form>
+        </details>
+      </div>
+
+      <div class="os-panel" data-os-key="android-native">
+        <h3>Android 11+ 系统原生</h3>
+        <p>无需第三方 app。</p>
+        <ol style="padding-left: 1.5rem; margin: 0; line-height: 1.8;">
+          <li>设置 → 网络和互联网 → VPN → 添加 VPN</li>
+          <li>类型选 <strong>IKEv2/IPsec MSCHAPv2</strong></li>
+          <li>按 <a href="/users/{{.User.ID}}/android">此处参数</a> 填入 server / CN / 用户名 / 密码</li>
+          <li>保存 → 连接</li>
+        </ol>
+      </div>
+
+      <div class="os-panel" data-os-key="android-app">
+        <h3>Android strongSwan app</h3>
+        <p>用于旧版 Android 或需要更精细控制。</p>
+        <a href="/users/{{.User.ID}}/sswan" class="btn-primary" role="button">Download .sswan</a>
+        <p class="text-sm text-muted mt-3">导入 strongSwan app → 添加 profile → 选择 .sswan 文件。<small>（不含密码 — app 需手动输入）</small></p>
+      </div>
+
+      <div class="os-panel" data-os-key="linux">
+        <h3>Linux strongSwan</h3>
+        <p>命令行客户端配置。</p>
+        <a href="/users/{{.User.ID}}/sswan" class="btn-primary" role="button">Download .sswan</a>
+        <div class="terminal-card">
+          <div class="term-header">
+            <span class="term-title">Install</span>
+            <button type="button" class="copy-btn" data-copy-text="sudo cp {{.User.Username}}.conf /etc/swanctl/conf.d/&#10;sudo swanctl --load-all&#10;sudo swanctl -i {{.User.Username}}">Copy</button>
+          </div>
+          <pre><code><span class="term-comment"># 1. 复制到 swanctl 配置目录</span>
+<span class="term-prompt">$</span> sudo cp {{.User.Username}}.conf /etc/swanctl/conf.d/
+<span class="term-comment"># 2. 加载所有配置</span>
+<span class="term-prompt">$</span> sudo swanctl --load-all
+<span class="term-comment"># 3. 启动连接</span>
+<span class="term-prompt">$</span> sudo swanctl -i {{.User.Username}}</code></pre>
+        </div>
+      </div>
+
+      <div class="os-panel" data-os-key="ca">
+        <h3>CA 证书</h3>
+        <p>Android 原生 / strongSwan app / Linux 客户端都要先装 CA 证书才能验证服务器身份。</p>
+        <a href="/ca.cert.pem" class="btn-primary" role="button">Download ca.cert.pem</a>
+        <p class="text-sm text-muted mt-3">Android 需要单独安装 CA 证书；iOS / macOS 已通过 .mobileconfig 自动安装。</p>
+      </div>
+    </article>
+
+  </div>
+
+  <aside class="dashboard-side">
+
+    {{if .User.Note}}
+    <div class="card">
+      <div class="card-head">
+        <h3>Note</h3>
+      </div>
+      <div class="card-body-tight" style="font-size: 0.875rem; line-height: 1.6;">{{.User.Note}}</div>
+    </div>
+    {{end}}
+
+    <div class="card">
+      <div class="card-head">
+        <h3>User Actions</h3>
+      </div>
+      <div class="card-body-tight" style="display: flex; flex-direction: column; gap: 0.5rem;">
+        {{if .User.Enabled}}
+          <form method="POST" action="/users/{{.User.ID}}/disable" onsubmit="return confirm('确认停用?正在连接的客户端会被踢下线，无法撤销。')">
+            <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+            <button type="submit" class="btn-secondary btn-block">Disable Account</button>
+          </form>
+        {{else}}
+          <form method="POST" action="/users/{{.User.ID}}/enable">
+            <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+            <button type="submit" class="btn-primary btn-block">Enable Account</button>
+          </form>
+        {{end}}
+      </div>
+    </div>
+
+  </aside>
+</div>
+
+<div class="mt-5">
+  <a href="/users" class="btn-secondary">← Back to Users</a>
+</div>

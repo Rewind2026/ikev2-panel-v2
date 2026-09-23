@@ -1,0 +1,334 @@
+{{/*
+  web/templates/layout.html — v2.86-PR-Redesign (EZZON-flavored visual language)
+  -------------------------------------------------------------------------
+  EZZON 风格外壳：
+    - 深黑底 + 青蓝霓虹 (#22d3ee) 作为主色
+    - 顶部 56px 顶栏：brand-mark + 横向 nav + HUD 大数字区 + preset chip + user pill
+    - 主体居中 1320px max-width
+    - 保留所有现有 data-page/PageKey/assetVersion 行为，不破坏 Go 后端合约
+
+  CSP 模式 (v2.86-PR-Fix):
+    secureHeaders.go 设置 script-src 'self' 'nonce-{per-request}',每个响应一个 nonce。
+    本 layout.html 把交互 JS (theme / dismissable / OS tabs / copy-btn) inline 在
+    <script nonce="{{.CSPNonce}}"> 块里,nonce 由 RenderPage 从 r.Context 注入。
+    浏览器只执行 nonce 与 CSP header 一致的 inline 块,XSS 攻击者无法塞进新脚本。
+    不再需要 /static/js/ui.js (已删除)。
+*/}}
+
+{{define "layout"}}<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{.Title}} · IKEv2 Panel</title>
+    <link rel="stylesheet" href="/static/style.css{{assetVersion "/static/style.css"}}">
+    <script src="/static/js/topology.js{{assetVersion "/static/js/topology.js"}}" defer></script>
+  </head>
+  <body data-page="{{.PageKey}}" {{if eq .PageKey "login"}}class="login-page"{{end}}>
+    {{template "topbar" .}}
+    <a href="#main" class="skip-link">跳转到主内容</a>
+    <main id="main" tabindex="-1">
+      {{.BodyHTML}}
+    </main>
+    <script nonce="{{.CSPNonce}}">
+      // v2.86-PR-Fix:交互 handler (topbar active / dismissable / OS tabs / copy-btn)。
+      // CSP nonce 保证浏览器执行;layout 渲染时 .CSPNonce 必填 (RenderPage 注入)。
+      (function () {
+        'use strict';
+
+        function initTopbarActive() {
+          var page = (document.body && document.body.getAttribute('data-page')) || '';
+          if (!page) return;
+          document.querySelectorAll('.topbar-nav a[data-page-key]').forEach(function (a) {
+            if (a.getAttribute('data-page-key') === page) a.classList.add('active');
+          });
+        }
+
+        function initDismissable() {
+          document.querySelectorAll('.dismissable').forEach(function (el) {
+            if (el.__ikev2DismissableInit) return;
+            el.__ikev2DismissableInit = true;
+            var key = el.getAttribute('data-dismiss-key');
+            if (key) {
+              try {
+                if (localStorage.getItem('ikev2-dismiss-' + key) === '1') {
+                  el.remove();
+                  return;
+                }
+              } catch (e) {}
+            }
+            var btn = el.querySelector('.dismiss');
+            if (!btn) return;
+            btn.addEventListener('click', function (ev) {
+              ev.preventDefault();
+              ev.stopPropagation();
+              if (key) {
+                try { localStorage.setItem('ikev2-dismiss-' + key, '1'); } catch (e) {}
+              }
+              el.classList.add('is-dismissing');
+              var done = function () { el.remove(); };
+              el.addEventListener('animationend', done, { once: true });
+              setTimeout(done, 280);
+            });
+          });
+        }
+
+        function initOsTabs() {
+          document.querySelectorAll('.os-tabs').forEach(function (tabs) {
+            if (tabs.__ikev2OsTabsInit) return;
+            tabs.__ikev2OsTabsInit = true;
+            var stored = null;
+            try { stored = localStorage.getItem('ikev2-os-tab'); } catch (e) {}
+            var firstBtn = tabs.querySelector('button');
+            var defaultKey = firstBtn ? firstBtn.getAttribute('data-os-key') : null;
+            var activeKey = stored || defaultKey;
+            var root = tabs.parentElement;
+            var panels = root ? Array.prototype.slice.call(root.querySelectorAll('.os-panel')) : [];
+            // 当前激活的 panel(避免并发切换)
+            var currentPanel = null;
+            // 标记正在切换中,防止用户狂点导致错位
+            var switching = false;
+
+            // 把每个 panel 的直接子元素包进单一 wrapper,
+            // 这样 grid-template-rows:0fr → 1fr 才能真正塌缩/展开。
+            // 模板结构不变(改 CSS + JS 自动包裹)。
+            panels.forEach(function (p) {
+              if (p.__ikev2OsPanelWrapped) return;
+              p.__ikev2OsPanelWrapped = true;
+              // 已经包过(用户来回切页面)就不重复
+              if (p.children.length > 0 && !p.querySelector(':scope > .os-panel-inner')) {
+                var inner = document.createElement('div');
+                inner.className = 'os-panel-inner';
+                while (p.firstChild) inner.appendChild(p.firstChild);
+                p.appendChild(inner);
+              }
+            });
+
+            // ★ 关键:首次初始化时,锁定容器(article)的 min-height = 所有 panel 中最大自然高度,
+            // 这样切换 tab 时 article 高度不会跳动,active panel 始终在 tab bar 下方 14px 处。
+            if (!root.__ikev2OsTabsSizing) {
+              root.__ikev2OsTabsSizing = true;
+              // 先临时让所有 panel 可见(用 absolute 之前)以测量自然高度
+              var probe = document.createElement('div');
+              probe.style.cssText = 'position:absolute;visibility:hidden;left:-9999px;top:0;width:' + (root.clientWidth || 800) + 'px;';
+              document.body.appendChild(probe);
+              var maxH = 0;
+              panels.forEach(function (p) {
+                var clone = p.cloneNode(true);
+                clone.classList.add('active');  // 强制 grid 展开
+                clone.style.cssText = 'position:static;visibility:visible;opacity:1;display:block;';
+                probe.appendChild(clone);
+                var h = clone.offsetHeight;
+                if (h > maxH) maxH = h;
+                probe.removeChild(clone);
+              });
+              document.body.removeChild(probe);
+              if (maxH > 0) {
+                // 给 article 设置一个 padding-bottom 兜底,避免内容贴边
+                root.style.minHeight = (maxH + 32) + 'px';
+              }
+            }
+
+            function setBtnActive(key) {
+              tabs.querySelectorAll('button').forEach(function (b) {
+                b.classList.toggle('active', b.getAttribute('data-os-key') === key);
+              });
+            }
+
+            // 立即切换(初次加载或 reduced-motion)—— 不带过渡
+            function activateImmediate(key) {
+              panels.forEach(function (p) {
+                p.classList.toggle('active', p.getAttribute('data-os-key') === key);
+              });
+              currentPanel = panels.find(function (p) { return p.classList.contains('active'); }) || null;
+            }
+
+            // 平滑切换(用户点击)—— 先淡出旧 → 切换 active → 淡入新
+            function activateSmooth(newKey) {
+              if (switching) return;
+              var target = panels.find(function (p) { return p.getAttribute('data-os-key') === newKey; });
+              if (!target || target === currentPanel) return;
+              switching = true;
+
+              // 若旧 panel 仍在,等其淡出结束再切
+              var oldPanel = currentPanel;
+              var doSwap = function () {
+                if (oldPanel) oldPanel.classList.remove('active');
+                // 一帧后让新 panel 进入,以触发 transition
+                requestAnimationFrame(function () {
+                  target.classList.add('active');
+                  currentPanel = target;
+                  // 等过渡结束(取 grid+opacity 的最长耗时)
+                  var done = function () {
+                    switching = false;
+                    target.removeEventListener('transitionend', done);
+                  };
+                  target.addEventListener('transitionend', done);
+                  // 兜底:即使 transitionend 没触发(罕见),也强制解锁
+                  setTimeout(done, 360);
+                });
+              };
+
+              if (oldPanel && getComputedStyle(oldPanel).opacity !== '0') {
+                // 强制触发淡出
+                oldPanel.classList.add('is-leaving');
+                var onLeave = function () {
+                  oldPanel.removeEventListener('transitionend', onLeave);
+                  oldPanel.classList.remove('is-leaving');
+                  doSwap();
+                };
+                oldPanel.addEventListener('transitionend', onLeave);
+                // 兜底
+                setTimeout(onLeave, 200);
+              } else {
+                doSwap();
+              }
+            }
+
+            if (activeKey) activateImmediate(activeKey);
+
+            tabs.querySelectorAll('button').forEach(function (btn) {
+              btn.addEventListener('click', function (ev) {
+                ev.preventDefault();  // 防止 <button> 在 form 内意外触发表单提交
+                var key = btn.getAttribute('data-os-key');
+                if (!key) return;
+                setBtnActive(key);
+                try { localStorage.setItem('ikev2-os-tab', key); } catch (e) {}
+                // 优先走平滑过渡;若浏览器不支持 grid-template-rows 动画则退化到立即切换
+                var supportsRowAnim = (function () {
+                  try {
+                    var t = document.createElement('div');
+                    t.style.display = 'grid';
+                    t.style.gridTemplateRows = '0fr';
+                    t.style.transition = 'grid-template-rows 1ms';
+                    document.body.appendChild(t);
+                    var c = getComputedStyle(t).transitionProperty;
+                    document.body.removeChild(t);
+                    return c && c.indexOf('grid-template-rows') !== -1;
+                  } catch (e) { return false; }
+                })();
+                if (supportsRowAnim) {
+                  activateSmooth(key);
+                } else {
+                  activateImmediate(key);
+                }
+              });
+            });
+          });
+        }
+
+        function initCopyBtn() {
+          document.querySelectorAll('.copy-btn').forEach(function (btn) {
+            if (btn.__ikev2CopyInit) return;
+            btn.__ikev2CopyInit = true;
+            btn.addEventListener('click', function (e) {
+              e.preventDefault();
+              var target = btn.getAttribute('data-copy-target');
+              var text = btn.getAttribute('data-copy-text');
+              if (target) {
+                var el = document.querySelector(target);
+                if (el) text = el.value || el.textContent || el.innerText;
+              }
+              if (!text) return;
+              if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(text).then(function () {
+                  var orig = btn.textContent;
+                  btn.textContent = '已复制 ✓';
+                  setTimeout(function () { btn.textContent = orig; }, 1500);
+                }).catch(function () { fallbackCopy(btn, text); });
+              } else {
+                fallbackCopy(btn, text);
+              }
+            });
+          });
+        }
+
+        function fallbackCopy(btn, text) {
+          var t = document.createElement('textarea');
+          t.value = text;
+          document.body.appendChild(t);
+          t.select();
+          try { document.execCommand('copy'); } catch (e) {}
+          t.remove();
+          var orig = btn.textContent;
+          btn.textContent = '已复制 ✓';
+          setTimeout(function () { btn.textContent = orig; }, 1500);
+        }
+
+        function initAll() {
+          initTopbarActive();
+          initDismissable();
+          initOsTabs();
+          initCopyBtn();
+        }
+
+        // 此 <script> 在 </body> 前直接执行,DOM 已解析,querySelector 立即可用。
+        // 仍绑一道 DOMContentLoaded 兜底,防 layout 被插入 <script> 之前的 DOM 突变。
+        initAll();
+        if (document.readyState === 'loading') {
+          document.addEventListener('DOMContentLoaded', initAll);
+        }
+      })();
+    </script>
+  </body>
+</html>
+{{end}}
+
+{{/*
+  topbar — 56px sticky
+    [I] IKEV2 PANEL  ← HOME  USERS  AUDIT  CONFIG.    [PRESET n]   USERS HUD  ACTIVE HUD  CERT  …    [A alice  登出]
+*/}}
+{{define "topbar"}}{{if .AdminUsername}}<header class="topbar">
+  <a href="/" class="topbar-brand" aria-label="IKEv2 Panel 首页">
+    <span class="topbar-brand-mark">I</span>
+    <span>IKEv2 Panel</span>
+  </a>
+
+  <nav class="topbar-nav" aria-label="主导航">
+    <a href="/" data-page-key="home">
+      <span class="nav-glyph" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16">
+          <path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/>
+        </svg>
+      </span>
+      <span>Home</span>
+    </a>
+    <a href="/users" data-page-key="users">
+      <span class="nav-glyph" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16">
+          <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>
+        </svg>
+      </span>
+      <span>Users</span>
+    </a>
+    <a href="/audit" data-page-key="audit">
+      <span class="nav-glyph" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="13" y2="17"/>
+        </svg>
+      </span>
+      <span>Audit</span>
+    </a>
+    <a href="/admin/mobileconfig-defaults" data-page-key="admin">
+      <span class="nav-glyph" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        </svg>
+      </span>
+      <span>Config</span>
+    </a>
+  </nav>
+
+  <span class="topbar-user-pill">
+    <span class="avatar">{{slice .AdminUsername 0 1}}</span>
+    <span>{{.AdminUsername}}</span>
+    <form method="POST" action="/logout" style="display:inline-flex; margin:0;">
+      <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+      <button type="submit" class="logout" title="登出">登出</button>
+    </form>
+  </span>
+</header>{{end}}{{end}}
+
+{{/* nav alias (向后兼容 — 老模板 / 测试期望 "nav" 存在) */}}
+{{define "nav"}}{{template "topbar" .}}{{end}}

@@ -1,0 +1,457 @@
+{{/*
+  web/templates/home_content.html — v2.86-PR-Redesign
+  EZZON 风格：
+    - 顶卡爵 = 4 列 metric (大幅数字 + cyan glow + 顶部高光线)
+    - 主区：topology SVG (服务器↔用户) + 折叠配置区 + 最近活动 timeline
+    - 侧栏：HUD 数字 + 活跃连接
+    - 警告 banner：默认密码 / DDNS 失败 / 未配 Aliyun / LE 问题
+*/}}
+
+{{if .LEWarning}}<div class="banner-danger alert-danger">{{.LEWarning}}</div>{{end}}
+
+{{if .IsDefaultPassword}}
+<div class="banner-warn alert-warn dismissable" data-dismiss-key="default-password">
+  <div>
+    <strong>你仍在使用默认管理员密码</strong> — 出于安全考虑，请尽快修改。
+    <small>详见 <a href="/docs/SECURITY.md" target="_blank" rel="noopener">SECURITY 文档</a>。</small>
+  </div>
+  <button type="button" class="dismiss" aria-label="关闭" title="关闭"></button>
+</div>
+{{end}}
+
+{{if and .DDNSConfigured .DDNSFailed}}
+<div class="banner-danger alert-danger dismissable" data-dismiss-key="ddns-failed">
+  <div>
+    <strong>DDNS 同步失败</strong>:{{.DDNSLastError}}
+    <small>最近一次同步:{{.DDNSLastTime}}</small>
+  </div>
+  <button type="button" class="dismiss" aria-label="关闭" title="关闭"></button>
+</div>
+{{end}}
+
+{{if not .AliyunConfigured}}
+<div class="banner-warn alert-warn dismissable" data-dismiss-key="no-aliyun">
+  <div>
+    <strong>未配置阿里云凭证</strong> — Let's Encrypt 签发 + DDNS 自动同步都需要 AccessKey。
+    <a href="#aliyun-card">去填写 →</a>
+  </div>
+  <button type="button" class="dismiss" aria-label="关闭" title="关闭"></button>
+</div>
+{{end}}
+
+{{if eq .TotalUsers 0}}
+<aside class="onboarding dismissable" data-dismiss-key="onboarding">
+  <header>
+    <h2>首次部署引导</h2>
+    <button type="button" class="dismiss" aria-label="稍后再说" title="稍后再说"></button>
+  </header>
+  <ol>
+    <li class="done">
+      <span class="step-mark">✓</span>
+      <span>
+        <strong>服务器地址</strong>
+        <code class="server-addr">{{.ServerAddr}}</code>
+      </span>
+    </li>
+    <li class="{{if .AliyunConfigured}}done{{else}}pending{{end}}">
+      <span class="step-mark">{{if .AliyunConfigured}}✓{{else}}1{{end}}</span>
+      <span>
+        <a href="#aliyun-card">填写阿里云凭证</a>
+        <small>(LE 自动签发 + DDNS 都依赖)</small>
+      </span>
+    </li>
+    <li class="pending">
+      <span class="step-mark">2</span>
+      <span>
+        <a href="/users/new">创建第一个 VPN 用户</a>
+      </span>
+    </li>
+    <li class="pending">
+      <span class="step-mark">3</span>
+      <span>
+        放防火墙 UDP 500 / 4500
+        <small>(云服务商安全组 + 主机 firewall，详见 <a href="/docs/TROUBLESHOOTING.md" target="_blank" rel="noopener">TROUBLESHOOTING</a>)</small>
+      </span>
+    </li>
+  </ol>
+</aside>
+{{end}}
+
+{{/* Page header */}}
+<header class="page-header">
+  <hgroup>
+    <h1>欢迎，{{.AdminUsername}}</h1>
+    <p class="page-sub">服务器地址 <code>{{.ServerAddr}}</code> · IKEv2 Panel 控制台</p>
+  </hgroup>
+  <div class="page-actions">
+    {{if gt .TotalActive 0}}
+      <span class="chip ok">{{.TotalActive}} 在线</span>
+    {{else}}
+      <span class="chip muted">0 在线</span>
+    {{end}}
+    <span class="chip muted">{{.TotalUsers}} 用户</span>
+  </div>
+</header>
+
+{{/* 4 列 metric row */}}
+<div class="metrics-row">
+  <div class="metric">
+    <div class="metric-head">
+      <span class="metric-label">VPN 用户</span>
+      <span class="metric-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/>
+          <circle cx="9" cy="7" r="4"/>
+          <path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>
+        </svg>
+      </span>
+    </div>
+    <span class="metric-value brand">{{.TotalUsers}}</span>
+    <span class="metric-hint">已签发证书的账号数</span>
+  </div>
+
+  <div class="metric">
+    <div class="metric-head">
+      <span class="metric-label">活跃隧道</span>
+      <span class="metric-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M5 12.55a11 11 0 0 1 14.08 0M1.42 9a16 16 0 0 1 21.16 0M8.53 16.11a6 6 0 0 1 6.95 0M12 20h.01"/>
+        </svg>
+      </span>
+    </div>
+    <span class="metric-value {{if gt .TotalActive 0}}ok{{end}}">{{.TotalActive}}</span>
+    <span class="metric-hint">当前 IKE_SA 已建立的客户端</span>
+  </div>
+
+  <div class="metric">
+    <div class="metric-head">
+      <span class="metric-label">证书</span>
+      <span class="metric-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+          <path d="m9 12 2 2 4-4"/>
+        </svg>
+      </span>
+    </div>
+    <span class="metric-value {{if eq .CertMode "letsencrypt"}}ok{{end}}">
+      {{if eq .CertMode "letsencrypt"}}LE{{else}}自签{{end}}
+    </span>
+    <span class="metric-hint">{{.CertDomain}}</span>
+  </div>
+
+  <div class="metric">
+    <div class="metric-head">
+      <span class="metric-label">DDNS</span>
+      <span class="metric-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10"/>
+          <path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+        </svg>
+      </span>
+    </div>
+    <span class="metric-value {{if .DDNSFailed}}danger{{else if .DDNSEnabled}}ok{{end}}">
+      {{if not .DDNSConfigured}}—{{else if .DDNSFailed}}失败{{else if .DDNSEnabled}}运行中{{else}}已关闭{{end}}
+    </span>
+    <span class="metric-hint">
+      {{if .DDNSConfigured}}{{if eq .DDNSFamily "v4"}}A{{else if eq .DDNSFamily "v6"}}AAAA{{else}}A + AAAA{{end}}{{else}}未配置{{end}}
+    </span>
+  </div>
+</div>
+
+{{/* Dashboard grid */}}
+<div class="dashboard-grid">
+  <div class="dashboard-main">
+
+    {{/* 拓扑画布 */}}
+    <div class="topology"
+         data-server-addr="{{.ServerAddr}}"
+         data-server-state="{{if .LEWarning}}warn{{else if and .DDNSConfigured .DDNSFailed}}warn{{else}}ok{{end}}"
+         data-clients='{{jsonTopologyClients .TopologyClients}}'
+         data-height="380">
+    </div>
+
+    {{/* 配置折叠区 */}}
+    <div class="card-head" style="margin-top: 1.5rem; margin-bottom: 0; padding-left: 0; padding-right: 0; border: 0; background: transparent;">
+      <h2 style="font-size: 0.875rem; text-transform: uppercase; letter-spacing: 0.10em;">Config</h2>
+      <div class="card-actions">
+        <a href="/admin/mobileconfig-defaults" class="btn-secondary btn-sm">Mobileconfig 默认 →</a>
+      </div>
+    </div>
+
+    <details class="settings-card" id="cert-card">
+      <summary>
+        <span class="settings-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+            <path d="m9 12 2 2 4-4"/>
+          </svg>
+        </span>
+        <span>证书</span>
+        <small class="header-note">
+          {{if eq .CertMode "letsencrypt"}}Let's Encrypt 自动签发 · {{.CertDomain}}
+          {{else}}自签证书 · 需要手动信任 CA{{end}}
+        </small>
+      </summary>
+      <div class="settings-body">
+        {{template "cert-card-content" .}}
+      </div>
+    </details>
+
+    <details class="settings-card" id="aliyun-card">
+      <summary>
+        <span class="settings-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <ellipse cx="12" cy="5" rx="9" ry="3"/>
+            <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/>
+            <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
+          </svg>
+        </span>
+        <span>阿里云 API</span>
+        <small class="header-note">
+          {{if .AliyunConfigured}}KeyID <code>{{.AliyunKeyIDMasked}}</code>
+          {{else}}<span class="chip warn no-dot">未配置</span>{{end}}
+        </small>
+      </summary>
+      <div class="settings-body">
+        {{template "aliyun-card-content" .}}
+      </div>
+    </details>
+
+    {{if .DDNSConfigured}}
+    <details class="settings-card">
+      <summary>
+        <span class="settings-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/>
+            <path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+          </svg>
+        </span>
+        <span>DDNS 同步</span>
+        <small class="header-note">
+          {{if .DDNSEnabled}}
+            {{if .DDNSFailed}}<span class="chip danger no-dot">同步失败</span>{{else}}<span class="chip ok no-dot">运行中</span>{{end}}
+            · {{if eq .DDNSFamily "v4"}}A{{else if eq .DDNSFamily "v6"}}AAAA{{else}}A + AAAA{{end}}
+          {{else}}<span class="chip warn no-dot">已关闭</span>{{end}}
+        </small>
+      </summary>
+      <div class="settings-body">
+        {{template "ddns-card-content" .}}
+      </div>
+    </details>
+    {{end}}
+
+    {{/* 最近审计 */}}
+    {{if .RecentEvents}}
+    <div class="card-head" style="margin-top: 1.5rem; margin-bottom: 0; padding-left: 0; padding-right: 0; border: 0; background: transparent;">
+      <h2 style="font-size: 0.875rem; text-transform: uppercase; letter-spacing: 0.10em;">Recent Activity</h2>
+      <div class="card-actions">
+        <a href="/audit" class="btn-secondary btn-sm">View All →</a>
+      </div>
+    </div>
+    <div class="timeline">
+      {{range .RecentEvents}}
+      <div class="timeline-row">
+        <span class="timeline-dot {{auditSeverity .Event}}"></span>
+        <span class="timeline-time">{{formatUnixNano .Timestamp}}</span>
+        <span class="timeline-event"><code>{{.Event}}</code></span>
+        <span class="timeline-actor">{{.Actor}}</span>
+        <span class="timeline-detail">
+          {{$kv := parseAuditDetails .Details}}
+          {{range $kv}}<span class="kv-inline"><span class="k">{{.K}}</span>{{.V}}</span> {{end}}
+        </span>
+      </div>
+      {{end}}
+    </div>
+    {{end}}
+
+  </div>
+
+  <aside class="dashboard-side">
+
+    <div class="card-head" style="padding-left: 0; padding-right: 0; border: 0; background: transparent;">
+      <h2 style="font-size: 0.875rem; text-transform: uppercase; letter-spacing: 0.10em;">System Status</h2>
+    </div>
+    <div class="side-stats">
+      <div class="side-stat">
+        <span class="side-stat-label">VPN 用户</span>
+        <span class="side-stat-value"><span class="v-num">{{.TotalUsers}}</span></span>
+      </div>
+      <div class="side-stat">
+        <span class="side-stat-label">活跃隧道</span>
+        <span class="side-stat-value {{if gt .TotalActive 0}}ok{{end}}">
+          <span class="v-num">{{.TotalActive}}</span>
+        </span>
+      </div>
+      <div class="side-stat">
+        <span class="side-stat-label">证书</span>
+        <span class="side-stat-value {{if eq .CertMode "letsencrypt"}}ok{{end}}">
+          {{if eq .CertMode "letsencrypt"}}LE{{else}}自签{{end}}
+        </span>
+      </div>
+      <div class="side-stat">
+        <span class="side-stat-label">DDNS</span>
+        <span class="side-stat-value {{if .DDNSFailed}}danger{{else if .DDNSEnabled}}ok{{end}}">
+          {{if not .DDNSConfigured}}—{{else if .DDNSFailed}}失败{{else if .DDNSEnabled}}运行中{{else}}已关闭{{end}}
+        </span>
+      </div>
+    </div>
+
+    {{/* 活跃连接 */}}
+    <div class="card-head" style="padding-left: 0; padding-right: 0; border: 0; background: transparent;">
+      <h2 style="font-size: 0.875rem; text-transform: uppercase; letter-spacing: 0.10em;">Active Tunnels ({{.TotalActive}})</h2>
+      <div class="card-actions">
+        <a href="/users" class="btn-secondary btn-sm">Users</a>
+      </div>
+    </div>
+    {{if .SAsUnavailable}}
+      <article><p class="text-muted">⚠️ SA 列表暂不可用 (swanctl 响应超时)，刷新重试</p></article>
+    {{else if .ActiveSAs}}
+    <article class="card-pad" style="padding: 0; background: rgba(255,255,255,0.02); border: 1px solid var(--ikev2-bg-rule); border-radius: var(--ikev2-radius-lg);">
+      <table class="responsive-stack" style="margin: 0;">
+        <thead>
+          <tr><th>用户</th><th>远端</th><th>状态</th></tr>
+        </thead>
+        <tbody>
+        {{range .ActiveSAs}}
+          <tr>
+            <td data-label="用户">{{.RemoteID}}</td>
+            <td data-label="远端"><code>{{.RemoteAddr}}</code></td>
+            <td data-label="状态"><span class="chip ok no-dot">{{.IkeState}}</span></td>
+          </tr>
+        {{end}}
+        </tbody>
+      </table>
+    </article>
+    {{else}}
+    <article>
+      <div class="empty-state">
+        <svg class="empty-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M5 12.55a11 11 0 0 1 14.08 0M1.42 9a16 16 0 0 1 21.16 0M8.53 16.11a6 6 0 0 1 6.95 0M12 20h.01"/>
+        </svg>
+        <div class="empty-title">No Active Tunnels</div>
+        <div class="empty-hint">客户端首次连接三步：扫码下载配置 → 安装描述文件 → 启用 VPN 开关</div>
+        <a href="/users" class="btn-primary" role="button">View Users</a>
+      </div>
+    </article>
+    {{end}}
+
+  </aside>
+</div>
+
+{{/*
+  子模板: cert / aliyun / ddns 卡片内容 (form 部分) — 保留原 PR19 行为
+*/}}
+
+{{define "cert-card-content"}}
+<div class="settings-body" style="padding: 0; background: transparent; border: 0;">
+  {{if .CertConfigured}}
+    <p>
+      状态：<span class="chip {{if eq .CertMode "letsencrypt"}}ok{{else}}warn{{end}} no-dot">
+        {{if eq .CertMode "letsencrypt"}}Let's Encrypt 自动签发{{else}}自签证书{{end}}
+      </span>
+      {{if eq .CertMode "letsencrypt"}}
+        {{if .CertDomain}}<br><small>域名：<code>{{.CertDomain}}</code></small>{{end}}
+        {{if .CertServerCN}}<br><small>Server CN：<code>{{.CertServerCN}}</code></small>{{end}}
+        {{if .CertACMEEmail}}<br><small>ACME 邮箱：<code>{{.CertACMEEmail}}</code></small>{{end}}
+      {{end}}
+      <br>
+      <small>配置来源：<code>{{.CertSource}}</code>
+        {{if eq .CertSource "panelstate"}}(需 <code>docker compose restart</code> 生效){{end}}
+      </small>
+    </p>
+    <form method="POST" action="/api/cert/save">
+      <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+      <div class="form-section">
+        <span class="form-label">证书模式</span>
+        <div class="radio-group">
+          <label>
+            <input type="radio" name="cert_mode" value="self-signed" {{if eq .CertMode "self-signed"}}checked{{end}}>
+            <span>自签模式 <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(无需域名)</small></span>
+          </label>
+          <label>
+            <input type="radio" name="cert_mode" value="letsencrypt" {{if eq .CertMode "letsencrypt"}}checked{{end}}>
+            <span>Let's Encrypt <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(需域名 + 阿里云凭证)</small></span>
+          </label>
+        </div>
+      </div>
+      <div class="form-section">
+        <label class="form-label" for="cert-domain">域名 (LE 模式必填)</label>
+        <input id="cert-domain" type="text" name="domain" placeholder="vpn.example.com" value="{{.CertDomain}}">
+      </div>
+      <div class="form-section">
+        <label class="form-label" for="cert-cn">Server CN <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(mobileconfig RemoteIdentifier，空 = 用域名)</small></label>
+        <input id="cert-cn" type="text" name="server_cn" placeholder="留空 = 用域名" value="{{.CertServerCN}}">
+      </div>
+      <div class="form-section">
+        <label class="form-label" for="cert-email">ACME 注册邮箱 <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(可选)</small></label>
+        <input id="cert-email" type="email" name="acme_email" placeholder="admin@example.com" value="{{.CertACMEEmail}}">
+      </div>
+      <p class="banner-warn" style="margin-top: 1rem; font-size: 0.8125rem;">⚠️ 保存后必须重启容器才能生效</p>
+      <div class="settings-actions settings-actions-end">
+        <button type="submit" class="btn-secondary" formaction="/api/cert/clear">清除证书配置</button>
+        <button type="submit" class="btn-primary">保存证书配置</button>
+      </div>
+    </form>
+  {{else}}
+    <p>
+      状态：<span class="chip {{if eq .CertMode "letsencrypt"}}ok{{else}}warn{{end}} no-dot">
+        {{if eq .CertMode "letsencrypt"}}Let's Encrypt (env 配置){{else}}自签证书 (env 配置){{end}}
+      </span>
+      {{if .CertDomain}}<br><small>域名：<code>{{.CertDomain}}</code></small>{{end}}
+    </p>
+    <p class="text-muted">证书通过环境变量配置，如需修改请编辑 docker-compose.yml 或 <code>.env</code> 后 <code>docker compose restart</code>。</p>
+  {{end}}
+</div>
+{{end}}
+
+{{define "aliyun-card-content"}}
+<div class="settings-body" style="padding: 0; background: transparent; border: 0;">
+  {{if .AliyunConfigured}}
+    <p>已配置 AccessKey：<code>{{.AliyunKeyIDMasked}}</code></p>
+    <p class="text-muted">如需更换 Key，请在下方输入新值后保存。</p>
+  {{else}}
+    <p class="text-muted">未配置阿里云 AccessKey。<strong>Let's Encrypt 自动签发</strong> + <strong>DDNS 自动同步</strong> 都依赖它。</p>
+  {{end}}
+  <form method="POST" action="/api/aliyun/save">
+    <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+    <div class="form-section">
+      <label class="form-label" for="aliyun-key">AccessKey ID</label>
+      <input id="aliyun-key" type="text" name="key_id" placeholder="LTAI5txxxxxxxxxxxxxx" value="" autocomplete="off">
+    </div>
+    <div class="form-section">
+      <label class="form-label" for="aliyun-secret">AccessKey Secret</label>
+      <input id="aliyun-secret" type="password" name="key_secret" placeholder="••••••••" autocomplete="off">
+    </div>
+    <div class="settings-actions settings-actions-end">
+      {{if .AliyunConfigured}}
+        <button type="submit" class="btn-danger" formaction="/api/aliyun/clear">清除</button>
+      {{end}}
+      <button type="submit" class="btn-primary">保存阿里云凭证</button>
+    </div>
+  </form>
+</div>
+{{end}}
+
+{{define "ddns-card-content"}}
+<div class="settings-body" style="padding: 0; background: transparent; border: 0;">
+  {{if .DDNSEnabled}}
+    <p>状态：<span class="chip {{if .DDNSFailed}}danger{{else}}ok{{end}} no-dot">{{if .DDNSFailed}}同步失败{{else}}运行中{{end}}</span></p>
+    {{if .DDNSFailed}}<p class="banner-danger" style="font-size: 0.875rem;">{{.DDNSLastError}}</p>{{end}}
+    <p>最近同步：<code>{{.DDNSLastTime}}</code></p>
+    <p>记录类型：<code>{{if eq .DDNSFamily "v4"}}A{{else if eq .DDNSFamily "v6"}}AAAA{{else}}A + AAAA{{end}}</code></p>
+    <form method="POST" action="/api/ddns/toggle">
+      <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+      <input type="hidden" name="enabled" value="false">
+      <button type="submit" class="btn-secondary">关闭 DDNS</button>
+    </form>
+  {{else}}
+    <p>状态：<span class="chip warn no-dot">已关闭</span></p>
+    <p class="text-muted">启用后会按 cron 间隔（默认 5min）把服务器当前 IP 推送到阿里云 DNS。</p>
+    <form method="POST" action="/api/ddns/toggle">
+      <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+      <input type="hidden" name="enabled" value="true">
+      <button type="submit" class="btn-primary">启用 DDNS 同步</button>
+    </form>
+  {{end}}
+</div>
+{{end}}

@@ -1,0 +1,19 @@
+# /etc/logrotate.d/ikev2-charon
+# v2.86-PR13.2:charon.log 7 天轮转 + gzip 压缩
+# 触发:每天 cron /etc/cron.daily/logrotate 跑一次
+# 配合 strongswan-filelog.conf 的 0600 权限(由 Dockerfile 设置)
+/var/log/charon.log {
+    daily
+    rotate 7
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0600 root root
+    postrotate
+        # v2.86-PR13.2:charon 收到 SIGHUP 会 reopen log file
+        # (实际不强依赖,因为 strongSwan filelog 不监听 reopen 信号,
+        # 但保留以便日后改成支持 HUP 的版本)
+        killall -HUP charon 2>/dev/null || true
+    endscript
+}

@@ -1,0 +1,71 @@
+{{/*
+  web/templates/android_content.html — v2.86-PR-Redesign
+*/}}
+<header class="page-header">
+  <hgroup>
+    <h1>Android Native Client</h1>
+    <p class="page-sub">用户 {{.User.Username}} · IKEv2/IPsec MSCHAPv2</p>
+  </hgroup>
+  <div class="page-actions">
+    <a href="/users/{{.User.ID}}" class="btn-secondary">← Back</a>
+  </div>
+</header>
+
+{{if .Error}}<div class="banner-danger alert-danger">{{.Error}}</div>{{end}}
+{{if .Flash}}<div class="banner-warn alert-warn">{{.Flash}}</div>{{end}}
+
+<div class="dashboard-grid">
+  <div class="dashboard-main">
+
+    <h3 style="text-transform: uppercase; letter-spacing: 0.10em;">Android 上的步骤</h3>
+    <article class="card card-pad">
+      <ol style="padding-left: 1.5rem; line-height: 1.8; color: var(--ikev2-fg);">
+        <li>设置 → <strong>网络和互联网</strong> → <strong>VPN</strong> → 右上角 <strong>+</strong></li>
+        <li>类型选 <strong>"IKEv2/IPSec MSCHAPv2"</strong>（Android 11-15 默认第一个选项）</li>
+        <li>按下表填写（<strong>不需要</strong>任何预共享密钥 PSK）</li>
+        <li>保存 → 点连接 → 通知栏出现钥匙图标 = 连上</li>
+      </ol>
+    </article>
+
+    <h3 class="mt-5" style="text-transform: uppercase; letter-spacing: 0.10em;">CA 证书信任</h3>
+    <article class="card card-pad">
+      <p>Android 11+ 原生客户端 <strong>强烈建议</strong> 安装 CA 根证书（自签模式必须装，否则 server cert 校验会失败；LE 模式可跳过）：</p>
+      <ol style="padding-left: 1.5rem; line-height: 1.8; color: var(--ikev2-fg);">
+        <li>下载 <a href="/ca.cert.pem">ca.cert.pem</a></li>
+        <li>设置 → <strong>安全</strong> → <strong>加密与凭据</strong> → <strong>安装证书</strong> → <strong>CA 证书</strong></li>
+        <li>Android 7+ 会弹警告"网络流量可能被监视"——这是 CA 证书的通用提示，本面板自签 CA 受控可忽略</li>
+      </ol>
+    </article>
+
+  </div>
+
+  <aside class="dashboard-side">
+
+    <h3 style="text-transform: uppercase; letter-spacing: 0.10em;">连接参数</h3>
+    <div class="terminal-card">
+      <div class="term-header">
+        <span class="term-title">手动填入</span>
+      </div>
+<pre><code><span class="term-comment"># 名称（自定义）</span>
+<span class="term-prompt">name</span>     = IKEv2 VPN
+
+<span class="term-comment"># 服务器</span>
+<span class="term-prompt">server</span>   = {{.ServerAddr}}
+
+<span class="term-comment"># IPSec 标识符 = 用户名 (EAP-MSCHAPv2)</span>
+<span class="term-prompt">ipsec_id</span> = {{.User.Username}}
+
+<span class="term-comment"># 凭据</span>
+<span class="term-prompt">username</span> = {{.User.Username}}
+<span class="term-prompt">password</span> = {{.User.Password}}</code></pre>
+    </div>
+
+    <button type="button" class="copy-btn btn-primary btn-block mt-3"
+            data-copy-text="name: IKEv2 VPN&#10;server: {{.ServerAddr}}&#10;ipsec_id: {{.User.Username}}&#10;username: {{.User.Username}}&#10;password: {{.User.Password}}">
+      Copy All Params
+    </button>
+
+  </aside>
+</div>
+
+<p class="mt-4"><a href="/users/{{.User.ID}}" class="btn-secondary">← Back to User</a></p>

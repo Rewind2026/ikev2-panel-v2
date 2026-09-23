@@ -1,0 +1,71 @@
+{{/*
+  web/templates/user_delete_confirm_content.html — v2.86-PR-Redesign
+*/}}
+
+<header class="page-header">
+  <hgroup>
+    <h1>Delete User</h1>
+    <p class="page-sub">这是双确认的第二步</p>
+  </hgroup>
+  <div class="page-actions">
+    <a href="/users/{{.User.ID}}" class="btn-secondary">← Cancel</a>
+  </div>
+</header>
+
+<div class="dashboard-grid">
+  <div class="dashboard-main">
+    <article class="card card-pad">
+      <div class="banner-danger alert-danger">
+        <strong>⚠ 此操作不可撤销</strong>
+        <p style="margin-top: 0.4rem;">删除用户 <code>{{.User.Username}}</code> 会触发以下操作：</p>
+      </div>
+
+      <div class="terminal-card">
+        <div class="term-header">
+          <span class="term-title">副作用 (4 个，全部不可撤销)</span>
+        </div>
+<pre><code><span class="term-prompt">$</span> sqlite3 panel.db <span class="term-string">"DELETE FROM users WHERE id={{.User.ID }}"</span>
+<span class="term-prompt">$</span> rm /etc/swanctl/conf.d/<span class="term-string">{{.User.Username}}.conf</span>
+<span class="term-prompt">$</span> swanctl --load-all
+<span class="term-prompt">$</span> rm /var/lib/ikev2-panel/limits/<span class="term-string">{{.User.Username}}</span></code></pre>
+      </div>
+
+      <p class="text-sm text-muted" style="margin-top: 0.5rem;">
+        <strong>注意：</strong>正在连接的 SA 会被强制下线；审计日志会保留删除记录，但 user 记录本身永久消失。
+      </p>
+
+      <div class="settings-actions settings-actions-spread">
+        <a href="/users/{{.User.ID}}" class="btn-secondary">Cancel</a>
+        <form method="POST" action="/users/{{.User.ID}}/delete/confirm" style="display:inline-flex;">
+          <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+          <button type="submit" class="btn-danger">Confirm Delete ({{.User.Username}})</button>
+        </form>
+      </div>
+    </article>
+  </div>
+
+  <aside class="dashboard-side">
+    <div class="side-stats">
+      <div class="side-stat">
+        <span class="side-stat-label">Username</span>
+        <span class="side-stat-value"><code>{{.User.Username}}</code></span>
+      </div>
+      <div class="side-stat">
+        <span class="side-stat-label">ID</span>
+        <span class="side-stat-value">#{{.User.ID}}</span>
+      </div>
+      <div class="side-stat">
+        <span class="side-stat-label">Current State</span>
+        <span class="side-stat-value {{if .User.Enabled}}ok{{else}}danger{{end}}">
+          {{if .User.Enabled}}● Enabled{{else}}○ Disabled{{end}}
+        </span>
+      </div>
+      {{if .User.Note}}
+      <div class="side-stat" style="flex-direction: column; align-items: flex-start; gap: 0.25rem;">
+        <span class="side-stat-label">Note</span>
+        <span style="font-size: 0.875rem;">{{.User.Note}}</span>
+      </div>
+      {{end}}
+    </div>
+  </aside>
+</div>

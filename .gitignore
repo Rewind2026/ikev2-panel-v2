@@ -1,0 +1,41 @@
+# 构建产物
+bin/
+dist/
+*.tar
+*.tar.gz
+*.zip
+
+# Go
+*.exe
+*.test
+*.out
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# 数据卷(用户数据)
+data/
+/data/
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 构建日志
+*.log
+!docs/**/*.log
+
+# 临时
+/tmp/
+
+# 敏感 / 运行时数据(绝对不能入库)
+# dev-data/ 含真实 CA/TLS/Server 私钥 + SQLite 用户数据库 + 运行时配置
+dev-data/
+# 20MB 编译二进制
+/ikev2-panel
+
