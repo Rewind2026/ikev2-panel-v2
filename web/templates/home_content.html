@@ -39,18 +39,11 @@
 </div>
 {{end}}
 
-{{/* v2.86-pr22:AccessKey 已配但 DDNS 未启用 ——
-     单独提示用户,因为这是设计层面的两层配置,容易让用户误以为是 bug。 */}}
-{{if and .AliyunConfigured (not .DDNSConfigured)}}
-<div class="banner-warn alert-warn dismissable" data-dismiss-key="ddns-disabled">
-  <div>
-    <strong>AccessKey 已配置,但 DDNS 自动同步未启用</strong> ——
-    需要在 <code>docker-compose.yml</code> 设 <code>IKEV2_DDNS_ENABLED=true</code> 并重启容器。
-    <a href="#aliyun-card">查看启用说明 →</a>
-  </div>
-  <button type="button" class="dismiss" aria-label="关闭" title="关闭"></button>
-</div>
-{{end}}
+{{/*
+  v2.86-pr23a:AccessKey 已配但 DDNS 未启用 ——
+  顶部 banner + aliyun-card 末尾 docker-compose.yml env 模板已删除(banner
+  内容并到 aliyun-card 的 "DNS 同步" 块;DDNS 配置完全融入了阿里云卡)。
+*/}}
 
 {{if eq .TotalUsers 0}}
 <aside class="onboarding dismissable" data-dismiss-key="onboarding">
@@ -267,28 +260,12 @@
       </div>
     </details>
 
-    {{if .DDNSConfigured}}
-    <details class="settings-card">
-      <summary>
-        <span class="settings-icon" aria-hidden="true">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="10"/>
-            <path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
-          </svg>
-        </span>
-        <span>DDNS 同步</span>
-        <small class="header-note">
-          {{if .DDNSEnabled}}
-            {{if .DDNSFailed}}<span class="chip danger no-dot">同步失败</span>{{else}}<span class="chip ok no-dot">运行中</span>{{end}}
-            · {{if eq .DDNSFamily "v4"}}A{{else if eq .DDNSFamily "v6"}}AAAA{{else}}A + AAAA{{end}}
-          {{else}}<span class="chip warn no-dot">已关闭</span>{{end}}
-        </small>
-      </summary>
-      <div class="settings-body">
-        {{template "ddns-card-content" .}}
-      </div>
-    </details>
-    {{end}}
+    {{/*
+      v2.86-pr23a:DDNS 同步独立卡删除 — 配置完全并入 "阿里云 API" 卡末尾。
+      原因:DDNS 跟 AccessKey 是同一个阿里云 DNS API 的子功能,用户认知里
+      不应该有两个独立管理入口。访问路径:aliyun-card 展开 → 看到 AccessKey
+      表单 → 下面就是 DNS 同步块(配置 + 状态表 + 三个按钮)。
+    */}}
 
     {{/* 最近审计 */}}
     {{if .RecentEvents}}
@@ -389,7 +366,8 @@
 </div>
 
 {{/*
-  子模板: cert / aliyun / ddns 卡片内容 (form 部分) — 保留原 PR19 行为
+  子模板: cert / aliyun 卡片内容 (form 部分) — 保留原 PR19 行为
+  v2.86-pr23a:ddns-card-content 删除,合并到 aliyun-card-content 末尾。
 */}}
 
 {{define "cert-card-content"}}
@@ -484,156 +462,170 @@
   </form>
 
   {{/*
-    v2.86-PR20:DDNS 记录类型切换(v4 / v6 / dual)。
-    之前 family 只在 ddns-card 的 header summary 显示只读,用户在 aliyun
-    卡看不到独立切换控件。放到这里的好处:aliyun 凭证 + DDNS 同步配置
-    在同一卡里管理,语义对齐(都跟阿里云 DNS API 相关)。
-    注意:仅在 DDNSConfigured 时显示(DDNS sync 实例未初始化时
-    /api/ddns/family 返回 404);用户没启用 DDNS 也能保存(下次 enable 自动用)。
+    v2.86-pr23a:DNS 同步块 — 完全替代 PR20 的 family radio。
+    设计:域名(RR)+ 两个独立 checkbox(A/AAAA)+ 周期 + 状态表 + 三个按钮。
+    比 PR20 更清晰:用户能独立控制 A/AAAA 开关,不再有三选一 radio 的歧义。
+
+    仅在 DDNSConfigured 时显示(没启用 DDNS 时改配置无意义,给引导)。
   */}}
   {{if .DDNSConfigured}}
   <hr style="margin: 1.25rem 0; border: 0; border-top: 1px solid var(--ikev2-border, #2a3142);">
-  <form method="POST" action="/api/ddns/family">
-    <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-    <div class="form-section">
-      <span class="form-label">DDNS 记录类型
-        <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(同步服务器 IP 到阿里云 DNS 时用哪类记录)</small>
-      </span>
-      <div class="radio-group">
-        <label>
-          <input type="radio" name="family" value="v4" {{if eq .DDNSFamily "v4"}}checked{{end}}>
-          <span>仅 A 记录 <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(IPv4 only 服务器)</small></span>
-        </label>
-        <label>
-          <input type="radio" name="family" value="v6" {{if eq .DDNSFamily "v6"}}checked{{end}}>
-          <span>仅 AAAA 记录 <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(IPv6 only 服务器,推荐)</small></span>
-        </label>
-        <label>
-          <input type="radio" name="family" value="dual" {{if eq .DDNSFamily "dual"}}checked{{end}}>
-          <span>A + AAAA 双栈 <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(双栈服务器)</small></span>
-        </label>
-      </div>
-    </div>
-    <p class="text-muted" style="margin-top: 0.5rem; font-size: 0.8125rem;">
-      当前记录类型:<code>
-        {{if eq .DDNSFamily "v4"}}A{{else if eq .DDNSFamily "v6"}}AAAA{{else}}A + AAAA{{end}}
-      </code>
-      {{if not .DDNSEnabled}}<span class="chip warn no-dot" style="margin-left: 0.5rem;">DDNS 未启用</span>{{end}}
-    </p>
-    <div class="settings-actions settings-actions-end">
-      <button type="submit" class="btn-secondary">保存 DDNS 记录类型</button>
-    </div>
-  </form>
-  {{else}}
-    {{/* v2.86-pr22:DDNS 功能本身未启用(DDNSSync==nil) ——
-         这是用户最常疑惑的场景:"我配了 AccessKey,但 DDNS 卡显示未配置"
-         因为 DDNSSync 由 IKEV2_DDNS_ENABLED env 决定(启动时初始化),
-         跟 AccessKey 完全独立。需要明确的引导告诉他们下一步怎么开。 */}}
-    {{if .AliyunConfigured}}
-    <hr style="margin: 1.25rem 0; border: 0; border-top: 1px solid var(--ikev2-border, #2a3142);">
-    <div class="banner-warn" style="margin: 0; font-size: 0.8125rem;">
-      <div>
-        <strong>DDNS 功能未启用</strong>（跟 AccessKey 是两件独立的事）
-        <p style="margin-top: 0.4rem;">
-          AccessKey 已配好,但 DDNS 同步器要在 <code>docker-compose.yml</code> 里设：
-        </p>
-<pre style="background: rgba(0,0,0,0.35); padding: 0.6rem 0.8rem; border-radius: 4px; font-size: 0.75rem; margin: 0.4rem 0; overflow-x: auto;">
-environment:
-  - IKEV2_DDNS_ENABLED=true        # 启用 DDNS 同步
-  - IKEV2_DDNS_FAMILY=dual          # v4 / v6 / dual(默认 dual)
-  - IKEV2_DDNS_DOMAIN=example.com   # 阿里云主域名
-  - IKEV2_DDNS_RR=vpn               # 主机记录(@ = 主域本身)
-  - IKEV2_DDNS_PROBE_TARGET=8.8.8.8 # IPv4 探测目标(可选,大陆用户改 223.5.5.5)</pre>
-        <p style="margin-top: 0.4rem;">
-          改完 <code>docker compose up -d</code> 重启容器，DDNS 卡片就会出现在下方。
-        </p>
-      </div>
-    </div>
-    {{end}}
-  {{end}}
-</div>
-{{end}}
 
-{{define "ddns-card-content"}}
-<div class="settings-body" style="padding: 0; background: transparent; border: 0;">
-  {{/* v2.86-pr22:详细状态表 ——
-       目标域名 + 探测参数 + A / AAAA 独立记录状态,让用户能直观看到
-       "哪条记录同步成功了 / 哪条失败 / 当前 IP 是多少" */}}
+  <h3 style="margin: 0 0 0.5rem; font-size: 0.95rem;">DNS 同步</h3>
+  <p class="text-muted" style="margin: 0 0 1rem; font-size: 0.8125rem;">
+    按 {{if .DDNSDetectTarget}}<code>{{.DDNSDetectTarget}}</code>{{end}} 探测 → 推送 → 阿里云 DNS 解析记录。
+    {{if .DDNSDetectTarget}}<small>大陆用户可改 223.5.5.5 提高探测成功率。</small>{{end}}
+  </p>
 
+  {{/* 当前生效的配置(只读,实时) */}}
   {{if .DDNSDomain}}
   <div class="ddns-params" style="margin: 0 0 1rem; font-size: 0.8125rem; line-height: 1.7;">
     <div><strong>同步目标：</strong><code>{{.DDNSDomain}}</code>
-      {{if .DDNSRR}}<small>（RR=<code>{{.DDNSRR}}</code>，主域=<code>{{.DDNSBaseDomain}}</code>）</small>{{end}}
+      {{if .DDNSRR}}<small>(RR=<code>{{.DDNSRR}}</code>，主域=<code>{{.DDNSBaseDomain}}</code>)</small>{{end}}
     </div>
     <div><strong>同步周期：</strong><code>{{.DDNSPeriod}}</code>
-      {{if .DDNSIface}}<small>· 监听接口：<code>{{.DDNSIface}}</code></small>{{end}}
+      {{if .DDNSIface}}<small>· 监听接口:<code>{{.DDNSIface}}</code></small>{{end}}
     </div>
     {{if .DDNSDetectTarget}}<div><strong>IPv4 探测目标：</strong><code>{{.DDNSDetectTarget}}</code>
-      <small>（服务器向该地址发 ICMP/UDP 探测以拿到本机出口 IPv4）</small>
+      <small>(服务器向该地址发探测以拿到本机出口 IPv4)</small>
     </div>{{end}}
   </div>
   {{end}}
 
-  {{if .DDNSEnabled}}
-    <p>状态：<span class="chip {{if .DDNSFailed}}danger{{else}}ok{{end}} no-dot">{{if .DDNSFailed}}同步失败{{else}}运行中{{end}}</span>
-       · 记录类型:<code>{{if eq .DDNSFamily "v4"}}仅 A 记录{{else if eq .DDNSFamily "v6"}}仅 AAAA 记录{{else}}A + AAAA 双栈{{end}}</code></p>
-    {{if .DDNSFailed}}<p class="banner-danger" style="font-size: 0.875rem;">{{.DDNSLastError}}</p>{{end}}
-    {{if .DDNSLastTime}}<p>最近同步：<code>{{.DDNSLastTime}}</code></p>{{end}}
+  {{/* 配置表单 — 一站式 RR/EnableA/EnableAAAA/Period */}}
+  <form method="POST" action="/api/ddns/config">
+    <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+    <div class="form-section">
+      <label class="form-label" for="ddns-rr">主机记录 (RR)
+        <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(空或 @ = 主域本身,例如 vpn = vpn.example.com)</small>
+      </label>
+      <input id="ddns-rr" type="text" name="rr" placeholder="vpn" value="{{.DDNSRR}}"
+             pattern="[a-zA-Z0-9_\-]{0,63}" maxlength="63" autocomplete="off">
+    </div>
+    <div class="form-section">
+      <span class="form-label">自动同步哪些记录</span>
+      <div style="display: flex; flex-direction: column; gap: 0.4rem; margin-top: 0.3rem;">
+        <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+          <input type="checkbox" name="enable_a" value="true" {{if .DDNSEnableA}}checked{{end}}>
+          <span>A 记录 (IPv4) <small style="color: var(--ikev2-fg-muted); font-weight: 400;">— IPv4 only 服务器</small></span>
+        </label>
+        <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+          <input type="checkbox" name="enable_aaaa" value="true" {{if .DDNSEnableAAAA}}checked{{end}}>
+          <span>AAAA 记录 (IPv6) <small style="color: var(--ikev2-fg-muted); font-weight: 400;">— IPv6 only / 双栈服务器</small></span>
+        </label>
+      </div>
+    </div>
+    <div class="form-section">
+      <label class="form-label" for="ddns-period">同步周期(秒)
+        <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(10-3600,默认 60)</small>
+      </label>
+      <input id="ddns-period" type="number" name="period_seconds" min="10" max="3600"
+             value="{{if .DDNSPeriodSeconds}}{{.DDNSPeriodSeconds}}{{else}}60{{end}}">
+    </div>
 
-    {{/* A / AAAA 记录详细状态表 */}}
-    {{if or (eq .DDNSFamily "v4") (eq .DDNSFamily "dual")}}
-    <table class="ddns-record-table" style="margin: 0.75rem 0; width: 100%; font-size: 0.8125rem; border-collapse: collapse;">
-      <tr style="border-bottom: 1px solid var(--ikev2-border, #2a3142);">
-        <td style="padding: 0.4rem 0.5rem; color: var(--ikev2-fg-muted); width: 4rem;">A 记录</td>
-        <td style="padding: 0.4rem 0.5rem;">
-          {{if .DDNSV4Error}}
-            <span class="chip danger no-dot">失败</span>
-            <code style="color: var(--ikev2-danger);">{{.DDNSV4Error}}</code>
-          {{else if .DDNSV4IP}}
-            <span class="chip ok no-dot">同步成功</span>
-            当前 IP：<code>{{.DDNSV4IP}}</code>
-          {{else}}
-            <span class="chip warn no-dot">未同步</span>
-            <small>等待首次 tick</small>
-          {{end}}
-        </td>
-      </tr>
-    </table>
+    {{/* 状态表 — A / AAAA 独立 */}}
+    <div class="ddns-status" style="margin: 1rem 0;">
+      <div style="font-weight: 600; font-size: 0.875rem; margin-bottom: 0.5rem;">
+        当前状态:
+        {{if .DDNSFailed}}
+          <span class="chip danger no-dot">同步失败</span>
+        {{else if .DDNSEnabled}}
+          <span class="chip ok no-dot">运行中</span>
+        {{else}}
+          <span class="chip warn no-dot">已关闭</span>
+        {{end}}
+        {{if not (or .DDNSEnableA .DDNSEnableAAAA)}}<span class="chip warn no-dot">已全部禁用</span>{{end}}
+      </div>
+      {{if .DDNSFailed}}<p class="banner-danger" style="font-size: 0.8125rem;">{{.DDNSLastError}}</p>{{end}}
+      {{if .DDNSLastTime}}<p style="font-size: 0.8125rem; margin: 0.25rem 0;">最近同步:<code>{{.DDNSLastTime}}</code></p>{{end}}
+
+      <table class="ddns-record-table" style="margin: 0.5rem 0 0; width: 100%; font-size: 0.8125rem; border-collapse: collapse;">
+        {{if .DDNSEnableA}}
+        <tr style="border-bottom: 1px solid var(--ikev2-border, #2a3142);">
+          <td style="padding: 0.4rem 0.5rem; color: var(--ikev2-fg-muted); width: 4rem;">A 记录</td>
+          <td style="padding: 0.4rem 0.5rem;">
+            {{if .DDNSV4Error}}
+              <span class="chip danger no-dot">失败</span>
+              <code style="color: var(--ikev2-danger);">{{.DDNSV4Error}}</code>
+            {{else if .DDNSV4IP}}
+              <span class="chip ok no-dot">同步成功</span>
+              当前 IP:<code>{{.DDNSV4IP}}</code>
+            {{else}}
+              <span class="chip warn no-dot">未同步</span>
+              <small>{{if .DDNSEnabled}}等待首次 tick{{else}}DDNS 已关闭{{end}}</small>
+            {{end}}
+          </td>
+        </tr>
+        {{end}}
+        {{if .DDNSEnableAAAA}}
+        <tr style="border-bottom: 1px solid var(--ikev2-border, #2a3142);">
+          <td style="padding: 0.4rem 0.5rem; color: var(--ikev2-fg-muted); width: 4rem;">AAAA 记录</td>
+          <td style="padding: 0.4rem 0.5rem;">
+            {{if .DDNSV6Error}}
+              <span class="chip danger no-dot">失败</span>
+              <code style="color: var(--ikev2-danger);">{{.DDNSV6Error}}</code>
+            {{else if .DDNSV6IP}}
+              <span class="chip ok no-dot">同步成功</span>
+              当前 IP:<code>{{.DDNSV6IP}}</code>
+            {{else}}
+              <span class="chip warn no-dot">未同步</span>
+              <small>{{if .DDNSEnabled}}等待首次 tick{{else}}DDNS 已关闭{{end}}</small>
+            {{end}}
+          </td>
+        </tr>
+        {{end}}
+      </table>
+    </div>
+
+    {{/* RemoteSnapshot:用户点 "查询阿里云记录值" 按钮后的结果 */}}
+    {{if .DDNSRemoteFetchedAt}}
+    <details class="ddns-remote" style="margin: 0.75rem 0; font-size: 0.8125rem;">
+      <summary style="cursor: pointer; color: var(--ikev2-fg-muted);">
+        阿里云实际解析记录({{.DDNSRemoteFetchedAt}} 查询)
+      </summary>
+      <div style="margin: 0.5rem 0; padding: 0.5rem; background: rgba(0,0,0,0.25); border-radius: 4px;">
+        <div>域名:<code>{{.DDNSRemoteDomain}}</code></div>
+        {{if .DDNSEnableA}}<div>A 记录:{{if .DDNSRemoteA}}<code>{{.DDNSRemoteA}}</code>{{else}}<em>(不存在)</em>{{end}}</div>{{end}}
+        {{if .DDNSEnableAAAA}}<div>AAAA 记录:{{if .DDNSRemoteAAAA}}<code>{{.DDNSRemoteAAAA}}</code>{{else}}<em>(不存在)</em>{{end}}</div>{{end}}
+        {{if .DDNSRemoteError}}<div style="color: var(--ikev2-danger); margin-top: 0.25rem;">查询失败:{{.DDNSRemoteError}}</div>{{end}}
+      </div>
+    </details>
     {{end}}
 
-    {{if or (eq .DDNSFamily "v6") (eq .DDNSFamily "dual")}}
-    <table class="ddns-record-table" style="margin: 0.75rem 0; width: 100%; font-size: 0.8125rem; border-collapse: collapse;">
-      <tr style="border-bottom: 1px solid var(--ikev2-border, #2a3142);">
-        <td style="padding: 0.4rem 0.5rem; color: var(--ikev2-fg-muted); width: 4rem;">AAAA 记录</td>
-        <td style="padding: 0.4rem 0.5rem;">
-          {{if .DDNSV6Error}}
-            <span class="chip danger no-dot">失败</span>
-            <code style="color: var(--ikev2-danger);">{{.DDNSV6Error}}</code>
-          {{else if .DDNSV6IP}}
-            <span class="chip ok no-dot">同步成功</span>
-            当前 IP：<code>{{.DDNSV6IP}}</code>
-          {{else}}
-            <span class="chip warn no-dot">未同步</span>
-            <small>等待首次 tick</small>
-          {{end}}
-        </td>
-      </tr>
-    </table>
-    {{end}}
-
-    <form method="POST" action="/api/ddns/toggle" style="margin-top: 1rem;">
-      <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-      <input type="hidden" name="enabled" value="false">
-      <button type="submit" class="btn-secondary">关闭 DDNS</button>
-    </form>
+    <div class="settings-actions settings-actions-end" style="flex-wrap: wrap; gap: 0.5rem;">
+      <button type="submit" class="btn-primary">保存 DNS 同步配置</button>
+      {{if .DDNSEnabled}}
+        <button type="submit" class="btn-secondary" formaction="/api/ddns/sync-now">手动同步一次</button>
+      {{else}}
+        <button type="submit" class="btn-secondary" formaction="/api/ddns/toggle" name="enabled" value="true">启用 DDNS</button>
+      {{end}}
+      <button type="submit" class="btn-secondary" formaction="/api/ddns/fetch-remote">查询阿里云记录值</button>
+      {{if .DDNSEnabled}}
+        <button type="submit" class="btn-danger" formaction="/api/ddns/toggle" name="enabled" value="false">关闭 DDNS</button>
+      {{end}}
+    </div>
+  </form>
   {{else}}
-    <p>状态：<span class="chip warn no-dot">已关闭</span></p>
-    <p class="text-muted">启用后会按 <code>{{.DDNSPeriod}}</code> 周期把服务器当前 IP 推送到阿里云 DNS 记录 <code>{{.DDNSDomain}}</code>。</p>
-    <form method="POST" action="/api/ddns/toggle">
-      <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-      <input type="hidden" name="enabled" value="true">
-      <button type="submit" class="btn-primary">启用 DDNS 同步</button>
-    </form>
+    {{/* v2.86-pr23a:DDNS 功能本身未启用(DDNSSync==nil) ——
+         在 aliyun-card 末尾提示用户需要怎么做(改 docker-compose.yml)。 */}}
+    {{if .AliyunConfigured}}
+    <hr style="margin: 1.25rem 0; border: 0; border-top: 1px solid var(--ikev2-border, #2a3142);">
+    <div class="banner-warn" style="margin: 0; font-size: 0.8125rem;">
+      <div>
+        <strong>DDNS 自动同步未启用</strong>(跟 AccessKey 是两件独立的事)
+        <p style="margin-top: 0.4rem;">
+          AccessKey 已配好,但 DDNS 同步器要在 <code>docker-compose.yml</code> 里设:
+        </p>
+<pre style="background: rgba(0,0,0,0.35); padding: 0.6rem 0.8rem; border-radius: 4px; font-size: 0.75rem; margin: 0.4rem 0; overflow-x: auto;">
+environment:
+  - IKEV2_DDNS_ENABLED=true        # 启用 DDNS 同步
+  - IKEV2_DDNS_DOMAIN=example.com   # 阿里云主域名</pre>
+        <p style="margin-top: 0.4rem;">
+          改完 <code>docker compose up -d</code> 重启容器,这个 "DNS 同步" 块就会出现并可配置。
+        </p>
+      </div>
+    </div>
+    {{end}}
   {{end}}
 </div>
 {{end}}

@@ -31,18 +31,25 @@ type homeData struct {
 	// v2.85-PR8(Q1-04):swanctl.ListSAs 超过 3s 时设 true,模板渲染 fallback
 	SAsUnavailable bool
 
-	// v2-82 DDNS 状态,v2-84 加 family / per-family IP
-	DDNSConfigured bool   // 同步器是否配置
-	DDNSEnabled    bool   // 当前是否启用
-	DDNSFamily     string // v2-84:当前 family 配置(v4 / v6 / dual)
-	DDNSFailed     bool   // 最近一次是否失败
-	DDNSLastError  string // 失败原因(成功时空;dual 模式下是 v4+v6 拼接)
-	DDNSLastTime   string // 最近同步时间(ISO8601,空=从未同步)
-	DDNSCurrentIP  string // 同步到的目标 IP(最近成功的 NewIP;v2-84 dual 下填 V6IP)
-	DDNSV4IP       string // v2-84:dual 模式下独立显示 v4 IP
-	DDNSV4Error    string // v2-84:dual 模式下独立显示 v4 error
-	DDNSV6IP       string // v2-84:dual 模式下独立显示 v6 IP
-	DDNSV6Error    string // v2-84:dual 模式下独立显示 v6 error
+	// v2-82 DDNS 状态,v2-84 加 family / per-family IP,v2.86-pr23a 改独立 A/AAAA bool
+	DDNSConfigured      bool   // 同步器是否配置
+	DDNSEnabled         bool   // 当前是否启用(总开关)
+	DDNSFamily          string // v2-84:当前 family 配置(v4 / v6 / dual)— v2.86-pr23a:deprecated,从 EnableA/AAAA 反推
+	DDNSEnableA         bool   // v2.86-pr23a:是否同步 A 记录(独立 bool,UI checkbox)
+	DDNSEnableAAAA      bool   // v2.86-pr23a:是否同步 AAAA 记录(独立 bool,UI checkbox)
+	DDNSFailed          bool   // 最近一次是否失败
+	DDNSLastError       string // 失败原因(成功时空;dual 模式下是 v4+v6 拼接)
+	DDNSLastTime        string // 最近同步时间(ISO8601,空=从未同步)
+	DDNSCurrentIP       string // 同步到的目标 IP(最近成功的 NewIP;v2-84 dual 下填 V6IP)
+	DDNSV4IP            string // v2-84:dual 模式下独立显示 v4 IP
+	DDNSV4Error         string // v2-84:dual 模式下独立显示 v4 error
+	DDNSV6IP            string // v2-84:dual 模式下独立显示 v6 IP
+	DDNSV6Error         string // v2-84:dual 模式下独立显示 v6 error
+	DDNSRemoteA         string // v2.86-pr23a:阿里云当前 A 记录(fetch-remote 后填)
+	DDNSRemoteAAAA      string // v2.86-pr23a:阿里云当前 AAAA 记录(fetch-remote 后填)
+	DDNSRemoteDomain    string // v2.86-pr23a:fetch-remote 时查询的域名
+	DDNSRemoteFetchedAt string // v2.86-pr23a:fetch-remote 时间("已查询"标签用)
+	DDNSRemoteError     string // v2.86-pr23a:fetch-remote 错误信息
 
 	// v2-83 阿里云凭证状态(给 home 模板渲染用)
 	AliyunConfigured  bool   // 凭证文件是否存在
@@ -65,17 +72,18 @@ type homeData struct {
 	SubnetUpdatedAt  int64  // unix seconds,面板最后修改时间
 
 	// v2.86-pr22:证书有效期(LE 模式才有值)
-	CertDaysLeft   int    // 距过期天数(自签模式 = -1 表示不适用)
-	CertExpiresAt  string // "YYYY-MM-DD" 格式;自签模式 = ""
-	CertLastRenewFailed bool // true = 续签失败标志存在
+	CertDaysLeft        int    // 距过期天数(自签模式 = -1 表示不适用)
+	CertExpiresAt       string // "YYYY-MM-DD" 格式;自签模式 = ""
+	CertLastRenewFailed bool   // true = 续签失败标志存在
 
 	// v2.86-pr22:DDNS 同步参数(给面板显示探测目标 / cron 间隔 / 域名 / RR)
-	DDNSDomain       string // 完整域名(vpn.example.com)
-	DDNSBaseDomain   string // 裸域名(example.com)
-	DDNSRR           string // 主机记录(vpn / @)
-	DDNSDetectTarget string // IPv4 探测目标(8.8.8.8)
-	DDNSPeriod       string // 人类可读周期(60s / 5m)
-	DDNSIface        string // 监听接口(空 = any)
+	DDNSDomain        string // 完整域名(vpn.example.com)
+	DDNSBaseDomain    string // 裸域名(example.com)
+	DDNSRR            string // 主机记录(vpn / @)
+	DDNSDetectTarget  string // IPv4 探测目标(8.8.8.8)
+	DDNSPeriod        string // 人类可读周期(60s / 5m)
+	DDNSPeriodSeconds int    // v2.86-pr23a:周期秒数(给 input number 默认值用)
+	DDNSIface         string // 监听接口(空 = any)
 	// 当前 swanctl.conf 正在生效的值(独立于 panelstate,看运行态)
 	SubnetCurrentIPv4 string
 	SubnetCurrentIPv6 string
@@ -131,33 +139,40 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 	isDefaultPassword := loadIsDefaultPassword(s)
 
 	data := homeData{
-		PageMeta:          PageMeta{Page: "home", Title: "首页", PageKey: "home", AdminUsername: admin.Username, CSRFToken: csrfTokenOf(sess)},
-		TotalUsers:        total,
-		ActiveSAs:         activeSAs,
-		TotalActive:       totalActive,
-		SAsUnavailable:    sasUnavailable,
-		LEWarning:         leWarning,
-		ServerAddr:        s.ServerAddr,
-		DDNSConfigured:    ddnsStatus.configured,
-		DDNSEnabled:       ddnsStatus.enabled,
-		DDNSFamily:        ddnsStatus.family,
-		DDNSFailed:        ddnsStatus.failed,
-		DDNSLastError:     ddnsStatus.lastErr,
-		DDNSLastTime:      ddnsStatus.lastTime,
-		DDNSCurrentIP:     ddnsStatus.currentIP,
-		DDNSV4IP:          ddnsStatus.v4IP,
-		DDNSV4Error:       ddnsStatus.v4Err,
-		DDNSV6IP:          ddnsStatus.v6IP,
-		DDNSV6Error:       ddnsStatus.v6Err,
-		AliyunConfigured:  aliyunConfigured,
-		AliyunKeyIDMasked: aliyunKeyIDMasked,
-		AliyunKeySource:   s.AliyunAccessKeySource,
-		CertConfigured:    certCfg.configured,
-		CertMode:          certCfg.mode,
-		CertDomain:        certCfg.domain,
-		CertServerCN:      certCfg.serverCN,
-		CertACMEEmail:     certCfg.acmeEmail,
-		CertSource:        certCfg.source,
+		PageMeta:            PageMeta{Page: "home", Title: "首页", PageKey: "home", AdminUsername: admin.Username, CSRFToken: csrfTokenOf(sess)},
+		TotalUsers:          total,
+		ActiveSAs:           activeSAs,
+		TotalActive:         totalActive,
+		SAsUnavailable:      sasUnavailable,
+		LEWarning:           leWarning,
+		ServerAddr:          s.ServerAddr,
+		DDNSConfigured:      ddnsStatus.configured,
+		DDNSEnabled:         ddnsStatus.enabled,
+		DDNSFamily:          ddnsStatus.family,
+		DDNSEnableA:         ddnsStatus.enableA,
+		DDNSEnableAAAA:      ddnsStatus.enableAAAA,
+		DDNSFailed:          ddnsStatus.failed,
+		DDNSLastError:       ddnsStatus.lastErr,
+		DDNSLastTime:        ddnsStatus.lastTime,
+		DDNSCurrentIP:       ddnsStatus.currentIP,
+		DDNSV4IP:            ddnsStatus.v4IP,
+		DDNSV4Error:         ddnsStatus.v4Err,
+		DDNSV6IP:            ddnsStatus.v6IP,
+		DDNSV6Error:         ddnsStatus.v6Err,
+		DDNSRemoteA:         ddnsStatus.remoteA,
+		DDNSRemoteAAAA:      ddnsStatus.remoteAAAA,
+		DDNSRemoteDomain:    ddnsStatus.remoteDomain,
+		DDNSRemoteError:     ddnsStatus.remoteError,
+		DDNSRemoteFetchedAt: ddnsStatus.remoteFetchedAt,
+		AliyunConfigured:    aliyunConfigured,
+		AliyunKeyIDMasked:   aliyunKeyIDMasked,
+		AliyunKeySource:     s.AliyunAccessKeySource,
+		CertConfigured:      certCfg.configured,
+		CertMode:            certCfg.mode,
+		CertDomain:          certCfg.domain,
+		CertServerCN:        certCfg.serverCN,
+		CertACMEEmail:       certCfg.acmeEmail,
+		CertSource:          certCfg.source,
 		// v2.86-PR13.2:subnet 状态
 		SubnetConfigured:  subnetCfg.configured,
 		SubnetIPv4:        subnetCfg.ipv4,
@@ -194,6 +209,7 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 		data.DDNSRR = s.DDNSSync.RR()
 		data.DDNSDetectTarget = s.DDNSSync.DetectTarget()
 		data.DDNSPeriod = s.DDNSSync.Period().String()
+		data.DDNSPeriodSeconds = s.DDNSSync.PeriodSeconds()
 		data.DDNSIface = s.DDNSSync.Iface()
 	}
 
@@ -357,15 +373,19 @@ func loadLEWarning(s *Server) string {
 	return ""
 }
 
-// ddnsStatusData homeData 用的 DDNS 状态集合(v2-84)。
+// ddnsStatusData homeData 用的 DDNS 状态集合(v2-84 + v2.86-pr23a 扩展)。
 //
 // 为什么用 struct 而不是多返回值:
 //   - v2-82 6 个返回值已经难读,v2-84 加 5 个字段(v4IP/V4Err/V6IP/V6Err/family)后
 //     11 个返回值根本没法读。改 struct 后 homeData 字段也清爽。
+//   - v2.86-pr23a 加 EnableA/EnableAAAA / RemoteSnapshot 字段,继续走 struct。
 type ddnsStatusData struct {
 	configured bool
 	enabled    bool
 	family     string
+	// v2.86-pr23a:EnableA/EnableAAAA 替代 family 枚举(独立 bool,UI checkbox)
+	enableA    bool
+	enableAAAA bool
 	failed     bool
 	lastErr    string
 	lastTime   string
@@ -374,6 +394,12 @@ type ddnsStatusData struct {
 	v4Err      string
 	v6IP       string
 	v6Err      string
+	// v2.86-pr23a:RemoteSnapshot(用户点了"查询阿里云记录值"按钮后的结果)
+	remoteA         string
+	remoteAAAA      string
+	remoteDomain    string
+	remoteError     string
+	remoteFetchedAt string // ISO8601 in display timezone
 }
 
 // loadDDNSStatus 收集 DDNS 状态给 home 模板。
@@ -382,6 +408,7 @@ type ddnsStatusData struct {
 //   - Sync 为 nil → configured=false,模板跳过整个卡片
 //   - 启用时填充最近一次同步信息,失败时填充 failed + lastError
 //   - v2-84:dual 模式下 V4IP/V6IP/V4Err/V6Err 独立显示;单 family 模式下填 NewIP 兼容字段
+//   - v2.86-pr23a:额外填 EnableA/EnableAAAA(给 UI checkbox 用)+ RemoteSnapshot(fetch-remote 结果)
 func loadDDNSStatus(s *Server) ddnsStatusData {
 	if s.DDNSSync == nil {
 		return ddnsStatusData{}
@@ -394,6 +421,23 @@ func loadDDNSStatus(s *Server) ddnsStatusData {
 		configured: true,
 		enabled:    enabled,
 		family:     family,
+		// v2.86-pr23a:独立 bool(给 UI checkbox)
+		enableA:    s.DDNSSync.EnableA(),
+		enableAAAA: s.DDNSSync.EnableAAAA(),
+	}
+
+	// v2.86-pr23a:RemoteSnapshot(fetch-remote 结果)
+	rs := s.DDNSSync.RemoteSnapshot()
+	if !rs.FetchedAt.IsZero() {
+		loc, err := time.LoadLocation(s.DisplayTimezone)
+		if err != nil || loc == nil {
+			loc = time.UTC
+		}
+		out.remoteFetchedAt = rs.FetchedAt.In(loc).Format("2006-01-02 15:04:05 MST")
+		out.remoteA = rs.A
+		out.remoteAAAA = rs.AAAA
+		out.remoteDomain = rs.Domain
+		out.remoteError = rs.Error
 	}
 
 	if !last.Time.IsZero() {
