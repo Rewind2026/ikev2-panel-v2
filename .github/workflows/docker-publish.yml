@@ -67,26 +67,39 @@ jobs:
         id: meta
         run: |
           # 触发顺序：tag > main push > workflow_dispatch
+          # 同时算出 PANEL_VERSION(v2.86-PR18)给 Docker build --build-arg,
+          # 让镜像里 /etc/ikev2-panel-version 不再 fallback 成 "dev"。
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            # push tag v2.79.2 → :2.79.2 + :v2.79.2 + :latest
-            RAW_TAG="${GITHUB_REF_NAME}"            # e.g. v2.79.2
-            SHORT="${RAW_TAG#v}"                     # e.g. 2.79.2
+            # push tag v2.86-pr15 → :2.86-pr15 + :v2.86-pr15 + :latest
+            RAW_TAG="${GITHUB_REF_NAME}"            # e.g. v2.86-pr15
+            SHORT="${RAW_TAG#v}"                     # e.g. 2.86-pr15
             TAGS="${REGISTRY}/${IMAGE_NAME}:${SHORT},${REGISTRY}/${IMAGE_NAME}:${RAW_TAG},${REGISTRY}/${IMAGE_NAME}:latest"
+            PANEL_VERSION="${SHORT}"                 # Dockerfile ARG PANEL_VERSION
+            VERSION_SOURCE="tag:${RAW_TAG}"
           elif [[ "${GITHUB_REF_TYPE}" == "branch" && "${GITHUB_REF_NAME}" == "main" ]]; then
             # push main → :latest + :sha-<7 位>（部署端默认拉 :latest）
             SHA="${GITHUB_SHA::7}"
             TAGS="${REGISTRY}/${IMAGE_NAME}:latest,${REGISTRY}/${IMAGE_NAME}:sha-${SHA}"
+            # v2.86-PR18:main push 时镜像里也写明 "main-<sha>",docker inspect
+            # + 启动 banner 都能看出来"这是从哪个 commit 打的"。
+            PANEL_VERSION="main-${SHA}"
+            VERSION_SOURCE="main:${SHA}"
           elif [[ -n "${{ github.event.inputs.tag }}" ]]; then
             # 手动触发 + 自定义 tag
             CUSTOM="${{ github.event.inputs.tag }}"
             TAGS="${REGISTRY}/${IMAGE_NAME}:${CUSTOM}"
+            PANEL_VERSION="${CUSTOM}"
+            VERSION_SOURCE="dispatch:${CUSTOM}"
           else
             # fallback（不会走到这里，main push 已覆盖）
             SHA="${GITHUB_SHA::7}"
             TAGS="${REGISTRY}/${IMAGE_NAME}:${SHA},${REGISTRY}/${IMAGE_NAME}:sha-${SHA}"
+            PANEL_VERSION="${SHA}"
           fi
           echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+          echo "panel_version=${PANEL_VERSION}" >> "$GITHUB_OUTPUT"
           echo "Resolved tags: ${TAGS}"
+          echo "PANEL_VERSION: ${PANEL_VERSION} (${VERSION_SOURCE:-fallback})"
 
       - name: Build & push
         uses: docker/build-push-action@v6
@@ -95,6 +108,13 @@ jobs:
           platforms: ${{ matrix.platform }}
           # tag 通过 -t 多次指定（buildx 支持逗号分隔）
           tags: ${{ steps.meta.outputs.tags }}
+          # v2.86-PR18:把算好的版本号传给 Dockerfile ARG,让 /etc/ikev2-panel-version
+          # 不再 fallback 到 "dev"。默认 Dockerfile ARG PANEL_VERSION=dev。
+          # docker/build-push-action 接受 list 形式,逐行一个 KEY=value。
+          build-args: |
+            PANEL_VERSION=${{ steps.meta.outputs.panel_version }}
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+            VCS_REF=${{ github.sha }}
           # QEMU arm64 构建不需要 cache-from（runner 是 amd64，cache 命名空间会冲突）
           cache-from: type=gha,scope=${{ matrix.platform }}
           cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
