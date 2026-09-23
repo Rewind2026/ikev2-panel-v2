@@ -549,6 +549,50 @@ tbody tr:hover td{ background:rgba(34,211,238,0.04);}
 }
 .topbar-user-pill .logout:hover{ background:rgba(255,255,255,0.06); color:var(--ikev2-danger);}
 
+/* v2.86-pr21:gear + dropdown menu (账号设置 / 登出) */
+.topbar-user-pill .topbar-user-name{ font-weight:600; max-width:10rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.topbar-user-pill{ position:relative; }
+.topbar-gear{
+  display:inline-flex; align-items:center; justify-content:center;
+  width:28px; height:28px;
+  background:transparent; border:1px solid rgba(255,255,255,0.08);
+  color:var(--ikev2-fg-muted);
+  border-radius:50%;
+  cursor:pointer; padding:0;
+  transition:background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+.topbar-gear:hover{ background:rgba(34,211,238,0.12); color:var(--ikev2-brand); border-color:rgba(34,211,238,0.35); }
+.topbar-gear[aria-expanded="true"]{ background:rgba(34,211,238,0.18); color:var(--ikev2-brand); border-color:rgba(34,211,238,0.45); }
+
+.topbar-menu{
+  position:absolute; top:calc(var(--ikev2-hud-h) + 6px); right:0;
+  min-width:180px;
+  background:rgba(13,17,28,0.96);
+  backdrop-filter:blur(12px);
+  border:1px solid rgba(255,255,255,0.10);
+  border-radius:8px;
+  box-shadow:0 12px 32px rgba(0,0,0,0.55), 0 0 0 1px rgba(34,211,238,0.06);
+  padding:0.35rem;
+  z-index:200;
+  display:flex; flex-direction:column;
+}
+.topbar-menu-item{
+  display:flex; align-items:center; gap:0.6rem;
+  width:100%; padding:0.5rem 0.65rem;
+  background:transparent; border:0;
+  color:var(--ikev2-fg);
+  font-size:0.8125rem;
+  text-align:left;
+  border-radius:5px;
+  cursor:pointer;
+  text-decoration:none;
+  font-family:inherit;
+}
+.topbar-menu-item:hover{ background:rgba(34,211,238,0.10); color:var(--ikev2-brand); }
+.topbar-menu-item-danger:hover{ background:rgba(244,63,94,0.12); color:var(--ikev2-danger); }
+.topbar-menu-form{ margin:0; padding:0; display:contents; }
+.topbar-menu-sep{ border:0; border-top:1px solid rgba(255,255,255,0.08); margin:0.25rem 0; }
+
 /* legacy classes kept for templates using them */
 .topbar-user, .topbar-logout-form, .topbar-logout, .theme-toggle{ display:none;}
 

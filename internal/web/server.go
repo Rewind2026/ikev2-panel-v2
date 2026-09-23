@@ -179,6 +179,13 @@ func New(srv *Server, staticDir string) http.Handler {
 	// v2.85-PR8(U10):双确认 - GET 拉确认页,POST 才真删
 	mux.Handle("GET /users/{id}/delete", protect(http.HandlerFunc(srv.handleUserDeleteConfirmPage)))
 	mux.Handle("POST /users/{id}/delete/confirm", protectPOST(http.HandlerFunc(srv.handleUserDelete)))
+
+	// v2.86-pr21:账号自服务 — admin 修改自己的密码
+	//   - GET  /account               渲染表单
+	//   - POST /api/account/password  处理表单(old_password + new_password)
+	mux.Handle("GET /account", protect(http.HandlerFunc(srv.handleAccountPage)))
+	mux.Handle("POST /api/account/password", protectPOST(http.HandlerFunc(srv.handleAccountChangePassword)))
+
 	mux.Handle("POST /logout", protectPOST(http.HandlerFunc(srv.handleLogout)))
 
 	// v2-82：DDNS API(面板 UI 调);v2-84 加 /api/ddns/family
