@@ -468,6 +468,55 @@
           });
         }
 
+        // v2.86-pr23g:按钮 loading 反馈 hook。
+        //
+        // 设计:任何 button.btn-primary / .btn-secondary / .btn-danger[type="submit"]
+        // 在 click 时立即禁用 + 替换内容为 spinner + "处理中...",防止用户重复点击
+        // 触发多次 POST(尤其是 /api/ddns/sync-now 这种会触发后台 tick 的操作)。
+        //
+        // 视觉:不引入新 CSS — 复用 .chip.muted 的"微暗 + 圆形点"作为 spinner 占位,
+        // 跟现有 dark theme 一致。
+        //
+        // 注意:form 提交后浏览器原生会跳转,不需要手动恢复按钮状态 —
+        // 跳转后旧 DOM 销毁,新页面按钮是 fresh 状态。如果操作失败 +
+        // 服务端不 redirect(JSON 响应),JS 会在 fetch 完成后 reset。
+        function initButtonLoading() {
+          document.querySelectorAll('form').forEach(function (form) {
+            if (form.__ikev2BtnLoadingInit) return;
+            form.__ikev2BtnLoadingInit = true;
+            form.addEventListener('submit', function (ev) {
+              // 只 hook submit button[type="submit"](非 button[type="button"])
+              var btn = ev.submitter;
+              if (!btn || btn.type !== 'submit') return;
+              if (btn.disabled) return; // 已经 disabled 就别再处理
+              // 跳过有 data-no-loading 的按钮(供特殊场景 escape)
+              if (btn.hasAttribute('data-no-loading')) return;
+              // 记录原始文案(后续 reset 用)
+              if (!btn.__ikev2OrigText) btn.__ikev2OrigText = btn.innerHTML;
+              btn.disabled = true;
+              btn.setAttribute('aria-busy', 'true');
+              btn.style.opacity = '0.7';
+              btn.style.cursor = 'wait';
+              // 替换内容:小圆点 spinner + "处理中..." 文案
+              btn.innerHTML =
+                '<span style="display:inline-flex;align-items:center;gap:0.4rem;">' +
+                '<span style="display:inline-block;width:10px;height:10px;border-radius:50%;' +
+                'background:currentColor;animation:ikev2-btn-spin 800ms linear infinite;flex-shrink:0;"></span>' +
+                '<span>处理中…</span>' +
+                '</span>';
+            });
+          });
+        }
+
+        // 单次 spin 动画(全局,所有按钮共用)
+        function initBtnSpinKeyframes() {
+          if (document.getElementById('ikev2-btn-spin-keyframes')) return;
+          var s = document.createElement('style');
+          s.id = 'ikev2-btn-spin-keyframes';
+          s.textContent = '@keyframes ikev2-btn-spin{to{transform:rotate(360deg)}}';
+          document.head.appendChild(s);
+        }
+
         function initAll() {
           initTopbarActive();
           initDismissable();
@@ -475,6 +524,8 @@
           initCopyBtn();
           initTopbarMenu();
           initPasswordWidget();
+          initBtnSpinKeyframes();
+          initButtonLoading();
         }
 
         // 此 <script> 在 </body> 前直接执行,DOM 已解析,querySelector 立即可用。

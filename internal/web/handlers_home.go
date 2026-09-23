@@ -22,6 +22,9 @@ type homeData struct {
 	PageMeta   // P1-B
 	TotalUsers int
 
+	// v2.86-pr23g:P1-A flash 一次性提示(DDNS 保存 / 同步 / 查询 / 创建 反馈)
+	Flash string
+
 	// P1-C M6 监控数据
 	ActiveSAs   []swanctl.SA // 当前活跃 SA(ESTABLISHED 状态)
 	TotalActive int          // ESTABLISHED SA 总数
@@ -43,8 +46,11 @@ type homeData struct {
 	DDNSCurrentIP       string // 同步到的目标 IP(最近成功的 NewIP;v2-84 dual 下填 V6IP)
 	DDNSV4IP            string // v2-84:dual 模式下独立显示 v4 IP
 	DDNSV4Error         string // v2-84:dual 模式下独立显示 v4 error
+	DDNSV4Attempted     bool   // v2.86-pr23g:v4 这轮 tick 是否真的探测过(区分未启用 / 等待首次)
 	DDNSV6IP            string // v2-84:dual 模式下独立显示 v6 IP
 	DDNSV6Error         string // v2-84:dual 模式下独立显示 v6 error
+	DDNSV6Attempted     bool   // v2.86-pr23g:v6 这轮 tick 是否真的探测过
+	DDNSAttempted       bool   // v2.86-pr23g:整轮 tick 是否跑过探测(配 Runing vs Idle 显示)
 	DDNSRemoteA         string // v2.86-pr23a:阿里云当前 A 记录(fetch-remote 后填)
 	DDNSRemoteAAAA      string // v2.86-pr23a:阿里云当前 AAAA 记录(fetch-remote 后填)
 	DDNSRemoteDomain    string // v2.86-pr23a:fetch-remote 时查询的域名
@@ -126,6 +132,14 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 		totalActive = 0
 	}
 
+	// v2.86-pr23g:P1-A flash 消费(给顶部 banner — DDNS 操作反馈显示)
+	var flashMsg string
+	if sess != nil && s.FlashStore != nil {
+		if f, err := s.FlashStore.Consume(sess.ID); err == nil {
+			flashMsg = f.Message
+		}
+	}
+
 	// P1-C: LE 续签告警
 	leWarning := loadLEWarning(s)
 
@@ -146,6 +160,7 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 
 	data := homeData{
 		PageMeta:            PageMeta{Page: "home", Title: "首页", PageKey: "home", AdminUsername: admin.Username, CSRFToken: csrfTokenOf(sess)},
+		Flash:               flashMsg,
 		TotalUsers:          total,
 		ActiveSAs:           activeSAs,
 		TotalActive:         totalActive,
@@ -163,8 +178,11 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 		DDNSCurrentIP:       ddnsStatus.currentIP,
 		DDNSV4IP:            ddnsStatus.v4IP,
 		DDNSV4Error:         ddnsStatus.v4Err,
+		DDNSV4Attempted:     ddnsStatus.v4Attempted,
 		DDNSV6IP:            ddnsStatus.v6IP,
 		DDNSV6Error:         ddnsStatus.v6Err,
+		DDNSV6Attempted:     ddnsStatus.v6Attempted,
+		DDNSAttempted:       ddnsStatus.attempted,
 		DDNSRemoteA:         ddnsStatus.remoteA,
 		DDNSRemoteAAAA:      ddnsStatus.remoteAAAA,
 		DDNSRemoteDomain:    ddnsStatus.remoteDomain,
@@ -399,16 +417,19 @@ type ddnsStatusData struct {
 	enabled    bool
 	family     string
 	// v2.86-pr23a:EnableA/EnableAAAA 替代 family 枚举(独立 bool,UI checkbox)
-	enableA    bool
-	enableAAAA bool
-	failed     bool
-	lastErr    string
-	lastTime   string
-	currentIP  string
-	v4IP       string
-	v4Err      string
-	v6IP       string
-	v6Err      string
+	enableA     bool
+	enableAAAA  bool
+	failed      bool
+	lastErr     string
+	lastTime    string
+	currentIP   string
+	v4IP        string
+	v4Err       string
+	v4Attempted bool // v2.86-pr23g
+	v6IP        string
+	v6Err       string
+	v6Attempted bool // v2.86-pr23g
+	attempted   bool // v2.86-pr23g:整轮 tick 是否跑过
 	// v2.86-pr23a:RemoteSnapshot(用户点了"查询阿里云记录值"按钮后的结果)
 	remoteA         string
 	remoteAAAA      string
@@ -466,8 +487,10 @@ func loadDDNSStatus(s *Server) ddnsStatusData {
 		if family == "dual" {
 			out.v4IP = last.V4IP
 			out.v4Err = last.V4Error
+			out.v4Attempted = last.V4Attempted
 			out.v6IP = last.V6IP
 			out.v6Err = last.V6Error
+			out.v6Attempted = last.V6Attempted
 			out.currentIP = last.V6IP
 			// dual 模式下错误信息合并显示
 			if last.V4Error != "" && last.V6Error != "" {
@@ -487,11 +510,15 @@ func loadDDNSStatus(s *Server) ddnsStatusData {
 			if family == "v4" {
 				out.v4IP = last.NewIP
 				out.v4Err = last.Error
+				out.v4Attempted = last.Attempted
 			} else { // "v6"
 				out.v6IP = last.NewIP
 				out.v6Err = last.Error
+				out.v6Attempted = last.Attempted
 			}
 		}
+		// v2.86-pr23g:整轮 Attempted 透传(只有 dual 走完 loop / 单 family 真正跑过 才 true)
+		out.attempted = last.Attempted
 	} else if exists := lastDDNSFailedExists(); exists {
 		// goroutine 还没 tick 但文件存在(上次运行失败)→ 也算失败
 		out.failed = true

@@ -98,11 +98,24 @@ type LastSync struct {
 	Time    time.Time // 整轮最近一次 tick 时间
 	Success bool      // 整轮 = 任一 enabled family 成功过(详细见 D5 proposal)
 
+	// v2.86-pr23g:整轮"有没有真正跑过探测"。区分:
+	//   - tick 入口早 return(凭证缺 / Domain 空 / 节流整轮跳过)→ Attempted=false
+	//   - tick 跑到探测阶段(enabled family 之一跑了)→ Attempted=true
+	// UI 用这个判断"等待首次 tick" vs "已经尝试过(成功/失败/无变化)"。
+	Attempted bool
+
 	// v2-84:per-family 状态。空字符串 = 该 family 未启用 / 未探测 / 探测失败。
 	V4IP    string
 	V4Error string
 	V6IP    string
 	V6Error string
+
+	// v2.86-pr23g:per-family "这次 tick 是否实际尝试过"(区分未启用 / 被节流跳过)。
+	//   - V4Attempted=true:tick 至少跑过一次 v4 探测(无论成功失败)
+	//   - V4Attempted=false:tick 没跑 v4(unenabled / 全轮 throttle 跳过 / 全轮早 return)
+	// UI 用这俩字段把"未同步/未启用/未尝试" 三态分开。
+	V4Attempted bool
+	V6Attempted bool
 
 	// v2-83 兼容字段(omitempty,dual 模式下置空;单 family 模式才填)。
 	// 移除时机:v2-85+ 确认 v2-83 客户端没人用了再删。
@@ -843,6 +856,7 @@ func (s *Sync) tick() {
 		switch r.recordType {
 		case dns.RecordTypeAAAA:
 			ls.V6IP = r.newIP
+			ls.V6Attempted = true
 			if r.err != nil {
 				ls.V6Error = r.err.Error()
 			} else if r.newIP != "" {
@@ -850,6 +864,7 @@ func (s *Sync) tick() {
 			}
 		case dns.RecordTypeA:
 			ls.V4IP = r.newIP
+			ls.V4Attempted = true
 			if r.err != nil {
 				ls.V4Error = r.err.Error()
 			} else if r.newIP != "" {
@@ -859,6 +874,9 @@ func (s *Sync) tick() {
 		// 节流 skip(r.err==nil 但 newIP 非空 且 oldIP 为空):不算成功也不算失败
 		// 等下次 tick 再试
 	}
+	// v2.86-pr23g:Attempted 字段 — 区分"tick 跑过"和"tick 早 return / 全 throttle 跳过"。
+	// 只有 runV6/runV4 至少一个为 true 且产生 results 时 Attempted=true。
+	ls.Attempted = anyAttempted
 
 	// Success = 任一 enabled family 成功过
 	if anyAttempted {
