@@ -32,6 +32,7 @@ type usersListData struct {
 	Users       []*store.User
 	NewPassword string // 仅创建后一次性显示
 	Flash       string // 顶部提示（如"已重置密码"）
+	FlashKind   string // v2.86-pr23j:flash 语义(info/success/warn/error),决定 banner 配色
 }
 
 // usersNewData 新增表单模板数据。
@@ -54,6 +55,7 @@ type userDetailData struct {
 	User        *store.User
 	NewPassword string // 重置密码后一次性显示
 	Flash       string
+	FlashKind   string // v2.86-pr23j:flash 语义(info/success/warn/error),决定 banner 配色
 	Error       string
 
 	// v2.86-PR12.21:Visual-first topology + breadcrumb
@@ -72,14 +74,14 @@ type userDeleteConfirmData struct {
 
 // pageUsersList 用户列表页元数据常量。
 const (
-	pageUsersList     = "users_list"
-	pageUserNew       = "user_new"
-	pageUserDetail    = "user_detail"
-	pageDeleteConfirm = "user_delete_confirm"
-	defaultSpeedMbps  = 10
+	pageUsersList      = "users_list"
+	pageUserNew        = "user_new"
+	pageUserDetail     = "user_detail"
+	pageDeleteConfirm  = "user_delete_confirm"
+	defaultSpeedMbps   = 10
 	defaultPasswordLen = 12
-	maxNoteChars      = 200
-	maxSpeedMbps      = 1000
+	maxNoteChars       = 200
+	maxSpeedMbps       = 1000
 )
 
 // handleUsersList GET /users
@@ -94,11 +96,12 @@ func (s *Server) handleUsersList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// P1-A：消费 session-only flash（一次性,渲染后自动消失）
-	var newPassword, msg string
+	var newPassword, msg, msgKind string
 	if sess != nil && s.FlashStore != nil {
 		if f, err := s.FlashStore.Consume(sess.ID); err == nil {
 			newPassword = f.NewPassword
 			msg = f.Message
+			msgKind = f.Kind
 		}
 	}
 
@@ -107,6 +110,7 @@ func (s *Server) handleUsersList(w http.ResponseWriter, r *http.Request) {
 		Users:       users,
 		NewPassword: newPassword,
 		Flash:       msg,
+		FlashKind:   msgKind,
 	})
 }
 
@@ -263,11 +267,12 @@ func (s *Server) handleUserDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var newPassword, msg string
+	var newPassword, msg, msgKind string
 	if sess != nil && s.FlashStore != nil {
 		if f, err := s.FlashStore.Consume(sess.ID); err == nil {
 			newPassword = f.NewPassword
 			msg = f.Message
+			msgKind = f.Kind
 		}
 	}
 
@@ -277,6 +282,7 @@ func (s *Server) handleUserDetail(w http.ResponseWriter, r *http.Request) {
 		User:        u,
 		NewPassword: newPassword,
 		Flash:       msg,
+		FlashKind:   msgKind,
 		ServerAddr:  s.ServerAddr,
 		NowUnix:     time.Now().Unix(),
 		UserOnline:  false,

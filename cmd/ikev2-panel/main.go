@@ -403,7 +403,7 @@ func main() {
 	//
 	// v2-84 改动:
 	//   - 装配条件改为 cfg.DDNSEnabled(去掉了 cfg.IPv6Only 强约束)
-	//   - 加 cfg.DDNSFamily + cfg.DDNSProbeTarget 注入
+	//   - 加 cfg.DDNSFamily 注入(cfg.DDNSProbeTarget 已废弃)
 	//   - 注入 IPv4 探测 swanctl.DetectGlobalV4
 	//
 	// v2.86-pr23a:面板可改 RR / EnableA / EnableAAAA / Period,启动时从
@@ -452,11 +452,11 @@ func main() {
 		credStore := panelstate.NewStore()
 		_, _ = credStore.LoadAliyun() // 启动时预热缓存(失败也不 fatal,getter 会重试)
 		ddnsSync = ddns.NewSync(ddns.Config{
-			Enabled:      cfg.DDNSEnabled,
-			Family:       cfg.DDNSFamily, // v2-84:"v4" / "v6" / "dual"(pr23a 已根据 panelstate 反推)
-			EnableA:      ddnsCfg != nil && ddnsCfg.EnableA,
-			EnableAAAA:   ddnsCfg != nil && ddnsCfg.EnableAAAA,
-			DetectTarget: cfg.DDNSProbeTarget, // v2-84:IPv4 探测目标
+			Enabled:    cfg.DDNSEnabled,
+			Family:     cfg.DDNSFamily, // v2-84:"v4" / "v6" / "dual"(pr23a 已根据 panelstate 反推)
+			EnableA:    ddnsCfg != nil && ddnsCfg.EnableA,
+			EnableAAAA: ddnsCfg != nil && ddnsCfg.EnableAAAA,
+			// v2.86-pr23l:DetectTarget 字段废弃,IPv4 探测改用 internal/publicip API。
 			// env 启动值作为 fallback,getter 优先
 			AliyunAccessKeyID:     cfg.AliyunAccessKeyID,
 			AliyunAccessKeySecret: cfg.AliyunAccessKeySecret,

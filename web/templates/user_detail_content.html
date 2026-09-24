@@ -54,16 +54,14 @@
   </div>
 </div>
 
-{{if .Flash}}<div class="banner-warn alert-warn">{{.Flash}}</div>{{end}}
-{{if .NewPassword}}
-<div class="banner-warn alert-warn">
-  <div>
-    <strong>用户密码已重置:</strong><code style="font-size: 0.9375rem;">{{.NewPassword}}</code>
-    <small style="display: block; margin-top: 0.4rem;">⚠️ 仅显示这一次，请记录后再关闭。</small>
-  </div>
-</div>
+{{if .Flash}}
+  {{$kind := or .FlashKind "info"}}
+  {{template "banner" (dict "Kind" $kind "Msg" .Flash "ExtraClass" "mb-2")}}
 {{end}}
-{{if .Error}}<div class="banner-danger alert-danger">{{.Error}}</div>{{end}}
+{{if .NewPassword}}
+  {{template "banner" (dict "Kind" "warn" "Msg" (printf "<strong>用户密码已重置:</strong><code style=\"font-size: 0.9375rem;\">%s</code><small style=\"display: block; margin-top: 0.4rem;\">⚠️ 仅显示这一次,请记录后再关闭。</small>" .NewPassword))}}
+{{end}}
+{{if .Error}}{{template "banner" (dict "Kind" "error" "Msg" .Error)}}{{end}}
 
 <div class="dashboard-grid">
   <div class="dashboard-main">

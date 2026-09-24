@@ -199,12 +199,18 @@ services:
       #
       # v2-84 新增:
       #   IKEV2_DDNS_FAMILY     - v4 / v6 / dual(默认 dual,即 A+AAAA 都同步)
-      #   IKEV2_DDNS_PROBE_TARGET - IPv4 探测目标(默认 8.8.8.8;大陆可改 223.5.5.5)
       #
-      # 注意:IPv4 DDNS 必须 host 网络(bridge 网络下 8.8.8.8 不通 / 拿到容器 IP)
+      # v2.86-pr23l 重大改动:
+      #   IKEV2_DDNS_PROBE_TARGET 已废弃。IPv4 公网 IP 由 internal/publicip
+      #   多家 API fallback 探测(境内节点:ip.cn / ipip.net;国际 fallback:
+      #   api.ipify.org / ifconfig.me / icanhazip.com),不再使用 net.Dial UDP
+      #   拿 LocalAddr 的旧实现。这样即使在 CGNAT / bridge 网络 / 多网卡场景下
+      #   也能拿到真实对外公网 IP。
+      #
+      # 注意:IPv4 DDNS 必须 host 网络(bridge 网络下访问外部 API 也不通)
       IKEV2_DDNS_ENABLED: "${IKEV2_DDNS_ENABLED:-false}"
       IKEV2_DDNS_FAMILY: "${IKEV2_DDNS_FAMILY:-dual}"
-      IKEV2_DDNS_PROBE_TARGET: "${IKEV2_DDNS_PROBE_TARGET:-8.8.8.8}"
+      # IKEV2_DDNS_PROBE_TARGET 仍可设置但被忽略(向后兼容老部署脚本)
       ALIYUN_ACCESS_KEY_ID: "${ALIYUN_ACCESS_KEY_ID:-}"
       ALIYUN_ACCESS_KEY_SECRET: "${ALIYUN_ACCESS_KEY_SECRET:-}"
       ALIYUN_DOMAIN: "${ALIYUN_DOMAIN:-}"

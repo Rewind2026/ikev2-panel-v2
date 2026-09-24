@@ -39,7 +39,8 @@ type Config struct {
 	// DDNS (v2-82 新增,v2-84 family-aware)
 	DDNSEnabled           bool   // 总开关 (env IKEV2_DDNS_ENABLED,默认 false)
 	DDNSFamily            string // v2-84:同步哪些 family — v4 / v6 / dual(默认 dual)
-	DDNSProbeTarget       string // v2-84:IPv4 探测目标(默认 8.8.8.8,中国大陆可改 223.5.5.5)
+	// v2.86-pr23l:DDNSProbeTarget 已废弃。IPv4 公网地址由 internal/publicip
+	// 多家 API fallback 探测,不再依赖 net.Dial + target。
 	AliyunAccessKeyID     string // 阿里云 RAM AccessKey ID(env,见 v2-83)
 	AliyunAccessKeySecret string // 阿里云 RAM AccessKey Secret
 	AliyunAccessKeySource string // 凭证来源: env-new / env-legacy-ddns / env-legacy-acme.sh / ""
@@ -99,7 +100,8 @@ func Load() (*Config, error) {
 		// DDNS (v2-82 + v2-83 凭证统一 + v2-84 family)
 		DDNSEnabled:           getbool("IKEV2_DDNS_ENABLED", false),
 		DDNSFamily:            parseFamily(getenv("IKEV2_DDNS_FAMILY", "dual")),
-		DDNSProbeTarget:       getenv("IKEV2_DDNS_PROBE_TARGET", "8.8.8.8"),
+		// v2.86-pr23l:DDNSProbeTarget 字段废弃,不再读 IKEV2_DDNS_PROBE_TARGET。
+		// 老 env 仍会被读但忽略(下游 Config.DetectTarget 也已废弃)。
 		AliyunDomain:          getenv("ALIYUN_DOMAIN", ""),
 		AliyunRR:              getenv("ALIYUN_RR", "vpn"),
 

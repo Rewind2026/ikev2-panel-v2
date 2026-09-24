@@ -13,8 +13,8 @@
   </div>
 </header>
 
-{{if .Flash}}<div class="banner-info dismissable" data-dismiss-key="mc-defaults-flash">{{.Flash}}</div>{{end}}
-{{if .Error}}<div class="banner-danger alert-danger">{{.Error}}</div>{{end}}
+{{/* v2.86-pr23l:flash banner 移走(下面有专门 slot 在按钮附近)。原位置在 page-header 下,
+   触发滚动到顶,用户需要往上拉才能看到反馈 —— 体验不佳。 */}}
 
 <article class="card card-pad">
   <p class="text-sm" style="line-height: 1.6;">
@@ -164,6 +164,23 @@
       </div>
     </div>
   </details>
+
+  {{/*
+    v2.86-pr23l:flash banner 内联到「Save / Cancel」按钮组上方 —
+    跟 DDNS / aliyun 内联 banner 同套路(就近、避免滚动到顶)。
+    覆盖 Save + Restore 两个操作触发的反馈(both 写到默认 FlashStore slot)。
+    ExtraClass="mc-defaults-action-flash" 给 scroll-restore JS 识别(虽然本页不依赖 scroll,
+    但沿用一致的 class 名便于将来抽取样式)。
+  */}}
+  {{if or .Flash .Error}}
+    <div class="mc-defaults-action-flash-wrap">
+      {{if .Flash}}
+        {{$kind := or .FlashKind "info"}}
+        {{template "banner" (dict "Kind" $kind "Msg" .Flash "Dismissible" true "DismissKey" "mc-defaults-flash" "ExtraClass" "mc-defaults-action-flash")}}
+      {{end}}
+      {{if .Error}}{{template "banner" (dict "Kind" "error" "Msg" .Error)}}{{end}}
+    </div>
+  {{end}}
 
   <div class="settings-actions settings-actions-end mt-4">
     <a href="/" class="btn-secondary">Cancel</a>

@@ -326,6 +326,18 @@ input:focus,select:focus,textarea:focus{
 }
 input::placeholder,textarea::placeholder{ color:var(--ikev2-fg-subtle);}
 
+/* v2.86-pr24:input 错误态 — 由 JS 在校验失败时设 aria-invalid="true"。
+   视觉:红边 + 3px danger ring,跟 success/info/warn 修饰类风格统一。 */
+input[aria-invalid="true"],select[aria-invalid="true"],textarea[aria-invalid="true"]{
+  border-color:var(--ikev2-danger);
+  background:rgba(248,113,113,0.05);
+  box-shadow:0 0 0 3px rgba(248,113,113,0.25);
+}
+input[aria-invalid="true"]:focus,select[aria-invalid="true"]:focus,textarea[aria-invalid="true"]:focus{
+  /* focus 时覆盖默认 cyan ring,让 danger ring 仍可见 */
+  box-shadow:0 0 0 3px rgba(248,113,113,0.35);
+}
+
 input:disabled,select:disabled,textarea:disabled{
   background:rgba(0,0,0,0.4);
   color:var(--ikev2-fg-disabled);
@@ -873,48 +885,90 @@ main#main, .main-area{
 .metric-head{ display:flex; align-items:center; justify-content:space-between; gap:0.5rem;}
 
 /* ============================================================================
-   16. Alerts / Banners
+   16. Alerts / Banners — v2.86-pr23j 统一规范
+   ----------------------------------------------------------------------------
+   4 类语义 banner,统一视觉:同尺寸/同圆角/同左 3px 强调条/同 SVG 图标。
+   通过 .banner + .banner-{ok|info|warn|danger} 组合,或简写 .banner-{success|warning|error}。
+   所有 banner 块有 .banner-icon(左侧 SVG)和 .banner-body(右侧文本)。
    ========================================================================== */
-.banner-warn,.alert-warn{
-  background:linear-gradient(180deg, rgba(251,191,36,0.10), rgba(251,191,36,0.04));
-  border-left:3px solid var(--ikev2-warn);
-  color:var(--ikev2-warn-fg);
-  padding:0.75rem 1rem;
+
+/* 基础:所有 banner 共享
+   v2.86-pr23j:用 :where() 包属性选择器,避免 specificity 高过 .banner-warn 等
+   修饰类(属性选择器 + :not = (0,2,0),高于 class 的 (0,1,0))。
+   :each wrapper 让 attribute selector specificity 归零,后续 .banner-warn
+   能正常覆盖颜色/边框。 */
+:where(.banner, [class*="banner-"]:not(.banner-icon):not(.banner-body)){
+  position:relative;
+  display:flex;
+  align-items:center;
+  gap:0.625rem;
+  padding:0.625rem 0.875rem;
   border-radius:var(--ikev2-radius);
-  margin-bottom:1rem;
-  display:flex; justify-content:space-between; align-items:flex-start; gap:0.75rem;
-  border:1px solid rgba(251,191,36,0.25); border-left-width:3px;
+  margin:0;
+  font-size:0.8125rem;
+  line-height:1.45;
+  border:1px solid transparent;
+  border-left-width:3px;
+  /* dismissable 时的右 padding 留给 × */
 }
-.banner-warn small{ color:#fde68a; opacity:0.85; display:block; margin-top:0.25rem;}
-.banner-danger,.alert-danger{
-  background:linear-gradient(180deg, rgba(248,113,113,0.12), rgba(248,113,113,0.04));
-  border-left:3px solid var(--ikev2-danger);
-  color:var(--ikev2-danger-fg);
-  padding:0.75rem 1rem;
-  border-radius:var(--ikev2-radius);
-  margin-bottom:1rem;
-  display:flex; justify-content:space-between; align-items:flex-start; gap:0.75rem;
-  border:1px solid rgba(248,113,113,0.25); border-left-width:3px;
+.banner .banner-icon{
+  flex-shrink:0;
+  width:16px; height:16px;
 }
-.banner-info{
-  background:linear-gradient(180deg, rgba(96,165,250,0.10), rgba(96,165,250,0.04));
-  border-left:3px solid var(--ikev2-info);
-  color:var(--ikev2-info-fg);
-  padding:0.75rem 1rem;
-  border-radius:var(--ikev2-radius);
-  margin-bottom:1rem;
-  display:flex; justify-content:space-between; align-items:flex-start; gap:0.75rem;
-  border:1px solid rgba(96,165,250,0.25); border-left-width:3px;
+.banner .banner-icon svg{
+  width:100%; height:100%; display:block;
 }
-.banner-ok{
-  background:linear-gradient(180deg, rgba(74,222,128,0.10), rgba(74,222,128,0.04));
-  border-left:3px solid var(--ikev2-ok);
+.banner .banner-body{
+  flex:1; min-width:0;
+  word-break:break-word;
+}
+.banner small{
+  display:block;
+  margin-top:0.25rem;
+  opacity:0.85;
+  font-size:0.75rem;
+}
+.banner strong{ font-weight:700;}
+
+/* success(成功)— 绿 #4ade80 */
+.banner-ok, .banner-success,
+.alert-ok, .alert-success{
+  background:linear-gradient(180deg, rgba(74,222,128,0.12), rgba(74,222,128,0.04));
+  border-color:rgba(74,222,128,0.35);
+  border-left-color:var(--ikev2-ok);
   color:var(--ikev2-ok-fg);
-  padding:0.75rem 1rem;
-  border-radius:var(--ikev2-radius);
-  margin-bottom:1rem;
-  border:1px solid rgba(74,222,128,0.25); border-left-width:3px;
 }
+.banner-ok .banner-icon, .banner-success .banner-icon{ color:var(--ikev2-ok);}
+
+/* info(信息)— 蓝 #60a5fa */
+.banner-info,
+.alert-info{
+  background:linear-gradient(180deg, rgba(96,165,250,0.12), rgba(96,165,250,0.04));
+  border-color:rgba(96,165,250,0.30);
+  border-left-color:var(--ikev2-info);
+  color:var(--ikev2-info-fg);
+}
+.banner-info .banner-icon{ color:var(--ikev2-info);}
+
+/* warn(警告)— 黄 #fbbf24 */
+.banner-warn, .banner-warning,
+.alert-warn, .alert-warning{
+  background:linear-gradient(180deg, rgba(251,191,36,0.12), rgba(251,191,36,0.04));
+  border-color:rgba(251,191,36,0.30);
+  border-left-color:var(--ikev2-warn);
+  color:var(--ikev2-warn-fg);
+}
+.banner-warn .banner-icon, .banner-warning .banner-icon{ color:var(--ikev2-warn);}
+
+/* error(错误)— 红 #f87171 */
+.banner-danger, .banner-error,
+.alert-danger, .alert-error{
+  background:linear-gradient(180deg, rgba(248,113,113,0.14), rgba(248,113,113,0.05));
+  border-color:rgba(248,113,113,0.35);
+  border-left-color:var(--ikev2-danger);
+  color:var(--ikev2-danger-fg);
+}
+.banner-danger .banner-icon, .banner-error .banner-icon{ color:var(--ikev2-danger);}
 .dismissable .dismiss{
   background:transparent; border:0;
   color:inherit; opacity:0.6;
@@ -951,6 +1005,15 @@ main#main, .main-area{
   overflow:hidden;
   animation: ikev2-banner-fade-out 220ms cubic-bezier(.4,0,.2,1) forwards;
   pointer-events:none;
+}
+
+/* DDNS 操作反馈 banner:就贴在按钮排下方,需要呼吸 + 与按钮组对齐到表单主区。
+   home_content.html 里 banner 在 .settings-actions(.settings-actions-end)的紧后面,
+   默认 banner `margin:0`,看起来跟按钮贴在一起,像是"塞进了按钮行的空间"。
+   留 0.85rem 上间距,与 settings-actions 的 1rem padding-top 形成视觉分层。 */
+.ddns-action-flash{
+  margin-top:0.85rem;
+  /* banner 现在 align-items:center,文字 + × + icon 都居中,与按钮行节奏一致。 */
 }
 
 /* onboarding */
@@ -1094,17 +1157,59 @@ main#main, .main-area{
 @media (max-width: 720px){ .form-row{ grid-template-columns:1fr;}}
 
 /* ============================================================================
+   18a. Settings shell — 通用设置页外壳(账号设置等独立页用)
+   - .settings-shell  包裹整个 section,占满 main#main 内宽
+   - .settings-header 页头,含 h1 + 副标题
+   - .settings-sub    副标题(muted 配色)
+   ========================================================================== */
+.settings-shell{
+  display:block;
+  width:100%;
+  max-width:var(--ikev2-page-max);
+  margin:0 auto;
+}
+.settings-header{
+  margin:0 0 1.5rem;
+  padding:0 0 1.25rem;
+  border-bottom:1px solid var(--ikev2-bg-rule);
+}
+.settings-header h1{
+  margin:0 0 0.4rem;
+  font-size:1.5rem;
+  font-weight:700;
+  letter-spacing:-0.01em;
+  color:var(--ikev2-fg-strong);
+  display:flex;
+  align-items:baseline;
+  gap:0.6rem;
+}
+.settings-header h1 code{
+  font-family:var(--ikev2-font-mono);
+  font-size:0.9375rem;
+  font-weight:600;
+  padding:0.1em 0.5em;
+  border-radius:4px;
+  background:var(--ikev2-brand-soft);
+  border:1px solid rgba(34,211,238,0.30);
+  color:var(--ikev2-brand-hover);
+  letter-spacing:0;
+}
+.settings-sub{
+  margin:0;
+  color:var(--ikev2-fg-muted);
+  font-size:0.875rem;
+  line-height:1.55;
+  max-width:62ch;
+}
+
+/* ============================================================================
    18b. Settings form shell — 自适应配置项框体布局
    桌面端(≥1100px):左导航 + 右表单卡片网格,平衡左右视觉
    中等屏(720-1100px):单列卡片,自适应宽度,水平居中
    移动端(≤720px):紧凑单列,卡片全宽
    ========================================================================== */
 .settings-form-shell{
-  display:grid;
-  grid-template-columns:minmax(0, 1fr);
-  gap:1.5rem;
-  align-items:start;
-  /* 默认占满父容器宽度,但保留上限以保证阅读舒适 */
+  display:block;
   width:100%;
   max-width:min(100%, 1120px);
   margin-left:auto;
@@ -1120,7 +1225,11 @@ main#main, .main-area{
 .settings-form-main > .settings-actions{ justify-content:flex-end;}
 
 @media (min-width: 1100px){
+  /* v2.86-pr23l fix:把 shell 变成真正的 grid 容器,aside + main 横排。
+     之前只设了 grid-template-columns 但 shell 还是 display:block,
+     导致 nav 跨整行 + position:sticky → 滚动时跟下面 form sections 重叠。 */
   .settings-form-shell{
+    display:grid;
     grid-template-columns:220px minmax(0, 1fr);
     gap:2rem;
     max-width:1180px;
@@ -1131,6 +1240,16 @@ main#main, .main-area{
     top:1rem;
     align-self:start;
   }
+}
+
+/* v2.86-pr23l:mobileconfig defaults 页内联 flash banner 容器。
+   放在 Save / Cancel 按钮组上方,反馈就近展示,不需要滚到页面顶部。
+   wrap 而非直接 banner → 未来想加图标 / 关闭按钮 / 多条 flash 共存都方便。 */
+.mc-defaults-action-flash-wrap{
+  margin-top:0.85rem;
+}
+.mc-defaults-action-flash-wrap > .banner{
+  margin:0;
 }
 
 /* 桌面侧导航 */
@@ -2079,8 +2198,13 @@ button.password-submit[disabled],
 }
 
 /* 双列布局:account 页里 form + 右侧规则卡片 */
+/* v2.86-pr23m 修复:/account 页的 form.settings-form-shell 是 grid 220|1fr,
+   是给有侧导航的页面用的;.password-shell 没有侧导航,
+   必须显式跨整行(grid-column: 1 / -1),否则会掉进第一列只有 220px,
+   内部 aside 把 main 挤成 ~112px,文案被压成竖条。 */
 .password-shell{
   display:grid;
+  grid-column:1 / -1;
   grid-template-columns:minmax(0, 1.3fr) minmax(0, 1fr);
   gap:1.5rem;
   align-items:start;

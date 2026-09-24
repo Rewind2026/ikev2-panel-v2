@@ -24,6 +24,15 @@ type homeData struct {
 
 	// v2.86-pr23g:P1-A flash 一次性提示(DDNS 保存 / 同步 / 查询 / 创建 反馈)
 	Flash string
+	// v2.86-pr23h:flash 类别("" / "info" / "success" / "error")。
+	// 模板按 Kind 切 banner-info / banner-success / banner-danger。
+	FlashKind string
+
+	// v2.86-pr23l:Aliyun 凭证卡专用 flash slot,跟 DDNS 默认 slot 分开,
+	// 模板端 aliyun-card 表单按钮组下方就近展示 .aliyun-action-flash。
+	// 这样 aliyun save/clear 的反馈不会跑去 ddns 卡片区域,避免视觉跳跃。
+	AliyunFlash     string
+	AliyunFlashKind string
 
 	// P1-C M6 监控数据
 	ActiveSAs   []swanctl.SA // 当前活跃 SA(ESTABLISHED 状态)
@@ -82,11 +91,11 @@ type homeData struct {
 	CertExpiresAt       string // "YYYY-MM-DD" 格式;自签模式 = ""
 	CertLastRenewFailed bool   // true = 续签失败标志存在
 
-	// v2.86-pr22:DDNS 同步参数(给面板显示探测目标 / cron 间隔 / 域名 / RR)
+	// v2.86-pr22:DDNS 同步参数(给面板显示域名 / RR / cron 间隔)。
+	// v2.86-pr23l:DDNSDetectTarget 字段废弃,IPv4 探测改用公网 IP API。
 	DDNSDomain        string // 完整域名(vpn.example.com)
 	DDNSBaseDomain    string // 裸域名(example.com)
 	DDNSRR            string // 主机记录(vpn / @)
-	DDNSDetectTarget  string // IPv4 探测目标(8.8.8.8)
 	DDNSPeriod        string // 人类可读周期(60s / 5m)
 	DDNSPeriodSeconds int    // v2.86-pr23a:周期秒数(给 input number 默认值用)
 	DDNSIface         string // 监听接口(空 = any)
@@ -133,10 +142,22 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// v2.86-pr23g:P1-A flash 消费(给顶部 banner — DDNS 操作反馈显示)
-	var flashMsg string
+	var flashMsg, flashKind string
 	if sess != nil && s.FlashStore != nil {
 		if f, err := s.FlashStore.Consume(sess.ID); err == nil {
 			flashMsg = f.Message
+			flashKind = f.Kind
+		}
+	}
+
+	// v2.86-pr23l:Aliyun 专属 flash slot — 跟默认 slot 并行消费,互不影响。
+	// 默认 slot → .Flash(顶部 / DDNS),Aliyun slot → .AliyunFlash(aliyun-card 内联)。
+	var aliyunFlashMsg, aliyunFlashKind string
+	if sess != nil && s.FlashStore != nil {
+		if f, err := s.FlashStore.ConsumeFor(sess.ID, "aliyun"); err == nil {
+			aliyunFlashMsg = f.Message
+			aliyunFlashKind = f.Kind
+			s.Logger.Info("aliyun flash consumed", "kind", aliyunFlashKind, "msg", aliyunFlashMsg)
 		}
 	}
 
@@ -161,6 +182,9 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 	data := homeData{
 		PageMeta:            PageMeta{Page: "home", Title: "首页", PageKey: "home", AdminUsername: admin.Username, CSRFToken: csrfTokenOf(sess)},
 		Flash:               flashMsg,
+		FlashKind:           flashKind,
+		AliyunFlash:         aliyunFlashMsg,
+		AliyunFlashKind:     aliyunFlashKind,
 		TotalUsers:          total,
 		ActiveSAs:           activeSAs,
 		TotalActive:         totalActive,
@@ -231,7 +255,7 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 		data.DDNSDomain = s.DDNSSync.Domain()
 		data.DDNSBaseDomain = s.DDNSSync.BaseDomain()
 		data.DDNSRR = s.DDNSSync.RR()
-		data.DDNSDetectTarget = s.DDNSSync.DetectTarget()
+		// v2.86-pr23l:DDNSDetectTarget 字段废弃,不再读取
 		data.DDNSPeriod = s.DDNSSync.Period().String()
 		data.DDNSPeriodSeconds = s.DDNSSync.PeriodSeconds()
 		data.DDNSIface = s.DDNSSync.Iface()

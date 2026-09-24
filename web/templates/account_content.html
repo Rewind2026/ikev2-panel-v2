@@ -25,15 +25,10 @@
   </header>
 
   {{if .Error}}
-  <div class="banner-danger" role="alert" style="margin: 1rem 0;">
-    <div>
-      <strong>修改失败</strong>
-      <small style="display: block; margin-top: 0.25rem; color: inherit; opacity: 0.85;">{{.Error}}</small>
-    </div>
-  </div>
+  {{template "banner" (dict "Kind" "error" "Msg" (printf "<strong>修改失败</strong><small>%s</small>" .Error) "ExtraClass" "my-2")}}
   {{end}}
 
-  <form method="POST" action="/api/account/password" class="settings-form-shell" autocomplete="off" novalidate data-password-shell>
+  <form method="POST" action="/api/account/password" class="settings-form-shell" novalidate data-password-shell>
     <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
 
     <div class="password-shell">
@@ -63,7 +58,7 @@
         <div class="password-field">
           <label class="password-field-label" for="acct-new">
             新密码
-            <small>≥ 8 位 · 五条规则需全部满足</small>
+            <small>≥ 12 位 + 五条规则全中 = 强</small>
           </label>
           <span class="password-input-wrap">
             <input id="acct-new" type="password" name="new_password" autocomplete="new-password"

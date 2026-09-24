@@ -124,6 +124,21 @@ func (s *Server) handleDDNSToggle(w http.ResponseWriter, r *http.Request) {
 	// v2.85-PR8(U11):审计
 	s.writeAudit(r, "ddns.toggle", fmt.Sprintf("enabled=%v", enabled))
 
+	// v2.86-pr23h:toggle 也给 flash 反馈 —— 之前只写审计、不写 flash,
+	// 用户点完"启用 DDNS"看不到任何提示,容易以为没生效。
+	sess, _ := SessionFrom(r.Context())
+	if sess != nil && s.FlashStore != nil {
+		var msg, kind string
+		if enabled {
+			msg = "DDNS 已启用,后台将按 period 周期自动同步"
+			kind = "success"
+		} else {
+			msg = "DDNS 已关闭,后台同步已停止"
+			kind = "info"
+		}
+		s.FlashStore.Set(sess.ID, Flash{Message: msg, Kind: kind})
+	}
+
 	// 重定向回首页(普通表单提交场景)
 	if r.Header.Get("Accept") == "application/json" {
 		w.Header().Set("Content-Type", "application/json")
@@ -231,11 +246,11 @@ func (s *Server) handleDDNSConfig(w http.ResponseWriter, r *http.Request) {
 	if periodStr != "" {
 		n, err := strconv.Atoi(periodStr)
 		if err != nil {
-			http.Error(w, "period_seconds 必须是整数", http.StatusBadRequest)
+			s.flashConfigError(w, r, "period_seconds 必须是整数")
 			return
 		}
 		if n < 10 || n > 3600 {
-			http.Error(w, "period_seconds 必须在 10-3600 之间", http.StatusBadRequest)
+			s.flashConfigError(w, r, "period_seconds 必须在 10-3600 之间")
 			return
 		}
 		periodSec = n
@@ -244,20 +259,20 @@ func (s *Server) handleDDNSConfig(w http.ResponseWriter, r *http.Request) {
 	// RR 校验(独立于 panelstate — 这里直接给 Sync,Sync 自己会 fallback 到 "@")
 	if rr != "" && rr != "@" {
 		if !validRRChars(rr) {
-			http.Error(w, "rr 不合法 (只允许字母/数字/_/-,1-63 字符)", http.StatusBadRequest)
+			s.flashConfigError(w, r, "rr 不合法 (只允许字母/数字/_/-,1-63 字符)")
 			return
 		}
 	}
 
 	// v2.86-pr23f:domain 校验(空 = 不改,跳过校验)
 	if domain != "" && !isValidDomainForPanel(domain) {
-		http.Error(w, "domain 不合法 (形如 example.com,标签 1-63 字符)", http.StatusBadRequest)
+		s.flashConfigError(w, r, "domain 不合法 (形如 example.com,标签 1-63 字符)")
 		return
 	}
 
 	if err := s.DDNSSync.SetConfig(rr, enableA, enableAAAA, periodSec, domain); err != nil {
 		s.Logger.Error("ddns config save failed", "err", err)
-		http.Error(w, "保存失败: "+err.Error(), http.StatusInternalServerError)
+		s.flashConfigError(w, r, "保存失败: "+err.Error())
 		return
 	}
 
@@ -274,6 +289,7 @@ func (s *Server) handleDDNSConfig(w http.ResponseWriter, r *http.Request) {
 	sess, _ := SessionFrom(r.Context())
 	if sess != nil && s.FlashStore != nil {
 		s.FlashStore.Set(sess.ID, Flash{
+			Kind:    "success",
 			Message: "DNS 同步配置已保存",
 		})
 	}
@@ -333,6 +349,7 @@ func (s *Server) handleDDNSSyncNow(w http.ResponseWriter, r *http.Request) {
 	sess, _ := SessionFrom(r.Context())
 	if sess != nil && s.FlashStore != nil {
 		s.FlashStore.Set(sess.ID, Flash{
+			Kind:    "info",
 			Message: "已触发同步,刷新页面查看结果",
 		})
 	}
@@ -377,8 +394,10 @@ func (s *Server) handleDDNSFetchRemote(w http.ResponseWriter, r *http.Request) {
 	sess, _ := SessionFrom(r.Context())
 	if sess != nil && s.FlashStore != nil {
 		var msg string
+		kind := "success"
 		if snap.Error != "" {
 			msg = fmt.Sprintf("查询阿里云记录失败: %s", snap.Error)
+			kind = "error"
 		} else {
 			parts := []string{}
 			if snap.A != "" {
@@ -389,11 +408,13 @@ func (s *Server) handleDDNSFetchRemote(w http.ResponseWriter, r *http.Request) {
 			}
 			if len(parts) == 0 {
 				msg = fmt.Sprintf("阿里云 %s 当前没有 A/AAAA 记录", snap.Domain)
+				kind = "info"
 			} else {
 				msg = fmt.Sprintf("阿里云 %s 当前: %s", snap.Domain, strings.Join(parts, " / "))
 			}
 		}
 		s.FlashStore.Set(sess.ID, Flash{
+			Kind:    kind,
 			Message: msg,
 		})
 	}
@@ -509,6 +530,7 @@ func (s *Server) handleDDNSCreateRecord(w http.ResponseWriter, r *http.Request) 
 		sess, _ := SessionFrom(r.Context())
 		if sess != nil && s.FlashStore != nil {
 			s.FlashStore.Set(sess.ID, Flash{
+				Kind:    "error",
 				Message: fmt.Sprintf("创建记录失败: %s", err.Error()),
 			})
 		}
@@ -526,6 +548,7 @@ func (s *Server) handleDDNSCreateRecord(w http.ResponseWriter, r *http.Request) 
 	sess, _ := SessionFrom(r.Context())
 	if sess != nil && s.FlashStore != nil {
 		s.FlashStore.Set(sess.ID, Flash{
+			Kind:    "success",
 			Message: fmt.Sprintf("已在阿里云创建 %s 记录:%s → %s",
 				recordType, rr+"."+domain, value),
 		})
@@ -551,4 +574,26 @@ func (s *Server) ddnsCredentials() (string, string, bool) {
 		}
 	}
 	return "", "", false
+}
+
+// flashConfigError v2.86-pr23h:校验失败时写错误 flash 并 302 回首页 ——
+// 之前是直接 http.Error 400,前端只能看到空白错误页;改 flash 后用户
+// 会留在 aliyun-card 内继续编辑,错误信息以红色 banner 出现在卡顶。
+//
+// Kind="error" 让 home 模板渲染成 banner-danger(红色),而不是默认 banner-info(蓝色)。
+func (s *Server) flashConfigError(w http.ResponseWriter, r *http.Request, msg string) {
+	sess, _ := SessionFrom(r.Context())
+	if sess != nil && s.FlashStore != nil {
+		s.FlashStore.Set(sess.ID, Flash{
+			Kind:    "error",
+			Message: msg,
+		})
+	}
+	if r.Header.Get("Accept") == "application/json" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"ok":false,"error":` + strconv.Quote(msg) + `}`))
+		return
+	}
+	http.Redirect(w, r, "/", http.StatusFound)
 }

@@ -18,12 +18,8 @@
   </div>
 
   {{if .Error}}
-  <div class="banner-danger" role="alert" style="margin-bottom: 1rem;">
-    <div>
-      <strong>登录失败</strong>
-      <small style="display: block; margin-top: 0.25rem; color: inherit; opacity: 0.85;">{{.Error}}</small>
-    </div>
-  </div>
+  {{template "banner" (dict "Kind" "error" "Msg" (printf "<strong>登录失败</strong><small>%s</small>" .Error) "ExtraClass" "mb-2")}}
+
   {{end}}
 
   <form method="POST" action="/login" class="login-form" autocomplete="on">

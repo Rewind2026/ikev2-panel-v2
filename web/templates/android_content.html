@@ -11,8 +11,11 @@
   </div>
 </header>
 
-{{if .Error}}<div class="banner-danger alert-danger">{{.Error}}</div>{{end}}
-{{if .Flash}}<div class="banner-warn alert-warn">{{.Flash}}</div>{{end}}
+{{if .Error}}{{template "banner" (dict "Kind" "error" "Msg" .Error)}}{{end}}
+{{if .Flash}}
+  {{$kind := or .FlashKind "info"}}
+  {{template "banner" (dict "Kind" $kind "Msg" .Flash)}}
+{{end}}
 
 <div class="dashboard-grid">
   <div class="dashboard-main">

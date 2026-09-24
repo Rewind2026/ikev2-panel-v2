@@ -45,31 +45,48 @@
         }
 
         function initDismissable() {
-          document.querySelectorAll('.dismissable').forEach(function (el) {
-            if (el.__ikev2DismissableInit) return;
-            el.__ikev2DismissableInit = true;
+          // v2.86-pr23l:用 document 级委托替换 per-element 绑定。
+          // 之前每个 .dismissable 各自 addEventListener('click', ...),
+          // DDNS 内联 banner 这种 form 子元素场景下,有时 click 事件被 form 拦截或
+          // 时序问题(handler 在节点插入前绑定)。委托到 document 上,
+          // 任何 .dismiss 的 click 都能命中,跟节点何时插入无关。
+          // 只装一次:用 marker 防重入。
+          if (document.__ikev2DismissDelegateInit) return;
+          document.__ikev2DismissDelegateInit = true;
+
+          // 已关闭过(localStorage 已 dismiss)的 banner 直接清掉 ——
+          // 对历史已渲染的 + 之后动态注入的都生效。
+          function applyDismissed(el) {
+            var key = el.getAttribute('data-dismiss-key');
+            if (!key) return false;
+            try {
+              if (localStorage.getItem('ikev2-dismiss-' + key) === '1') {
+                el.remove();
+                return true;
+              }
+            } catch (e) {}
+            return false;
+          }
+
+          // 首次扫:把已 dismissed 的 banner 移除
+          document.querySelectorAll('.dismissable').forEach(applyDismissed);
+
+          // 全局 click 委托:任何 .dismiss 按钮的点击都关掉它所属的 banner
+          document.addEventListener('click', function (ev) {
+            var btn = ev.target && ev.target.closest && ev.target.closest('.dismiss');
+            if (!btn) return;
+            var el = btn.closest('.dismissable');
+            if (!el) return;
+            ev.preventDefault();
+            ev.stopPropagation();
             var key = el.getAttribute('data-dismiss-key');
             if (key) {
-              try {
-                if (localStorage.getItem('ikev2-dismiss-' + key) === '1') {
-                  el.remove();
-                  return;
-                }
-              } catch (e) {}
+              try { localStorage.setItem('ikev2-dismiss-' + key, '1'); } catch (e) {}
             }
-            var btn = el.querySelector('.dismiss');
-            if (!btn) return;
-            btn.addEventListener('click', function (ev) {
-              ev.preventDefault();
-              ev.stopPropagation();
-              if (key) {
-                try { localStorage.setItem('ikev2-dismiss-' + key, '1'); } catch (e) {}
-              }
-              el.classList.add('is-dismissing');
-              var done = function () { el.remove(); };
-              el.addEventListener('animationend', done, { once: true });
-              setTimeout(done, 280);
-            });
+            el.classList.add('is-dismissing');
+            var done = function () { el.remove(); };
+            el.addEventListener('animationend', done, { once: true });
+            setTimeout(done, 280);
           });
         }
 
@@ -367,7 +384,7 @@
               // hits === 5
               return v.length >= 12 ? 4 : 3;  // 强需要 5 规则全中 + 长度 ≥12
             }
-            var SCORE_LABEL = ['输入密码', '弱', '偏弱', '中等', '强'];
+            var SCORE_LABEL = ['输入密码', '弱', '偏弱', '中等', '强 · 推荐'];
 
             // 渲染 strength bars
             function renderStrength(v) {
@@ -405,6 +422,7 @@
               var cv = confirmInput.value;
               if (!cv) {
                 matchEl.setAttribute('data-state', 'empty');
+                confirmInput.removeAttribute('aria-invalid');
                 if (matchEl.querySelector('.match-text')) {
                   matchEl.querySelector('.match-text').textContent = '请再次输入新密码';
                 }
@@ -412,11 +430,13 @@
               }
               if (nv === cv) {
                 matchEl.setAttribute('data-state', 'ok');
+                confirmInput.removeAttribute('aria-invalid');
                 if (matchEl.querySelector('.match-text')) {
                   matchEl.querySelector('.match-text').textContent = '两次输入一致';
                 }
               } else {
                 matchEl.setAttribute('data-state', 'mismatch');
+                confirmInput.setAttribute('aria-invalid', 'true');
                 if (matchEl.querySelector('.match-text')) {
                   matchEl.querySelector('.match-text').textContent = '两次输入不一致';
                 }
@@ -424,6 +444,7 @@
             }
 
             // 提交按钮锁定:新密码全部 5 条规则都满足 + (如有 confirm) 一致 + (如有 old) 非空
+            // 同时给 newInput / confirmInput / oldInput 同步 aria-invalid 状态。
             function refreshSubmit() {
               if (!submit) return;
               var nv = newInput.value;
@@ -432,6 +453,21 @@
               if (oldInput && !oldInput.value) ok = false;
               if (confirmInput) {
                 ok = ok && (confirmInput.value === nv) && confirmInput.value.length > 0;
+              }
+              // aria-invalid:new/confirm 输入后才标 invalid,空值不标(避免初次加载就红边)
+              if (newInput) {
+                if (newInput.value && (nv.length < 8 || !allRulesMet)) {
+                  newInput.setAttribute('aria-invalid', 'true');
+                } else {
+                  newInput.removeAttribute('aria-invalid');
+                }
+              }
+              if (oldInput) {
+                if (oldInput.value && oldInput.value.length === 0) {
+                  oldInput.setAttribute('aria-invalid', 'true');
+                } else {
+                  oldInput.removeAttribute('aria-invalid');
+                }
               }
               if (ok) {
                 submit.removeAttribute('disabled');
@@ -477,9 +513,14 @@
         // 视觉:不引入新 CSS — 复用 .chip.muted 的"微暗 + 圆形点"作为 spinner 占位,
         // 跟现有 dark theme 一致。
         //
-        // 注意:form 提交后浏览器原生会跳转,不需要手动恢复按钮状态 —
-        // 跳转后旧 DOM 销毁,新页面按钮是 fresh 状态。如果操作失败 +
-        // 服务端不 redirect(JSON 响应),JS 会在 fetch 完成后 reset。
+        // 注意:v2.86-pr23h 修复 — 之前在 form submit handler 里把 button.disabled=true
+        // + innerHTML 替换为 spinner,导致 Chromium 在 form submit 阶段 abort 请求
+        // (button disabled → implicit submit 被取消)。改用以下两件事避免影响提交:
+        //   1) submit handler 里**只**复制 name/value 到 hidden input + 加视觉反馈,
+        //      不立即 disable button(disabling 放在 rAF/setTimeout(0) 让 form
+        //      submit 先发起);
+        //   2) spinner 用 sibling 占位(不替换 button 自身 innerHTML),避免
+        //      form submit 时 Chromium 重新解析 submitter DOM。
         function initButtonLoading() {
           document.querySelectorAll('form').forEach(function (form) {
             if (form.__ikev2BtnLoadingInit) return;
@@ -491,19 +532,33 @@
               if (btn.disabled) return; // 已经 disabled 就别再处理
               // 跳过有 data-no-loading 的按钮(供特殊场景 escape)
               if (btn.hasAttribute('data-no-loading')) return;
-              // 记录原始文案(后续 reset 用)
-              if (!btn.__ikev2OrigText) btn.__ikev2OrigText = btn.innerHTML;
-              btn.disabled = true;
-              btn.setAttribute('aria-busy', 'true');
-              btn.style.opacity = '0.7';
-              btn.style.cursor = 'wait';
-              // 替换内容:小圆点 spinner + "处理中..." 文案
-              btn.innerHTML =
-                '<span style="display:inline-flex;align-items:center;gap:0.4rem;">' +
-                '<span style="display:inline-block;width:10px;height:10px;border-radius:50%;' +
-                'background:currentColor;animation:ikev2-btn-spin 800ms linear infinite;flex-shrink:0;"></span>' +
-                '<span>处理中…</span>' +
-                '</span>';
+              // v2.86-pr23h:把 submitter 的 name/value 复制到 hidden input,
+              // 防止后续任何 DOM 操作丢失原 button 的 attribute。
+              if (btn.name) {
+                var hidden = document.createElement('input');
+                hidden.type = 'hidden';
+                hidden.name = btn.name;
+                hidden.value = btn.value;
+                hidden.setAttribute('data-ikev2-submitter-proxy', '1');
+                btn.parentNode.insertBefore(hidden, btn.nextSibling);
+              }
+              // 视觉反馈:sibling spinner(不动 button 自身)
+              if (!btn.__ikev2Spinner) {
+                var sp = document.createElement('span');
+                sp.className = 'ikev2-btn-spinner';
+                sp.setAttribute('aria-hidden', 'true');
+                sp.style.cssText = 'display:inline-block;width:10px;height:10px;border-radius:50%;' +
+                  'background:currentColor;animation:ikev2-btn-spin 800ms linear infinite;flex-shrink:0;margin-right:0.4rem;';
+                btn.insertBefore(sp, btn.firstChild);
+                btn.__ikev2Spinner = sp;
+                btn.__ikev2OrigOpacity = btn.style.opacity || '';
+                btn.__ikev2OrigCursor = btn.style.cursor || '';
+                btn.style.opacity = '0.7';
+                btn.style.cursor = 'wait';
+                btn.setAttribute('aria-busy', 'true');
+              }
+              // 在下一帧 disable(让 form submit 先发起)
+              requestAnimationFrame(function () { btn.disabled = true; });
             });
           });
         }
@@ -517,6 +572,161 @@
           document.head.appendChild(s);
         }
 
+        // v2.86-pr23h:保持详情卡展开状态 + 自动滚动到 flash banner。
+        //
+        // 问题:表单 submit → 302 → 新页面加载,<details id="aliyun-card">
+        // 默认折叠、scrollY 重置为 0 → 用户感觉"页面被刷新、卡片被关闭"。
+        //
+        // 解决(四件事):
+        //   1) 提交表单前:把当前 open details + scrollY + hash 写到 sessionStorage
+        //   2) 页面加载时:如果 URL 有 #xxx,自动展开对应 <details> 并滚动到它
+        //   3) 页面加载时:如果 .flash-banner(顶部)存在,平滑滚动到它
+        //   4) 页面加载时:如果 .ddns-action-flash(home 内联)存在,
+        //      只展开祖先 details + **恢复之前的 scrollY**,不滚动到 banner
+        //      (内联 flash 就在按钮下方,滚动反而打断操作)
+        //
+        // 同时:把 #aliyun-card / #cert-card / #subnet-card 三个已知 ID 加到
+        // sessionStorage,在 submit 后页面加载时自动展开。
+        function initDetailsPersistence() {
+          var KNOWN_IDS = ['aliyun-card', 'cert-card', 'subnet-card'];
+          var STORAGE_KEY = 'ikev2-open-details';
+          var SCROLL_KEY = 'ikev2-scroll-y';
+
+          // (1) 提交表单前:把当前 open details + scrollY + hash 记到 sessionStorage
+          document.querySelectorAll('form').forEach(function (form) {
+            if (form.__ikev2PersistInit) return;
+            form.__ikev2PersistInit = true;
+            form.addEventListener('submit', function () {
+              try {
+                var openIds = [];
+                document.querySelectorAll('details.settings-card[open]').forEach(function (d) {
+                  if (d.id) openIds.push(d.id);
+                });
+                sessionStorage.setItem(STORAGE_KEY, JSON.stringify(openIds));
+                if (location.hash) {
+                  sessionStorage.setItem(STORAGE_KEY + ':hash', location.hash);
+                }
+                // 记当前滚动位置,新页面加载后恢复
+                sessionStorage.setItem(SCROLL_KEY, String(window.scrollY));
+              } catch (e) {}
+            });
+          });
+
+          // (2)+(3) 页面加载时:hash 优先 → sessionStorage 兜底
+          function restore() {
+            var targetId = null;
+            try {
+              if (location.hash && location.hash.length > 1) {
+                targetId = location.hash.slice(1);
+              }
+              if (!targetId) {
+                var stored = sessionStorage.getItem(STORAGE_KEY);
+                if (stored) {
+                  var ids = JSON.parse(stored);
+                  if (Array.isArray(ids)) {
+                    ids.forEach(function (id) {
+                      var el = document.getElementById(id);
+                      if (el && el.tagName === 'DETAILS') el.open = true;
+                    });
+                    // 第一个 id 作为滚动目标
+                    if (ids.length > 0) targetId = ids[0];
+                  }
+                }
+                var storedHash = sessionStorage.getItem(STORAGE_KEY + ':hash');
+                if (storedHash) {
+                  var hid = storedHash.slice(1);
+                  if (document.getElementById(hid)) targetId = hid;
+                }
+              } else {
+                // hash 直接命中 → 展开对应 details
+                var targetEl = document.getElementById(targetId);
+                if (targetEl && targetEl.tagName === 'DETAILS') targetEl.open = true;
+              }
+            } catch (e) {}
+
+            // v2.86-pr23i:flash 反馈分两类 —
+            //   - .flash-banner(顶部 banner,users/android 等页面用):
+            //     滚动到 banner(让用户看到反馈)
+            //   - .ddns-action-flash(home 页 DDNS 按钮组下方内联):
+            //     不滚动 — 内联在按钮旁,用户视线本来就在那儿,滚动反而打断操作。
+            //     恢复之前的 scrollY(sessionStorage 里存的)。
+            //
+            // 兼容 .flash-banner 是因为其他页面(users / android / user_detail)
+            // 仍用顶部 banner,逻辑不变。
+            //
+            // v2.86-pr23l:savedScrollY 优先级最高(无论有没有 flash)。
+            // 之前逻辑:有 inlineFlash 时才恢复 scrollY;无 flash 时退回到
+            // sessionStorage 里的 targetId(targetId 是上次打开的 details 卡,
+            // 滚动到 start 经常偏离用户原位置几百 px)。改成:scrollY > 0 一律恢复。
+            //
+            // v2.86-pr23l:querySelectorAll 同时匹配 .ddns-action-flash 和
+            // .aliyun-action-flash(两个卡片表单下方的内联 flash),取第一个
+            // (页面同时只会有一个,handler 用不同 slot 区分写入)。
+            var inlineFlash = document.querySelector('.ddns-action-flash, .aliyun-action-flash');
+            var topFlash = document.querySelector('.flash-banner');
+            var savedScrollY = null;
+            try {
+              var raw = sessionStorage.getItem(SCROLL_KEY);
+              if (raw != null) savedScrollY = parseInt(raw, 10);
+            } catch (e) {}
+            var scrollTarget = null;
+            if (savedScrollY != null && savedScrollY > 0) {
+              // 最高优先级:恢复用户原位置(任何情况下,只要有 saved scrollY 就恢复)
+              scrollTarget = { y: savedScrollY, kind: 'restore' };
+              if (inlineFlash) {
+                // 顺便把祖先 details 展开,否则 banner 会被折叠
+                var pd = inlineFlash.closest('details');
+                if (pd) pd.open = true;
+              }
+            } else if (topFlash) {
+              // 顶部 banner:滚动到 banner
+              var parentDetails2 = topFlash.closest('details');
+              if (parentDetails2) parentDetails2.open = true;
+              scrollTarget = topFlash;
+            } else if (targetId) {
+              // 没有 flash 也没有 saved scrollY:回到 hash/sessionStorage 指定的卡片
+              scrollTarget = document.getElementById(targetId);
+            }
+
+            if (scrollTarget) {
+              // 滚动到目标(在 <details> 展开后下一帧)
+              requestAnimationFrame(function () {
+                try {
+                  if (scrollTarget && scrollTarget.kind === 'restore') {
+                    // 恢复 scrollY(用户之前看的位置)
+                    window.scrollTo(0, scrollTarget.y);
+                  } else {
+                    scrollTarget.scrollIntoView({
+                      behavior: 'smooth',
+                      block: 'start',
+                    });
+                    // 顶部留点呼吸空间(56px topbar)
+                    window.scrollBy({ top: -16, behavior: 'instant' });
+                  }
+                } catch (e) {
+                  // 兜底:不支持 scrollIntoView options
+                  var rect = scrollTarget.getBoundingClientRect ? scrollTarget.getBoundingClientRect() : null;
+                  if (rect) window.scrollTo(0, window.scrollY + rect.top - 80);
+                }
+              });
+            }
+
+            // 清理(只生效一次 — 下次用户主动刷新就回到默认折叠)
+            try {
+              sessionStorage.removeItem(STORAGE_KEY);
+              sessionStorage.removeItem(STORAGE_KEY + ':hash');
+            } catch (e) {}
+          }
+
+          // 已知卡片 ID 直接展开(只要 hash 命中 / sessionStorage 里有)
+          // 不做"全部展开",避免页面太长。
+          if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', restore);
+          } else {
+            restore();
+          }
+        }
+
         function initAll() {
           initTopbarActive();
           initDismissable();
@@ -526,6 +736,7 @@
           initPasswordWidget();
           initBtnSpinKeyframes();
           initButtonLoading();
+          initDetailsPersistence();
         }
 
         // 此 <script> 在 </body> 前直接执行,DOM 已解析,querySelector 立即可用。
@@ -540,6 +751,56 @@
 </html>
 {{end}}
 
+{{/*
+  banner — v2.86-pr23j 统一 banner helper
+  ----------------------------------------------------------------------------
+  4 类语义,统一视觉:左侧 SVG 图标 + 右侧 .banner-body 文本。
+  通过 .Kind 选 variant: success(绿)/info(蓝)/warn(黄)/danger(红)。
+
+  用法:
+    {{template "banner" (dict "Kind" "success" "Msg" "已保存")}}
+    {{template "banner" (dict "Kind" "error" "Msg" "失败原因" "Dismissible" true "DismissKey" "key-1")}}
+    {{template "banner" (dict "Kind" "warn" "Msg" (printf "⚠️ %s" "提示"))}}
+
+  可选参数:
+    Msg        string  必填,文本内容(可以是 Go html/template 调用产生的内容,模板不会二次转义)
+    Kind       string  success / info / warn / danger / error
+    Dismissible bool   是否显示 × 关闭按钮(配 localStorage 持久化)
+    DismissKey string  关闭后 localStorage key(供 initDismissable 用)
+    ExtraClass string  额外 class(如 margin-top)
+    Id         string  可选 DOM id
+*/}}
+{{define "banner"}}
+  {{$kind := or (and .Kind (printf "%s" .Kind)) "info"}}
+  {{$variantClass := "banner-info"}}
+  {{$iconSvg := ""}}
+  {{if or (eq $kind "success") (eq $kind "ok")}}
+    {{$variantClass = "banner-success"}}
+    {{$iconSvg = "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M20 6L9 17l-5-5\"/></svg>"}}
+  {{else if eq $kind "info"}}
+    {{$variantClass = "banner-info"}}
+    {{$iconSvg = "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><circle cx=\"12\" cy=\"12\" r=\"10\"/><line x1=\"12\" y1=\"16\" x2=\"12\" y2=\"12\"/><line x1=\"12\" y1=\"8\" x2=\"12.01\" y2=\"8\"/></svg>"}}
+  {{else if or (eq $kind "warn") (eq $kind "warning")}}
+    {{$variantClass = "banner-warn"}}
+    {{$iconSvg = "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z\"/><line x1=\"12\" y1=\"9\" x2=\"12\" y2=\"13\"/><line x1=\"12\" y1=\"17\" x2=\"12.01\" y2=\"17\"/></svg>"}}
+  {{else if or (eq $kind "danger") (eq $kind "error")}}
+    {{$variantClass = "banner-danger"}}
+    {{$iconSvg = "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><circle cx=\"12\" cy=\"12\" r=\"10\"/><line x1=\"15\" y1=\"9\" x2=\"9\" y2=\"15\"/><line x1=\"9\" y1=\"9\" x2=\"15\" y2=\"15\"/></svg>"}}
+  {{end}}
+  {{$dismissClass := ""}}
+  {{if .Dismissible}}{{$dismissClass = " dismissable"}}{{end}}
+  {{$extraClass := or (and .ExtraClass (printf " %s" .ExtraClass)) ""}}
+  {{$dismissKey := or .DismissKey ""}}
+  {{$idAttr := ""}}
+  {{if .Id}}{{$idAttr = printf " id=\"%s\"" .Id}}{{end}}
+  <div class="banner {{$variantClass}}{{$dismissClass}}{{$extraClass}}"{{if $dismissKey}} data-dismiss-key="{{$dismissKey}}"{{end}}{{$idAttr}} role="status">
+    {{if $iconSvg}}<span class="banner-icon" aria-hidden="true">{{$iconSvg | safeHTML}}</span>{{end}}
+    <div class="banner-body">{{.Msg | safeHTML}}</div>
+    {{/* v2.86-pr23l:× 由 .dismissable .dismiss::after 的 content 渲染,
+       这里不放文字内容,避免和 pseudo 的 × 重叠(双 X 视觉 bug)。 */}}
+    {{if .Dismissible}}<button type="button" class="dismiss" aria-label="关闭" title="关闭"></button>{{end}}
+  </div>
+{{end}}
 {{/*
   topbar — 56px sticky
     [I] IKEV2 PANEL  ← HOME  USERS  AUDIT  CONFIG.    [PRESET n]   USERS HUD  ACTIVE HUD  CERT  …    [A alice  登出]
@@ -574,6 +835,14 @@
         </svg>
       </span>
       <span>Audit</span>
+    </a>
+    <a href="/account" data-page-key="account">
+      <span class="nav-glyph" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16">
+          <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>
+        </svg>
+      </span>
+      <span>Account</span>
     </a>
     <a href="/admin/mobileconfig-defaults" data-page-key="admin">
       <span class="nav-glyph" aria-hidden="true">

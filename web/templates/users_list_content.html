@@ -12,14 +12,12 @@
   </div>
 </header>
 
-{{if .Flash}}<div class="banner-warn alert-warn">{{.Flash}}</div>{{end}}
+{{if .Flash}}
+  {{$kind := or .FlashKind "info"}}
+  {{template "banner" (dict "Kind" $kind "Msg" .Flash "ExtraClass" "mb-2")}}
+{{end}}
 {{if .NewPassword}}
-<div class="banner-warn alert-warn">
-  <div>
-    <strong>用户密码已生成:</strong><code style="font-size: 0.9375rem;">{{.NewPassword}}</code>
-    <small style="display: block; margin-top: 0.4rem;">⚠️ 仅显示这一次，请记录后再关闭。</small>
-  </div>
-</div>
+  {{template "banner" (dict "Kind" "warn" "Msg" (printf "<strong>用户密码已生成:</strong><code style=\"font-size: 0.9375rem;\">%s</code><small style=\"display: block; margin-top: 0.4rem;\">⚠️ 仅显示这一次,请记录后再关闭。</small>" .NewPassword))}}
 {{end}}
 
 {{if .Users}}

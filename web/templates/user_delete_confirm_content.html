@@ -15,10 +15,7 @@
 <div class="dashboard-grid">
   <div class="dashboard-main">
     <article class="card card-pad">
-      <div class="banner-danger alert-danger">
-        <strong>⚠ 此操作不可撤销</strong>
-        <p style="margin-top: 0.4rem;">删除用户 <code>{{.User.Username}}</code> 会触发以下操作：</p>
-      </div>
+      {{template "banner" (dict "Kind" "error" "Msg" (printf "<strong>⚠ 此操作不可撤销</strong><p style=\"margin-top: 0.4rem;\">删除用户 <code>%s</code> 会触发以下操作:</p>" .User.Username))}}
 
       <div class="terminal-card">
         <div class="term-header">

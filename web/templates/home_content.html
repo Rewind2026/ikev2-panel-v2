@@ -7,41 +7,23 @@
     - 警告 banner：默认密码 / DDNS 失败 / 未配 Aliyun / LE 问题
 */}}
 
-{{if .LEWarning}}<div class="banner-danger alert-danger">{{.LEWarning}}</div>{{end}}
+{{if .LEWarning}}{{template "banner" (dict "Kind" "error" "Msg" .LEWarning "ExtraClass" "mb-2")}}{{end}}
 
-{{/* v2.86-pr23g:flash banner — DDNS 保存 / 同步 / 查询 / 创建 反馈(handlers 写 flash) */}}
-{{if .Flash}}
-  <div class="banner-info dismissable" data-dismiss-key="ddns-flash" style="margin: 0.5rem 0 0;">{{.Flash}}</div>
-{{end}}
+{{/* v2.86-pr23i:flash banner 移除顶部渲染 — 之前放顶部会触发滚动到顶,
+   把用户从按钮组拉走。改在 DDNS 按钮组下方内联(ddns-action-flash),
+   保持按钮位置不动,反馈就近显示。其它页面(users/android/user_detail)
+   仍走原来的 .flash-banner 路径,本模板只服务于 home。 */}}
 
 {{if .IsDefaultPassword}}
-<div class="banner-warn alert-warn dismissable" data-dismiss-key="default-password">
-  <div>
-    <strong>你仍在使用默认管理员密码</strong> — 出于安全考虑，请尽快修改。
-    <small>详见 <a href="/docs/SECURITY.md" target="_blank" rel="noopener">SECURITY 文档</a>。</small>
-  </div>
-  <button type="button" class="dismiss" aria-label="关闭" title="关闭"></button>
-</div>
+  {{template "banner" (dict "Kind" "warn" "Msg" (printf "<strong>你仍在使用默认管理员密码</strong> — 出于安全考虑,请尽快修改。<small>详见 <a href=\"/docs/SECURITY.md\" target=\"_blank\" rel=\"noopener\">SECURITY 文档</a>。</small>") "Dismissible" true "DismissKey" "default-password")}}
 {{end}}
 
 {{if and .DDNSConfigured .DDNSFailed}}
-<div class="banner-danger alert-danger dismissable" data-dismiss-key="ddns-failed">
-  <div>
-    <strong>DDNS 同步失败</strong>:{{.DDNSLastError}}
-    <small>最近一次同步:{{.DDNSLastTime}}</small>
-  </div>
-  <button type="button" class="dismiss" aria-label="关闭" title="关闭"></button>
-</div>
+  {{template "banner" (dict "Kind" "error" "Msg" (printf "<strong>DDNS 同步失败</strong>:%s<small>最近一次同步:%s</small>" .DDNSLastError .DDNSLastTime) "Dismissible" true "DismissKey" "ddns-failed")}}
 {{end}}
 
 {{if not .AliyunConfigured}}
-<div class="banner-warn alert-warn dismissable" data-dismiss-key="no-aliyun">
-  <div>
-    <strong>未配置阿里云凭证</strong> — Let's Encrypt 签发 + DDNS 自动同步都需要 AccessKey。
-    <a href="#aliyun-card">去填写 →</a>
-  </div>
-  <button type="button" class="dismiss" aria-label="关闭" title="关闭"></button>
-</div>
+  {{template "banner" (dict "Kind" "warn" "Msg" "<strong>未配置阿里云凭证</strong> — Let's Encrypt 签发 + DDNS 自动同步都需要 AccessKey。<a href=\"#aliyun-card\">去填写 →</a>" "Dismissible" true "DismissKey" "no-aliyun")}}
 {{end}}
 
 {{/*
@@ -467,6 +449,24 @@
   </form>
 
   {{/*
+    v2.86-pr23l:Aliyun 凭证操作反馈 — 内联在表单按钮组下方,
+    跟 .ddns-action-flash 同样的 UX:不滚动到顶、不跳原生错误页,
+    用户停留在 aliyun-card 卡片里看到反馈。跟 DDNS 的差异:
+      - DismissKey 不同("aliyun-flash"),不互相干扰
+      - ExtraClass="aliyun-action-flash",scroll-restore JS 把它也识别为
+        inline flash,savedScrollY 优先级仍然最高
+  */}}
+  {{if .AliyunFlash}}
+    {{$bannerKind := "info"}}
+    {{if eq .AliyunFlashKind "error"}}{{$bannerKind = "error"}}{{end}}
+    {{if eq .AliyunFlashKind "success"}}{{$bannerKind = "success"}}{{end}}
+    {{template "banner" (dict "Kind" $bannerKind "Msg" .AliyunFlash "Dismissible" true "DismissKey" "aliyun-flash" "ExtraClass" "aliyun-action-flash")}}
+  {{else}}
+    <!-- DEBUG: AliyunFlash is empty, AliyunFlashKind='{{.AliyunFlashKind}}' -->
+  {{end}}
+  <!-- DEBUG2: out of aliyun flash if/else, AliyunFlash='{{.AliyunFlash}}' -->
+
+  {{/*
     v2.86-pr23a:DNS 同步块 — 完全替代 PR20 的 family radio。
     设计:域名(RR)+ 两个独立 checkbox(A/AAAA)+ 周期 + 状态表 + 三个按钮。
     比 PR20 更清晰:用户能独立控制 A/AAAA 开关,不再有三选一 radio 的歧义。
@@ -478,8 +478,8 @@
 
   <h3 style="margin: 0 0 0.5rem; font-size: 0.95rem;">DNS 同步</h3>
   <p class="text-muted" style="margin: 0 0 1rem; font-size: 0.8125rem;">
-    按 {{if .DDNSDetectTarget}}<code>{{.DDNSDetectTarget}}</code>{{end}} 探测 → 推送 → 阿里云 DNS 解析记录。
-    {{if .DDNSDetectTarget}}<small>大陆用户可改 223.5.5.5 提高探测成功率。</small>{{end}}
+    调用公网 IPv4 检测服务(境内节点:ip.cn / ipip.net 等 fallback) → 拿到对外公网 IP → 推送 → 阿里云 DNS 解析记录。
+    <small>v2.86-pr23l:不再使用本地网卡地址,确保 A 记录对应真实公网出口。</small>
   </p>
 
   {{/* 当前生效的配置(只读,实时) */}}
@@ -491,14 +491,14 @@
     <div><strong>同步周期：</strong><code>{{.DDNSPeriod}}</code>
       {{if .DDNSIface}}<small>· 监听接口:<code>{{.DDNSIface}}</code></small>{{end}}
     </div>
-    {{if .DDNSDetectTarget}}<div><strong>IPv4 探测目标：</strong><code>{{.DDNSDetectTarget}}</code>
-      <small>(服务器向该地址发探测以拿到本机出口 IPv4)</small>
-    </div>{{end}}
+    <div><strong>IPv4 来源：</strong>公网 IP 检测 API(多家 fallback)
+      <small>(境内可达性优先,失败时自动切换)</small>
+    </div>
   </div>
   {{end}}
 
   {{/* 配置表单 — 一站式 Domain/RR/EnableA/EnableAAAA/Period */}}
-  <form method="POST" action="/api/ddns/config">
+  <form method="POST" action="/api/ddns/config" id="ddns-config-form">
     <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
     {{/* v2.86-pr23f:主域名 — 之前只能从 env IKEV2_DDNS_DOMAIN 启动值读,
        面板现在能改,持久化到 statefile(覆盖 env 启动值)。 */}}
@@ -665,38 +665,40 @@
        提示用户"去阿里云控制台手动建"是曲线返工。本捷径直接走 AddDomainRecord。 */}}
     {{if and .DDNSHasDomain .DDNSHasCreds}}
       {{if and .DDNSEnableA (not .DDNSRemoteA)}}
-      <form method="POST" action="/api/ddns/create-record" style="margin: 0.5rem 0;">
-        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-        <input type="hidden" name="record_type" value="A">
-        <input type="hidden" name="value" value="{{.DDNSV4IP}}">
+      {{/* v2.86-pr23h:不嵌 <form>(HTML 不允许 nested form,会 implicit close 外层 form 导致下方按钮失效),
+         改用 form="ddns-config-form" attribute 显式关联,所有字段仍在同一表单提交链上 */}}
+      <div style="margin: 0.5rem 0;">
+        <input type="hidden" form="ddns-config-form" name="csrf_token" value="{{.CSRFToken}}">
+        <input type="hidden" form="ddns-config-form" name="record_type" value="A">
+        <input type="hidden" form="ddns-config-form" name="value" value="{{.DDNSV4IP}}">
         <div class="banner-warn" style="margin: 0; font-size: 0.8125rem;">
           <div style="display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap;">
             <span>阿里云上没有 <code>{{.DDNSDomain}}</code> 的 A 记录。</span>
             {{if .DDNSV4IP}}
-            <button type="submit" class="btn-primary btn-sm">在阿里云创建 A → {{.DDNSV4IP}}</button>
+            <button type="submit" form="ddns-config-form" formaction="/api/ddns/create-record" class="btn-primary btn-sm">在阿里云创建 A → {{.DDNSV4IP}}</button>
             {{else}}
             <span class="text-muted">等待首次 IPv4 探测后再创建。</span>
             {{end}}
           </div>
         </div>
-      </form>
+      </div>
       {{end}}
       {{if and .DDNSEnableAAAA (not .DDNSRemoteAAAA)}}
-      <form method="POST" action="/api/ddns/create-record" style="margin: 0.5rem 0;">
-        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-        <input type="hidden" name="record_type" value="AAAA">
-        <input type="hidden" name="value" value="{{.DDNSV6IP}}">
+      <div style="margin: 0.5rem 0;">
+        <input type="hidden" form="ddns-config-form" name="csrf_token" value="{{.CSRFToken}}">
+        <input type="hidden" form="ddns-config-form" name="record_type" value="AAAA">
+        <input type="hidden" form="ddns-config-form" name="value" value="{{.DDNSV6IP}}">
         <div class="banner-warn" style="margin: 0; font-size: 0.8125rem;">
           <div style="display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap;">
             <span>阿里云上没有 <code>{{.DDNSDomain}}</code> 的 AAAA 记录。</span>
             {{if .DDNSV6IP}}
-            <button type="submit" class="btn-primary btn-sm">在阿里云创建 AAAA → {{.DDNSV6IP}}</button>
+            <button type="submit" form="ddns-config-form" formaction="/api/ddns/create-record" class="btn-primary btn-sm">在阿里云创建 AAAA → {{.DDNSV6IP}}</button>
             {{else}}
             <span class="text-muted">等待首次 IPv6 探测后再创建。</span>
             {{end}}
           </div>
         </div>
-      </form>
+      </div>
       {{end}}
     {{end}}
     {{end}}
@@ -713,6 +715,15 @@
         <button type="submit" class="btn-danger" formaction="/api/ddns/toggle" name="enabled" value="false">关闭 DDNS</button>
       {{end}}
     </div>
+
+    {{/* v2.86-pr23j:DDNS 操作反馈 — 就近内联在按钮组下方,
+       不放页面顶部,避免触发滚动到顶把用户拉走。统一 banner helper。 */}}
+    {{if .Flash}}
+      {{$bannerKind := "info"}}
+      {{if eq .FlashKind "error"}}{{$bannerKind = "error"}}{{end}}
+      {{if eq .FlashKind "success"}}{{$bannerKind = "success"}}{{end}}
+      {{template "banner" (dict "Kind" $bannerKind "Msg" .Flash "Dismissible" true "DismissKey" "ddns-flash" "ExtraClass" "ddns-action-flash")}}
+    {{end}}
   </form>
   {{else}}
     {{/* v2.86-pr23a:DDNS 功能本身未启用(DDNSSync==nil) ——

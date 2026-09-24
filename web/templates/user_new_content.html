@@ -11,7 +11,7 @@
   </div>
 </header>
 
-{{if .Error}}<div class="banner-danger alert-danger">{{.Error}}</div>{{end}}
+{{if .Error}}{{template "banner" (dict "Kind" "error" "Msg" .Error)}}{{end}}
 
 <form method="POST" action="/users" class="card card-pad" style="max-width: 640px;">
   <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">

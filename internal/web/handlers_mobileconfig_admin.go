@@ -14,6 +14,7 @@
 package web
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -34,14 +35,26 @@ type mobileconfigDefaultsData struct {
 	// Builtin cert.BaseMobileConfigDefaults() 的镜像,模板用作 "未设置" 的占位符参考
 	Builtin cert.MobileConfigOpts
 
-	// Flash 操作结果(保存成功 / 错误 / 清除成功)
-	Flash string
-	Error string
+	// v2.86-pr23l:Flash 反馈改走 FlashStore session(跟 aliyun / ddns / users 一致),
+	// 不再用 ?flash=...&error=... query string(避免密码泄露历史教训 + 跟其他页行为一致)。
+	// Flash     操作结果(保存成功 / 清除成功)
+	// FlashKind flash 类别("" / "info" / "success" / "error"),模板切 banner 配色
+	// Error     保留兼容:旧 query string ?error=... 的错误信息(若有)。新流程不再设它。
+	Flash     string
+	FlashKind string
+	Error     string
 }
 
 // handleAdminMobileconfigDefaults GET /admin/mobileconfig-defaults
 //
 // 渲染 admin defaults 设置页,展示当前值 + builtin 对比 + 表单。
+//
+// v2.86-pr23l:flash 反馈从 query string (?flash=...&error=...) 切到 FlashStore session,
+// 跟 aliyun / ddns / users 等页面一致 ——
+//
+//	- 无 query string(避免密码泄露历史教训,见 flash.go 注释)
+//	- 操作反馈由 banner 就近在表单上方显示
+//	- 错误用 banner-danger(红色),成功用 banner-success(绿色)
 func (s *Server) handleAdminMobileconfigDefaults(w http.ResponseWriter, r *http.Request) {
 	admin, ok := AdminFrom(r.Context())
 	if !ok {
@@ -59,6 +72,17 @@ func (s *Server) handleAdminMobileconfigDefaults(w http.ResponseWriter, r *http.
 		current = d
 	}
 
+	// v2.86-pr23l:消费上一步操作写入的 flash(默认 slot)。
+	// 默认 slot 跟 aliyun / ddns / users 共享同一套,handler 写时都用 Set(),
+	// 渲染时都用 Consume(),无需引入新 slot。
+	var flashMsg, flashKind string
+	if sess != nil && s.FlashStore != nil {
+		if f, err := s.FlashStore.Consume(sess.ID); err == nil {
+			flashMsg = f.Message
+			flashKind = f.Kind
+		}
+	}
+
 	data := mobileconfigDefaultsData{
 		PageMeta: PageMeta{
 			Page:         "admin_mobileconfig_defaults",
@@ -71,10 +95,13 @@ func (s *Server) handleAdminMobileconfigDefaults(w http.ResponseWriter, r *http.
 				{Label: "Mobileconfig 默认值", Href: ""},
 			},
 		},
-		Current: current,
-		Builtin: cert.BaseMobileConfigDefaults(),
-		Flash:   r.URL.Query().Get("flash"),
-		Error:   r.URL.Query().Get("error"),
+		Current:   current,
+		Builtin:   cert.BaseMobileConfigDefaults(),
+		Flash:     flashMsg,
+		FlashKind: flashKind,
+		// Error 字段保留兼容 — 旧 ?error= query string 仍能渲染(模板 line 20 还在用)。
+		// 新流程(POST → flash session)不再设它。
+		Error: r.URL.Query().Get("error"),
 	}
 	s.RenderPage(w, r, http.StatusOK, "admin_mobileconfig_defaults", data)
 }
@@ -89,6 +116,12 @@ func (s *Server) handleAdminMobileconfigDefaults(w http.ResponseWriter, r *http.
 //     (SSID 是 per-user 的)
 //   - admin defaults 字段都是指针类型(*bool / *int),"未设置"用 nil 表示;
 //     user overlay 也用指针,语义一致
+//
+// v2.86-pr23l:反馈从 query string 切到 FlashStore session ——
+//
+//	- 错误 → kind="error"(红色 banner-danger)
+//	- 成功 → kind="success"(绿色 banner-success)
+//	- 写完 flash 后 302 redirect 到无 query string 的页面,GET handler 渲染 banner
 func (s *Server) handleAdminMobileconfigDefaultsSave(w http.ResponseWriter, r *http.Request) {
 	if s.MobileConfigDefaults == nil {
 		http.Error(w, "mobileconfig defaults store not initialized", http.StatusInternalServerError)
@@ -102,15 +135,13 @@ func (s *Server) handleAdminMobileconfigDefaultsSave(w http.ResponseWriter, r *h
 	d, err := parseMobileConfigDefaultsFromForm(&r.Form)
 	if err != nil {
 		s.Logger.Warn("admin: parse mobileconfig defaults", "err", err)
-		http.Redirect(w, r, "/admin/mobileconfig-defaults?error="+url.QueryEscape(err.Error()),
-			http.StatusSeeOther)
+		s.writeMCDefaultsFlash(w, r, "error", "保存失败: "+err.Error())
 		return
 	}
 
 	if err := s.MobileConfigDefaults.WriteMobileConfigDefaults(d); err != nil {
 		s.Logger.Warn("admin: write mobileconfig defaults", "err", err)
-		http.Redirect(w, r, "/admin/mobileconfig-defaults?error="+url.QueryEscape(err.Error()),
-			http.StatusSeeOther)
+		s.writeMCDefaultsFlash(w, r, "error", "保存失败: "+err.Error())
 		return
 	}
 
@@ -122,8 +153,36 @@ func (s *Server) handleAdminMobileconfigDefaultsSave(w http.ResponseWriter, r *h
 			boolPtrStr(d.ExcludeLocalNetworks), len(d.DNSServers),
 			d.DeadPeerDetectionRate))
 
-	http.Redirect(w, r, "/admin/mobileconfig-defaults?flash="+url.QueryEscape("已保存。下次用户下载 mobileconfig 立即生效,无需重启容器"),
-		http.StatusSeeOther)
+	s.writeMCDefaultsFlash(w, r, "success", "已保存。下次用户下载 mobileconfig 立即生效,无需重启容器")
+}
+
+// writeMCDefaultsFlash v2.86-pr23l:统一 save/clear 的 flash + 302 出口。
+//
+// 行为:
+//   - XHR / Accept: application/json → JSON 响应(给将来脚本调用留口子,本次未启用)
+//   - 普通表单 → 写 flash 到 session + 302 redirect 回 /admin/mobileconfig-defaults
+func (s *Server) writeMCDefaultsFlash(w http.ResponseWriter, r *http.Request, kind, msg string) {
+	if wantsJSON(r) {
+		w.Header().Set("Content-Type", "application/json")
+		ok := kind != "error"
+		status := http.StatusOK
+		if !ok {
+			status = http.StatusBadRequest
+		}
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":    ok,
+			"kind":  kind,
+			"error": msg,
+		})
+		return
+	}
+
+	sess, _ := SessionFrom(r.Context())
+	if sess != nil && s.FlashStore != nil {
+		s.FlashStore.Set(sess.ID, Flash{Message: msg, Kind: kind})
+	}
+	http.Redirect(w, r, "/admin/mobileconfig-defaults", http.StatusFound)
 }
 
 // handleAdminMobileconfigDefaultsClear POST /admin/mobileconfig-defaults/clear
@@ -132,6 +191,8 @@ func (s *Server) handleAdminMobileconfigDefaultsSave(w http.ResponseWriter, r *h
 //
 // 设计选择:不需要 confirm(用户已经在 UI 上点了"恢复出厂值"按钮,
 // 跟 /admin/cert/clear 风格一致)。
+//
+// v2.86-pr23l:跟 save 一致,反馈改走 FlashStore session。
 func (s *Server) handleAdminMobileconfigDefaultsClear(w http.ResponseWriter, r *http.Request) {
 	if s.MobileConfigDefaults == nil {
 		http.Error(w, "mobileconfig defaults store not initialized", http.StatusInternalServerError)
@@ -139,12 +200,11 @@ func (s *Server) handleAdminMobileconfigDefaultsClear(w http.ResponseWriter, r *
 	}
 	if err := s.MobileConfigDefaults.ClearMobileConfigDefaults(); err != nil {
 		s.Logger.Error("admin: clear mobileconfig defaults", "err", err)
-		http.Error(w, "清除失败", http.StatusInternalServerError)
+		s.writeMCDefaultsFlash(w, r, "error", "清除失败: "+err.Error())
 		return
 	}
 	s.writeAudit(r, "admin.mobileconfig_defaults.clear", "")
-	http.Redirect(w, r, "/admin/mobileconfig-defaults?flash="+url.QueryEscape("已恢复 builtin 出厂值"),
-		http.StatusSeeOther)
+	s.writeMCDefaultsFlash(w, r, "success", "已恢复 builtin 出厂值")
 }
 
 // parseMobileConfigDefaultsFromForm 从 form 构造 panelstate.MobileConfigDefaults。

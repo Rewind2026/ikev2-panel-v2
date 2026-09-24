@@ -45,7 +45,8 @@ type storeUser = store.User
 // 历史：v2 之前所有模板平铺,nav 在 5 个页面重复。P1-B 后 nav 只在 layout.html 一处。
 //
 // v2.86-PR20:新增 staticDir 参数,用于 assetVersion() cache-bust。
-//   详见 newAssetVersion。
+//
+//	详见 newAssetVersion。
 func LoadTemplates(templatesDir string, staticDir string, displayTZ string) (*template.Template, error) {
 	entries, err := os.ReadDir(templatesDir)
 	if err != nil {
@@ -138,6 +139,12 @@ func LoadTemplates(templatesDir string, staticDir string, displayTZ string) (*te
 		// v2.86-PR20:静态资源 cache-bust 版本号。
 		// 用法:{{assetVersion "/static/style.css"}} → "?v=1234567890" 或 ""
 		"assetVersion": assetV,
+		// v2.86-pr23j:banner helper 用的工具函数。
+		// - dict: 创建 map[string]any,用于 {{template "banner" (dict "Kind" "x" ...)}}
+		// - safeHTML: 标记字符串为已安全 HTML(直接输出,不再转义),用于 helper
+		//   内嵌入 SVG 图标等已知安全内容。
+		"dict":     dictTpl,
+		"safeHTML": safeHTMLTpl,
 	})
 
 	if _, err := t.ParseFiles(paths...); err != nil {
@@ -218,6 +225,34 @@ func formatTimeDDNS(unix int64, tzName string) string {
 // 每个子模板文件必须是 "_content.html" 后缀,layout 路由靠这个拼接。
 func pageContent(page string) string {
 	return page + "_content"
+}
+
+// dictTpl v2.86-pr23j:把任意 key/value 转成 map[string]any,供模板里传参用。
+//
+// 用法: {{template "banner" (dict "Kind" "success" "Msg" "已保存")}}
+//
+// 替代 Go 1.12+ 内置的 same-name 函数(本项目模板用 dict 自实现以保持显式可控)。
+func dictTpl(values ...interface{}) map[string]any {
+	if len(values)%2 != 0 {
+		return nil
+	}
+	m := make(map[string]any, len(values)/2)
+	for i := 0; i < len(values); i += 2 {
+		key, ok := values[i].(string)
+		if !ok {
+			continue
+		}
+		m[key] = values[i+1]
+	}
+	return m
+}
+
+// safeHTMLTpl v2.86-pr23j:标记字符串为安全 HTML,模板内不再转义。
+//
+// 仅用于 banner helper 内嵌的 SVG 图标(代码常量、不可被用户注入)。
+// 严禁用于用户输入(否则 XSS)。
+func safeHTMLTpl(s string) template.HTML {
+	return template.HTML(s)
 }
 
 // formatBytesTpl 模板用：人类可读字节（B / KB / MB / GB）。
@@ -502,7 +537,7 @@ type TopologyClient struct {
 // jsonTopologyClients 把客户端 slice 序列化为 JSON 字符串,嵌入 SVG data attr。
 //
 // 用 encoding/json 而不是 template.HTMLEscape,因为 data-clients 是 attribute value
-// (包在 '' 或 "" 里),template 会自己处理 outer quote escaping。
+// (包在 ” 或 "" 里),template 会自己处理 outer quote escaping。
 //
 // v2.86-PR12.21
 func jsonTopologyClients(clients []TopologyClient) (template.JS, error) {

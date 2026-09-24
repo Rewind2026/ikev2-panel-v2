@@ -57,9 +57,8 @@ type Config struct {
 	EnableA bool
 	// EnableAAAA v2.86-pr23a:是否同步 AAAA 记录(IPv6)。panelstate 可改。
 	EnableAAAA bool
-	// DetectTarget v2-84:IPv4 探测目标(默认 swanctl.DefaultProbeTarget = 8.8.8.8)。
-	// 中国大陆用户可改为 223.5.5.5(阿里 DNS)以提高探测成功率。
-	DetectTarget string
+	// v2.86-pr23l:DetectTarget 字段废弃。IPv4 公网地址由 internal/publicip 多家
+	// API fallback 探测,swanctl.DetectGlobalV4 的 target 参数已忽略。
 	// AliyunAccessKeyID 阿里云 AccessKey ID(v2-83:仅作为启动时 fallback;运行时优先用 CredentialGetter)
 	AliyunAccessKeyID string
 	// AliyunAccessKeySecret 阿里云 AccessKey Secret(同上)
@@ -606,12 +605,10 @@ func (s *Sync) Domain() string {
 	return s.cfg.RR + "." + s.cfg.Domain
 }
 
-// DetectTarget v2.86-pr22:返回 IPv4 探测目标(如 8.8.8.8)。
-// 供面板 DDNS 卡展示探测参数。
+// DetectTarget v2.86-pr23l:已废弃,IPv4 探测不再使用 target 参数。
+// 保留 getter 以兼容调用方(返回空字符串即可)。
 func (s *Sync) DetectTarget() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.cfg.DetectTarget
+	return "" // deprecated
 }
 
 // Period v2.86-pr22:返回同步周期(如 60s)。
@@ -792,7 +789,8 @@ func (s *Sync) tick() {
 			if s.detectV4 == nil {
 				return "", nil
 			}
-			return s.detectV4(s.cfg.Iface, s.cfg.DetectTarget)
+			// v2.86-pr23l:第二个参数(target)已废弃,内部走公网 IP API 检测。
+			return s.detectV4(s.cfg.Iface, "")
 		}, s.cfg.Iface)
 	}
 

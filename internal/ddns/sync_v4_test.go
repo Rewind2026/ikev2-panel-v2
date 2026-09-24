@@ -89,7 +89,8 @@ func TestSync_SetFamilyRejectsInvalid(t *testing.T) {
 	}
 }
 
-// v2.86-pr22:Domain / RR / BaseDomain / DetectTarget / Period / Iface getter 测试
+// v2.86-pr22:Domain / RR / BaseDomain / Period / Iface getter 测试
+// v2.86-pr23l:DetectTarget getter 已废弃(始终返回 "")。
 func TestSync_ConfigGetters_RRWithDomain(t *testing.T) {
 	s := newTestSync(t)
 	if got := s.Domain(); got != "vpn.example.com" {
@@ -110,20 +111,20 @@ func TestSync_ConfigGetters_RRAtSign(t *testing.T) {
 	}
 }
 
-func TestSync_ConfigGetters_PeriodAndTarget(t *testing.T) {
+func TestSync_ConfigGetters_PeriodAndIface(t *testing.T) {
 	s := newTestSync(t, func(c *Config) {
 		c.Period = 5 * time.Minute
-		c.DetectTarget = "223.5.5.5"
 		c.Iface = "eth0"
 	})
 	if got := s.Period(); got != 5*time.Minute {
 		t.Errorf("Period() = %v, want 5m", got)
 	}
-	if got := s.DetectTarget(); got != "223.5.5.5" {
-		t.Errorf("DetectTarget() = %q, want 223.5.5.5", got)
-	}
 	if got := s.Iface(); got != "eth0" {
 		t.Errorf("Iface() = %q, want eth0", got)
+	}
+	// v2.86-pr23l:DetectTarget() deprecated → 始终返回 ""
+	if got := s.DetectTarget(); got != "" {
+		t.Errorf("DetectTarget() deprecated, expected empty string, got %q", got)
 	}
 }
 
