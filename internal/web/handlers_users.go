@@ -276,6 +276,22 @@ func (s *Server) handleUserDetail(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// v2.86-pr23p:判断当前用户是否在线(主页 topology 是直接看 SA 表的;
+	// 之前这里硬编码 false,导致用户详情页 topology 永远显示 disconnected,
+	// 即使已经有流量产生 — 跟主页 topology 不一致)。
+	//
+	// 复用 loadActiveSAs (3s timeout + ESTABLISHED 过滤),遍历 RemoteID 跟
+	// username 比对 —— parser.go 里 RemoteID 已经 extractID 剥过 "2 " / "CN="
+	// 前缀,可以直接 == 。
+	activeSAs, _ := loadActiveSAs(r.Context(), s)
+	userOnline := false
+	for _, sa := range activeSAs {
+		if sa.RemoteID == u.Username {
+			userOnline = true
+			break
+		}
+	}
+
 	s.RenderPage(w, r, http.StatusOK, pageUserDetail, userDetailData{
 		PageMeta: PageMeta{Page: pageUserDetail, Title: u.Username, PageKey: "users", AdminUsername: admin.Username, CSRFToken: csrfTokenOf(sess),
 			Breadcrumb: []Breadcrumb{{Label: "用户", Href: "/users"}, {Label: u.Username}}},
@@ -285,7 +301,7 @@ func (s *Server) handleUserDetail(w http.ResponseWriter, r *http.Request) {
 		FlashKind:   msgKind,
 		ServerAddr:  s.ServerAddr,
 		NowUnix:     time.Now().Unix(),
-		UserOnline:  false,
+		UserOnline:  userOnline,
 	})
 }
 

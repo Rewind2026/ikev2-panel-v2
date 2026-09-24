@@ -21,6 +21,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{{.Title}} · IKEv2 Panel</title>
+    {{/* v2.86-pr23p:favicon。视觉 1:1 对应 style.css L442-450 的 .topbar-brand-mark
+       (cyan 渐变方块 + 加粗 "I")。SVG 单独放 web/static/favicon.svg,
+       template 只引用 URL,读 / 维护 / 替换都直观。 */}}
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg{{assetVersion "/static/favicon.svg"}}">
     <link rel="stylesheet" href="/static/style.css{{assetVersion "/static/style.css"}}">
     <script src="/static/js/topology.js{{assetVersion "/static/js/topology.js"}}" defer></script>
   </head>
