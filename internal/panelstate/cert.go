@@ -50,12 +50,18 @@ import (
 // CertConfig 证书配置(运行时持久化)。
 //
 // JSON tag snake_case 方便 jq/sed 检查。
+// v2.86-pr23o:ServerCN / ACMEEmail / Domain 都不带 omitempty ——
+// 即使空也必须输出 JSON key,否则 entrypoint.sh 的 grep -E '"server_cn"'
+// 在缺 key 时返 1,触发 `set -euo pipefail` 立即 exit 1 → 容器秒死 →
+// `restart: unless-stopped` 看到非 0 退出码 → 无限重启。
+// (entrypoint.sh L74-76 兜底加了 `|| true`,但保证 Go 端输出完整 JSON
+// 是更稳妥的修复 —— 老镜像 / 老 cert.conf 也能正常工作。)
 type CertConfig struct {
-	CertMode  string `json:"cert_mode"`             // "self-signed" / "letsencrypt"
-	Domain    string `json:"domain,omitempty"`      // LE 模式必填,自签模式忽略
-	ServerCN  string `json:"server_cn,omitempty"`   // mobileconfig RemoteIdentifier;空时 fallback 到 Domain 或 "vpn.local"
-	ACMEEmail string `json:"acme_email,omitempty"`  // LE 注册邮箱(可选,Let's Encrypt 不强制)
-	UpdatedAt int64  `json:"updated_at,omitempty"`  // unix seconds,更新时间戳
+	CertMode  string `json:"cert_mode"`            // "self-signed" / "letsencrypt"
+	Domain    string `json:"domain"`              // LE 模式必填,自签模式忽略
+	ServerCN  string `json:"server_cn"`           // mobileconfig RemoteIdentifier;空时 fallback 到 Domain 或 "vpn.local"
+	ACMEEmail string `json:"acme_email"`          // LE 注册邮箱(可选,Let's Encrypt 不强制)
+	UpdatedAt int64  `json:"updated_at,omitempty"` // unix seconds,更新时间戳
 }
 
 // CertConfigStore 证书配置的读写,带内存缓存。

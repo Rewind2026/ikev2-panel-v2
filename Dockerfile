@@ -353,12 +353,21 @@ RUN set -eux; \
     rm -rf /tmp/acme.sh; \
     cp /opt/acme.sh/acme.sh /usr/local/bin/acme.sh; \
     chmod +x /usr/local/bin/acme.sh; \
+    # v2.86-pr23o:acme.sh _findHook 查 $(dirname "$_SCRIPT_")/dnsapi,
+    # 而 _SCRIPT_ 是 /usr/local/bin/acme.sh,所以 _SCRIPT_HOME = /usr/local/bin,
+    # → /usr/local/bin/dnsapi/ 不存在 → "Cannot find DNS API hook for: dns_ali"。
+    # 解决:把 /opt/acme.sh/{dnsapi,deploy,notify} symlink 到 /usr/local/bin/。
+    # 这样 acme.sh runtime 不依赖源码布局,镜像层就修好,entrypoint 无需兜底。
+    ln -sfn /opt/acme.sh/dnsapi /usr/local/bin/dnsapi && \
+    ln -sfn /opt/acme.sh/deploy /usr/local/bin/deploy && \
+    ln -sfn /opt/acme.sh/notify /usr/local/bin/notify && \
     # v2.86-PR12.8:删除了原本的 /opt/acme.sh.dist 备份目录。理由:
     #   - docker-compose.yml 不再挂 /opt/acme.sh tmpfs,dnsapi/ deploy/ notify/
     #     不会被遮蔽,acme.sh 运行时直接用镜像层 cp 进去的文件
     #   - 容器运行时写的 account.json / ca/ 目录等,通过 /data 命名卷持久化
     #     (跟 nginx-proxy/acme-companion / mailcow 一致)
-    acme.sh --version && ls /opt/acme.sh/dnsapi/ | head -5
+    acme.sh --version && ls /opt/acme.sh/dnsapi/ | head -5 && \
+    ls -la /usr/local/bin/dnsapi | head -1
 
 # /etc/cron.d/ 下的 LE 续签任务（LE 模式启动时 entrypoint.sh 写入）
 # 占位文件保证目录存在

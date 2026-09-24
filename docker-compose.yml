@@ -208,7 +208,7 @@ services:
       #   也能拿到真实对外公网 IP。
       #
       # 注意:IPv4 DDNS 必须 host 网络(bridge 网络下访问外部 API 也不通)
-      IKEV2_DDNS_ENABLED: "${IKEV2_DDNS_ENABLED:-false}"
+      IKEV2_DDNS_ENABLED: "${IKEV2_DDNS_ENABLED:-true}"
       IKEV2_DDNS_FAMILY: "${IKEV2_DDNS_FAMILY:-dual}"
       # IKEV2_DDNS_PROBE_TARGET 仍可设置但被忽略(向后兼容老部署脚本)
       ALIYUN_ACCESS_KEY_ID: "${ALIYUN_ACCESS_KEY_ID:-}"

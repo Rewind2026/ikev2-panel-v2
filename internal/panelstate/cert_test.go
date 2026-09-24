@@ -149,6 +149,18 @@ func TestCertConfigStoreWriteRead(t *testing.T) {
 		t.Errorf("UpdatedAt should be set after Write")
 	}
 
+	// 4) v2.86-pr23o:JSON 必须包含 server_cn/acme_email/domain 字段(即使空值),
+	// 否则 entrypoint.sh 的 grep 找不到 → `set -euo pipefail` → 容器秒死 → 无限重启。
+	data, err := os.ReadFile(store.certConfPath())
+	if err != nil {
+		t.Fatalf("read cert.conf: %v", err)
+	}
+	for _, key := range []string{`"cert_mode"`, `"domain"`, `"server_cn"`, `"acme_email"`} {
+		if !strings.Contains(string(data), key) {
+			t.Errorf("cert.conf missing %s key, content:\n%s", key, data)
+		}
+	}
+
 	// 4) Read 缓存命中
 	cfg3, err := store.ReadCertConfig()
 	if err != nil || cfg3 == nil {

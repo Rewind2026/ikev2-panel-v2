@@ -59,10 +59,16 @@ IKEV2_VPN_SUBNET="${IKEV2_VPN_SUBNET:-auto}"       # v2-79 新增：auto / 10.10
 CERT_CONF="/data/panel-state/cert.conf"
 if [ -f "$CERT_CONF" ]; then
   # 用 grep + sed 简单提取(镜像没装 jq)。字段顺序不重要。
-  cert_mode_conf=$(grep -E '"cert_mode"[[:space:]]*:' "$CERT_CONF" | sed -nE 's/.*"cert_mode"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' | head -1)
-  domain_conf=$(grep -E '"domain"[[:space:]]*:' "$CERT_CONF" | sed -nE 's/.*"domain"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' | head -1)
-  cn_conf=$(grep -E '"server_cn"[[:space:]]*:' "$CERT_CONF" | sed -nE 's/.*"server_cn"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' | head -1)
-  email_conf=$(grep -E '"acme_email"[[:space:]]*:' "$CERT_CONF" | sed -nE 's/.*"acme_email"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' | head -1)
+  # v2.86-pr23o:加 `|| true` 兜底 —— grep 在没匹配时返 1,
+  # `set -euo pipefail` 会让整个 $(...) 表达式失败 → entrypoint 立即 exit 1。
+  # 历史 bug:旧 cert.conf(在 v2.86-pr23o 之前保存的)缺 server_cn/acme_email 字段,
+  # → 容器秒死 → restart:unless-stopped 看到非 0 → 无限重启。
+  # 修法双保险:① Go 端 CertConfig struct 不再用 omitempty(根因);
+  #            ② bash 端 grep || true 兜底(老 cert.conf 也能启动)。
+  cert_mode_conf=$(grep -E '"cert_mode"[[:space:]]*:' "$CERT_CONF" 2>/dev/null | sed -nE 's/.*"cert_mode"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' | head -1 || true)
+  domain_conf=$(grep -E '"domain"[[:space:]]*:' "$CERT_CONF" 2>/dev/null | sed -nE 's/.*"domain"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' | head -1 || true)
+  cn_conf=$(grep -E '"server_cn"[[:space:]]*:' "$CERT_CONF" 2>/dev/null | sed -nE 's/.*"server_cn"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' | head -1 || true)
+  email_conf=$(grep -E '"acme_email"[[:space:]]*:' "$CERT_CONF" 2>/dev/null | sed -nE 's/.*"acme_email"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' | head -1 || true)
 
   # 用覆盖赋值的方式让 cert.conf 优先 env
   [ -n "$cert_mode_conf" ] && IKEV2_CERT_MODE="$cert_mode_conf"
@@ -890,6 +896,19 @@ if [ "${IKEV2_CERT_MODE:-self-signed}" = "letsencrypt" ]; then
   SWAN_KEY="/etc/swanctl/private/${IKEV2_DOMAIN}.key"
 
   mkdir -p "${LE_CERT_DIR}" "${ACME_HOME}"
+
+  # v2.86-pr23o 修复:acme.sh --install --home /opt/acme.sh 装的是 runtime 精简版,
+  # 不含 dnsapi/deploy/notify。Dockerfile L350-352 用 cp -a 装到 /opt/acme.sh/,
+  # 但 /usr/local/bin/acme.sh 是单文件 copy,_SCRIPT_HOME=/usr/local/bin,
+  # _findHook 查 $_SCRIPT_HOME/dnsapi/ 找不到 → "Cannot find DNS API hook for: dns_ali"。
+  # 运行时兜底:在 /usr/local/bin/ 下创建 dnsapi/deploy/notify symlink 指向 /opt/acme.sh/ 对应目录。
+  # 老镜像(rebuild 之前)也立刻能用,无需 rebuild。
+  for _sub in dnsapi deploy notify; do
+    if [ -d "/opt/acme.sh/${_sub}" ] && [ ! -e "/usr/local/bin/${_sub}" ]; then
+      ln -sf "/opt/acme.sh/${_sub}" "/usr/local/bin/${_sub}"
+      echo "${LOG_PREFIX} LE: linked /usr/local/bin/${_sub} -> /opt/acme.sh/${_sub}"
+    fi
+  done
 
   # 注入阿里云 DNS API 凭证（仅 LE 模式 + 阿里云 dns_ali 插件）
   # v2-83:优先级链
