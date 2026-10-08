@@ -32,7 +32,7 @@ func TestSync_PersistThrottle(t *testing.T) {
 
 	// 模拟一次节流时间戳更新
 	now := time.Unix(1726700000, 0).UTC()
-	s.setLastSyncAndPersist(dns.RecordTypeA, now)
+	s.setLastSyncAndPersist(s.snapshot(), dns.RecordTypeA, now)
 
 	// 1. statefile 应被创建并含 last_sync_a
 	data, err := os.ReadFile(stateFile)
@@ -110,7 +110,7 @@ func TestSync_StopOnce(t *testing.T) {
 	s2 := newTestSync(t)
 	defer s2.Stop()
 	// 检查 stopCh 是新的(没被前一个实例污染)— 通过调用 tick 验证不 panic
-	s2.tick() // enabled=false → 直接 return,确认结构体可用
+	s2.tick(s2.snapshot()) // enabled=false → 直接 return,确认结构体可用
 }
 
 // TestSync_BackwardCompatOldFormat 验证 v2-83 裸 "true" 文件不破坏。

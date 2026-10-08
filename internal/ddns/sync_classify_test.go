@@ -153,7 +153,7 @@ func TestUpsertRecord_AuthError_NotRetrying(t *testing.T) {
 	srv := newAlidnsMockForUpdate(rec, authErr)
 	s, c := newSyncWithMockClient(t, srv)
 
-	oldIP, err := s.upsertRecord(c, dns.RecordTypeA, "2.2.2.2")
+	oldIP, err := s.upsertRecord(s.snapshot(), c, dns.RecordTypeA, "2.2.2.2")
 
 	if err == nil {
 		t.Fatal("expected error for AuthError, got nil")
@@ -186,7 +186,7 @@ func TestUpsertRecord_RAMError_NotRetrying(t *testing.T) {
 	srv := newAlidnsMockForUpdate(rec, ramErr)
 	s, c := newSyncWithMockClient(t, srv)
 
-	_, err := s.upsertRecord(c, dns.RecordTypeA, "3.3.3.3")
+	_, err := s.upsertRecord(s.snapshot(), c, dns.RecordTypeA, "3.3.3.3")
 
 	if err == nil {
 		t.Fatal("expected error for RAMError, got nil")
@@ -217,7 +217,7 @@ func TestUpsertRecord_Throttling_Retries3Times(t *testing.T) {
 	s, c := newSyncWithMockClient(t, srv)
 
 	start := time.Now()
-	_, err := s.upsertRecord(c, dns.RecordTypeA, "4.4.4.4")
+	_, err := s.upsertRecord(s.snapshot(), c, dns.RecordTypeA, "4.4.4.4")
 	elapsed := time.Since(start)
 
 	// Throttling 走完 3 次 retry:每次 sleep 1s/4s/9s,合计 ~14s
@@ -246,7 +246,7 @@ func TestUpsertRecord_Success(t *testing.T) {
 	srv := newAlidnsMockForUpdate(rec, nil)
 	s, c := newSyncWithMockClient(t, srv)
 
-	oldIP, err := s.upsertRecord(c, dns.RecordTypeA, "5.5.5.5")
+	oldIP, err := s.upsertRecord(s.snapshot(), c, dns.RecordTypeA, "5.5.5.5")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

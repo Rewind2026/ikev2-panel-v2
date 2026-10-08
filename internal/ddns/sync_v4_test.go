@@ -215,7 +215,7 @@ func TestSync_LastSyncStructuredV4(t *testing.T) {
 		return "1.2.3.4", nil
 	})
 
-	s.tick()
+	s.tick(s.snapshot())
 
 	snap := s.LastSyncSnapshot()
 	if snap.V4IP != "1.2.3.4" {
@@ -253,7 +253,7 @@ func TestSync_ConcurrentUpsertBothCalled(t *testing.T) {
 		return "1.2.3.4", nil
 	})
 
-	s.tick()
+	s.tick(s.snapshot())
 
 	if v6DetectCalled.Load() != 1 {
 		t.Errorf("v6 detect should be called once, got %d", v6DetectCalled.Load())
@@ -280,7 +280,7 @@ func TestSync_V4OnlyMode(t *testing.T) {
 		return "1.2.3.4", nil
 	})
 
-	s.tick()
+	s.tick(s.snapshot())
 
 	if v6DetectCalled.Load() != 0 {
 		t.Errorf("v6 detect should NOT be called when family=v4, got %d", v6DetectCalled.Load())

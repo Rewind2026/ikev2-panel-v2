@@ -42,6 +42,13 @@ import (
 	"github.com/yourname/ikev2-panel-v2/internal/dns"
 )
 
+const (
+	// defaultPeriod 默认同步周期(60s)。
+	defaultPeriod = 60 * time.Second
+	// defaultThrottle 默认节流窗口(60s):同类型两次同步的最小间隔。
+	defaultThrottle = 60 * time.Second
+)
+
 // Config DDNS 同步配置。
 type Config struct {
 	// Enabled 总开关(env IKEV2_DDNS_ENABLED,默认 false)
@@ -177,10 +184,10 @@ type RemoteSnapshot struct {
 // NewSync 构造同步器。
 func NewSync(cfg Config) *Sync {
 	if cfg.Period <= 0 {
-		cfg.Period = 60 * time.Second
+		cfg.Period = defaultPeriod
 	}
 	if cfg.Throttle <= 0 {
-		cfg.Throttle = 60 * time.Second
+		cfg.Throttle = defaultThrottle
 	}
 	if cfg.LastFailedFile == "" {
 		cfg.LastFailedFile = "/data/le/LAST_DDNS_FAILED"
@@ -640,12 +647,28 @@ func (s *Sync) Iface() string {
 	return s.cfg.Iface
 }
 
+// snapshot 在锁内返回当前配置的副本。
+//
+// 配置热重载(SetConfig / SetEnabled / SetFamily)由 HTTP handler goroutine
+// 写入 s.cfg,而 Run 在后台 goroutine 里读它。Config 全为值类型字段,
+// 直接跨 goroutine 读写会构成 data race(-race 实测:sync.go:545 写 vs :661 读)。
+// 因此所有跨 goroutine 的读取都必须经由本方法在锁内取快照。
+func (s *Sync) snapshot() Config {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cfg
+}
+
 // Run 启动后台循环,阻塞到 ctx.Done 或 stopCh。
 //
 // 行为:
 //  1. 立即跑一次(确保状态正确)
 //  2. 每 Period 跑一次
 //  3. 探测到 IP 变 → 节流判断 → 调 alidns → 重试 3 次 → 写 LastSync
+//
+// 并发约定:每轮循环开始时取一次配置快照,本轮 tick 全程只用该快照,
+// 不再触碰 s.cfg。这样面板热改配置不会与本轮同步产生 data race,
+// 且语义更清晰(一轮同步用同一份配置,中途变更下轮生效)。
 func (s *Sync) Run(ctx context.Context) error {
 	s.mu.Lock()
 	s.running = true
@@ -656,36 +679,43 @@ func (s *Sync) Run(ctx context.Context) error {
 		s.mu.Unlock()
 	}()
 
-	s.cfg.Logger.Info("ddns sync starting",
-		"enabled", s.cfg.Enabled,
-		"domain", s.cfg.Domain,
-		"rr", s.cfg.RR,
-		"period", s.cfg.Period,
-		"throttle", s.cfg.Throttle,
+	cfg := s.snapshot()
+
+	cfg.Logger.Info("ddns sync starting",
+		"enabled", cfg.Enabled,
+		"domain", cfg.Domain,
+		"rr", cfg.RR,
+		"period", cfg.Period,
+		"throttle", cfg.Throttle,
 	)
 
 	// 启动时立即跑一次(如果 enabled)
-	if s.cfg.Enabled {
-		s.tick()
+	if cfg.Enabled {
+		s.tick(cfg)
 	}
 
-	ticker := time.NewTicker(s.cfg.Period)
+	period := cfg.Period
+	if period <= 0 {
+		// 防御:非正周期会让 time.NewTicker panic。
+		period = defaultPeriod
+	}
+	ticker := time.NewTicker(period)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
-			s.cfg.Logger.Info("ddns sync stopping (ctx done)")
+			s.snapshot().Logger.Info("ddns sync stopping (ctx done)")
 			return nil
 		case <-s.stopCh:
-			s.cfg.Logger.Info("ddns sync stopping (stop signal)")
+			s.snapshot().Logger.Info("ddns sync stopping (stop signal)")
 			return nil
 		case <-s.triggerCh:
 			// v2.86-pr23a:面板 "手动同步一次" 按钮触发的立即 tick。
 			// 不等 ticker 周期,直接跑(节流照常生效,刚同步过就跳过)。
-			s.tick()
+			s.tick(s.snapshot())
 		case <-ticker.C:
-			s.tick()
+			s.tick(s.snapshot())
 		}
 	}
 }
@@ -707,14 +737,14 @@ func (s *Sync) Stop() {
 //   - 单写入口,避免后续 tick 内多个 goroutine 重复 persist
 //   - 锁内只收集数据(避免持锁时做 IO),锁外 writeStateFile
 //   - 写盘失败仅 warn,不影响本次 upsert 结果(节流窗口已在内存里生效)
-func (s *Sync) setLastSyncAndPersist(rt string, t time.Time) {
+func (s *Sync) setLastSyncAndPersist(cfg Config, rt string, t time.Time) {
 	s.mu.Lock()
 	s.lastSyncTime[rt] = t
 	rec := s.snapshotStateRecord()
 	s.mu.Unlock()
 
-	if err := writeStateFile(s.cfg.StateFile, rec); err != nil {
-		s.cfg.Logger.Warn("ddns: persist throttle time failed",
+	if err := writeStateFile(cfg.StateFile, rec); err != nil {
+		cfg.Logger.Warn("ddns: persist throttle time failed",
 			"rt", rt, "err", err)
 	}
 }
@@ -727,26 +757,30 @@ func (s *Sync) setLastSyncAndPersist(rt string, t time.Time) {
 //  3. 聚合 per-family 结果到 LastSync
 //  4. 顶层 Success = 任一 enabled family 成功过
 //  5. dual 模式下 v4 retry 1s/4s/9s 不阻塞 v6(并发)
-func (s *Sync) tick() {
-	if !s.cfg.Enabled {
+//
+// 并发约定(v2.86-pr23x 修复 data race):
+// cfg 由调用方(Run)从 snapshot() 取得,本函数全程只用这份值类型副本,
+// 不触碰 s.cfg。面板热改配置(SetConfig 等)因此不会与本轮同步产生 race。
+func (s *Sync) tick(cfg Config) {
+	if !cfg.Enabled {
 		return
 	}
 
 	// 凭证解析(v2-83):优先用 CredentialGetter,fallback 到 env。
-	keyID, keySecret := s.cfg.AliyunAccessKeyID, s.cfg.AliyunAccessKeySecret
-	if s.cfg.CredentialGetter != nil {
-		if id, secret, ok := s.cfg.CredentialGetter(); ok && id != "" && secret != "" {
+	keyID, keySecret := cfg.AliyunAccessKeyID, cfg.AliyunAccessKeySecret
+	if cfg.CredentialGetter != nil {
+		if id, secret, ok := cfg.CredentialGetter(); ok && id != "" && secret != "" {
 			keyID, keySecret = id, secret
 		}
 	}
 
 	// 凭证校验:缺失 → 整轮 skip(dual/v4/v6 都不跑)
 	if keyID == "" || keySecret == "" {
-		s.cfg.Logger.Debug("ddns: aliyun credentials not set, skipping tick")
+		cfg.Logger.Debug("ddns: aliyun credentials not set, skipping tick")
 		return
 	}
-	if s.cfg.Domain == "" {
-		s.cfg.Logger.Debug("ddns: domain not set, skipping tick")
+	if cfg.Domain == "" {
+		cfg.Logger.Debug("ddns: domain not set, skipping tick")
 		return
 	}
 
@@ -756,19 +790,20 @@ func (s *Sync) tick() {
 	// 节流检查(per-type,在探测之前):v2-83 节流检查也放在 detect 之前,
 	// 这样 Throttle 窗口内的 tick 完全跳过,既不探测也不调 API。
 	// v2-84 per-type:每个 family 独立节流。
+	// 注:cfg.Throttle 来自快照,无需在锁内读;锁只保护 lastSyncTime。
 	s.mu.Lock()
 	now := time.Now()
 	throttledV6 := !s.lastSyncTime[dns.RecordTypeAAAA].IsZero() &&
-		now.Sub(s.lastSyncTime[dns.RecordTypeAAAA]) < s.cfg.Throttle
+		now.Sub(s.lastSyncTime[dns.RecordTypeAAAA]) < cfg.Throttle
 	throttledV4 := !s.lastSyncTime[dns.RecordTypeA].IsZero() &&
-		now.Sub(s.lastSyncTime[dns.RecordTypeA]) < s.cfg.Throttle
+		now.Sub(s.lastSyncTime[dns.RecordTypeA]) < cfg.Throttle
 	s.mu.Unlock()
 
 	// 每个 family 独立判断:enabled 的 family 如果被 throttle 就 skip,
 	// 没被 throttle 就跑(dual 下两个 family 各自独立)。
 	// v2.86-pr23a:走 EnableA/EnableAAAA 而不是 cfg.Family 枚举 — 面板直接控制。
-	runV6 := !throttledV6 && s.cfg.EnableAAAA
-	runV4 := !throttledV4 && s.cfg.EnableA
+	runV6 := !throttledV6 && cfg.EnableAAAA
+	runV4 := !throttledV4 && cfg.EnableA
 
 	// dual 模式下两个 family 都被 throttle → 整轮 skip(节省 goroutine 开销)
 	if !runV6 && !runV4 {
@@ -780,18 +815,18 @@ func (s *Sync) tick() {
 	var v6IP string
 	var v6Err error
 	if runV6 {
-		v6IP, v6Err = s.detectFamily("AAAA", s.detectV6, s.cfg.Iface)
+		v6IP, v6Err = s.detectFamily(cfg, "AAAA", s.detectV6, cfg.Iface)
 	}
 	var v4IP string
 	var v4Err error
 	if runV4 {
-		v4IP, v4Err = s.detectFamily("A", func(string) (string, error) {
+		v4IP, v4Err = s.detectFamily(cfg, "A", func(string) (string, error) {
 			if s.detectV4 == nil {
 				return "", nil
 			}
 			// v2.86-pr23l:第二个参数(target)已废弃,内部走公网 IP API 检测。
-			return s.detectV4(s.cfg.Iface, "")
-		}, s.cfg.Iface)
+			return s.detectV4(cfg.Iface, "")
+		}, cfg.Iface)
 	}
 
 	// 节流检查 + upsert,按 family 并发(用 WaitGroup 而不是 errgroup,
@@ -817,29 +852,29 @@ func (s *Sync) tick() {
 		// v2.85-PR6 (Q5-01):用 setLastSyncAndPersist 替换原来的直接赋值,
 		// 顺带把 throttle 时间戳持久化到 statefile,重启后窗口保留。
 		now := time.Now()
-		s.setLastSyncAndPersist(rt, now)
+		s.setLastSyncAndPersist(cfg, rt, now)
 
 		// upsert(FindRecord → 比对 → UpdateRecordValue retry)
-		oldIP, upsertErr := s.upsertRecord(client, rt, ip)
+		oldIP, upsertErr := s.upsertRecord(cfg, client, rt, ip)
 		results <- result{recordType: rt, oldIP: oldIP, newIP: ip, err: upsertErr}
 	}
 
 	// 起任务(按 EnableA/EnableAAAA 决定跑哪些 family)
 	// v2.86-pr23a:替代 v2-84 的 family 枚举 switch — 面板可独立控制 A / AAAA。
 	switch {
-	case s.cfg.EnableA && s.cfg.EnableAAAA:
+	case cfg.EnableA && cfg.EnableAAAA:
 		wg.Add(2)
 		go runFamily(dns.RecordTypeAAAA, v6IP, v6Err)
 		go runFamily(dns.RecordTypeA, v4IP, v4Err)
-	case s.cfg.EnableA:
+	case cfg.EnableA:
 		wg.Add(1)
 		go runFamily(dns.RecordTypeA, v4IP, v4Err)
-	case s.cfg.EnableAAAA:
+	case cfg.EnableAAAA:
 		wg.Add(1)
 		go runFamily(dns.RecordTypeAAAA, v6IP, v6Err)
 	default:
 		// 两个都关 → 没有 task 要起;但 tick 入口已 enable 检查,正常路径不会到这里
-		s.cfg.Logger.Debug("ddns: tick called but both A and AAAA disabled, skipping")
+		cfg.Logger.Debug("ddns: tick called but both A and AAAA disabled, skipping")
 	}
 
 	wg.Wait()
@@ -881,12 +916,12 @@ func (s *Sync) tick() {
 		ls.Success = anySuccess
 		// 单 family 模式时填充兼容字段,给 v2-83 客户端读
 		// v2.86-pr23a:走 EnableA/EnableAAAA 判断,不再是 cfg.Family 枚举
-		if s.cfg.EnableAAAA && !s.cfg.EnableA {
+		if cfg.EnableAAAA && !cfg.EnableA {
 			ls.NewIP = ls.V6IP
 			if ls.V6Error != "" {
 				ls.Error = ls.V6Error
 			}
-		} else if s.cfg.EnableA && !s.cfg.EnableAAAA {
+		} else if cfg.EnableA && !cfg.EnableAAAA {
 			ls.NewIP = ls.V4IP
 			if ls.V4Error != "" {
 				ls.Error = ls.V4Error
@@ -894,7 +929,7 @@ func (s *Sync) tick() {
 		}
 	}
 
-	s.recordResult(ls)
+	s.recordResult(cfg, ls)
 }
 
 // detectFamily 探测指定 family 的当前 IP,带节流 skip 和详细错误日志。
@@ -903,13 +938,13 @@ func (s *Sync) tick() {
 //   - 探测成功 → (ip, nil)
 //   - 探测失败 → ("", err)
 //   - detector 未注入(测试场景)→ ("", nil)
-func (s *Sync) detectFamily(recordType string, detector func(string) (string, error), iface string) (string, error) {
+func (s *Sync) detectFamily(cfg Config, recordType string, detector func(string) (string, error), iface string) (string, error) {
 	if detector == nil {
 		return "", nil
 	}
 	ip, err := detector(iface)
 	if err != nil {
-		s.cfg.Logger.Warn("ddns: detect failed",
+		cfg.Logger.Warn("ddns: detect failed",
 			"family", recordType, "err", err)
 		return "", err
 	}
@@ -927,16 +962,16 @@ func (s *Sync) detectFamily(recordType string, detector func(string) (string, er
 //   - FindRecord 返回多条 → WARN 日志,return ("", nil),不算失败(避免覆盖别处)
 //   - UpdateRecordValue 返回 RAM 权限错误 → 立即停止 retry,return error
 //   - 其他错误 → retry 1s/4s/9s
-func (s *Sync) upsertRecord(client *dns.AliyunClient, recordType, currentIP string) (string, error) {
+func (s *Sync) upsertRecord(cfg Config, client *dns.AliyunClient, recordType, currentIP string) (string, error) {
 	// 1. 查现有记录
-	rec, err := client.FindRecord(s.cfg.Domain, s.cfg.RR, recordType)
+	rec, err := client.FindRecord(cfg.Domain, cfg.RR, recordType)
 	if err != nil {
 		return "", fmt.Errorf("find %s record: %w", recordType, err)
 	}
 	if rec == nil {
 		// 0 条:用户没建记录 — 不自动建,只打日志(避免误操作)
-		s.cfg.Logger.Warn("ddns: no existing record, skipping update",
-			"domain", s.cfg.Domain, "rr", s.cfg.RR,
+		cfg.Logger.Warn("ddns: no existing record, skipping update",
+			"domain", cfg.Domain, "rr", cfg.RR,
 			"record_type", recordType,
 			"hint", "create the record manually in aliyun console first")
 		return "", nil
@@ -951,7 +986,7 @@ func (s *Sync) upsertRecord(client *dns.AliyunClient, recordType, currentIP stri
 		return currentIP, nil
 	}
 
-	s.cfg.Logger.Info("ddns: record outdated, updating",
+	cfg.Logger.Info("ddns: record outdated, updating",
 		"record_type", recordType,
 		"old", rec.Value, "new", currentIP,
 		"record_id", rec.RecordID)
@@ -959,9 +994,9 @@ func (s *Sync) upsertRecord(client *dns.AliyunClient, recordType, currentIP stri
 	// 3. retry 3 次(指数退避)
 	var lastErr error
 	for attempt := 1; attempt <= 3; attempt++ {
-		err := client.UpdateRecordValue(rec.RecordID, s.cfg.RR, recordType, currentIP, rec.TTL)
+		err := client.UpdateRecordValue(rec.RecordID, cfg.RR, recordType, currentIP, rec.TTL)
 		if err == nil {
-			s.cfg.Logger.Info("ddns: record updated successfully",
+			cfg.Logger.Info("ddns: record updated successfully",
 				"record_type", recordType,
 				"old", rec.Value, "new", currentIP,
 				"attempt", attempt)
@@ -972,19 +1007,19 @@ func (s *Sync) upsertRecord(client *dns.AliyunClient, recordType, currentIP stri
 		// - ThrottlingError / TransientError / Unknown → 继续 retry
 		class := dns.Classify(err)
 		if class == dns.ClassAuth {
-			s.cfg.Logger.Error("ddns: aliyun credential invalid, NOT retrying",
+			cfg.Logger.Error("ddns: aliyun credential invalid, NOT retrying",
 				"record_type", recordType, "err", err,
 				"hint", "check AccessKey ID/Secret in panel UI")
 			return rec.Value, fmt.Errorf("aliyun auth error for %s update: %w", recordType, err)
 		}
 		if class == dns.ClassRAM {
-			s.cfg.Logger.Error("ddns: aliyun RAM permission denied, NOT retrying",
+			cfg.Logger.Error("ddns: aliyun RAM permission denied, NOT retrying",
 				"record_type", recordType, "err", err,
 				"hint", "add alidns:DescribeDomainRecords + alidns:UpdateDomainRecord permissions to your RAM user")
 			return rec.Value, fmt.Errorf("aliyun RAM error for %s update: %w", recordType, err)
 		}
 		lastErr = err
-		s.cfg.Logger.Warn("ddns: update failed, retrying",
+		cfg.Logger.Warn("ddns: update failed, retrying",
 			"record_type", recordType,
 			"attempt", attempt, "err", err,
 			"class", class.String())
@@ -1004,7 +1039,7 @@ func (s *Sync) upsertRecord(client *dns.AliyunClient, recordType, currentIP stri
 //   - Success=false 且有 attempt(任何 family 跑过) → 写 LAST_DDNS_FAILED
 //   - 节流时间戳更新:在 runFamily 内部完成(upsert 完成后立即更新),
 //     本函数只更新 lastSync 字段,避免重复写 map 引起 race。
-func (s *Sync) recordResult(ls LastSync) {
+func (s *Sync) recordResult(cfg Config, ls LastSync) {
 	now := time.Now()
 
 	s.mu.Lock()
@@ -1012,7 +1047,7 @@ func (s *Sync) recordResult(ls LastSync) {
 	s.mu.Unlock()
 
 	if ls.Success {
-		_ = os.Remove(s.cfg.LastFailedFile)
+		_ = os.Remove(cfg.LastFailedFile)
 		return
 	}
 
@@ -1027,18 +1062,18 @@ func (s *Sync) recordResult(ls LastSync) {
 	} else {
 		errMsg = "unknown"
 	}
-	s.cfg.Logger.Error("ddns: sync failed",
-		"family", s.cfg.Family,
+	cfg.Logger.Error("ddns: sync failed",
+		"family", cfg.Family,
 		"v4_err", ls.V4Error,
 		"v6_err", ls.V6Error)
 
-	if dir := filepath.Dir(s.cfg.LastFailedFile); dir != "" {
+	if dir := filepath.Dir(cfg.LastFailedFile); dir != "" {
 		_ = os.MkdirAll(dir, 0o755)
 	}
 	msg := fmt.Sprintf("family=%s err=%s time=%s",
-		s.cfg.Family, errMsg, now.UTC().Format(time.RFC3339))
-	if writeErr := os.WriteFile(s.cfg.LastFailedFile, []byte(msg), 0o644); writeErr != nil {
-		s.cfg.Logger.Warn("ddns: failed to write LAST_DDNS_FAILED file", "err", writeErr)
+		cfg.Family, errMsg, now.UTC().Format(time.RFC3339))
+	if writeErr := os.WriteFile(cfg.LastFailedFile, []byte(msg), 0o644); writeErr != nil {
+		cfg.Logger.Warn("ddns: failed to write LAST_DDNS_FAILED file", "err", writeErr)
 	}
 }
 

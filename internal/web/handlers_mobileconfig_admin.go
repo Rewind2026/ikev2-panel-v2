@@ -99,9 +99,12 @@ func (s *Server) handleAdminMobileconfigDefaults(w http.ResponseWriter, r *http.
 		Builtin:   cert.BaseMobileConfigDefaults(),
 		Flash:     flashMsg,
 		FlashKind: flashKind,
-		// Error 字段保留兼容 — 旧 ?error= query string 仍能渲染(模板 line 20 还在用)。
-		// 新流程(POST → flash session)不再设它。
-		Error: r.URL.Query().Get("error"),
+		// Error 字段不再从 query string 取值(v2.86-pr23x 安全修复)。
+		// 旧读法 `Error: r.URL.Query().Get("error")` 会把任意用户输入
+		// 灌进 banner 的 .Msg。模板侧已改回 {{.Msg}} 自动转义,这里是
+		// 纵深防御:彻底断掉注入路径。校验失败统一走 POST → flash session。
+		// 保留字段(空串)以兼容模板与既有测试。
+		Error: "",
 	}
 	s.RenderPage(w, r, http.StatusOK, "admin_mobileconfig_defaults", data)
 }
