@@ -798,8 +798,12 @@
   {{$idAttr := ""}}
   {{if .Id}}{{$idAttr = printf " id=\"%s\"" .Id}}{{end}}
   <div class="banner {{$variantClass}}{{$dismissClass}}{{$extraClass}}"{{if $dismissKey}} data-dismiss-key="{{$dismissKey}}"{{end}}{{$idAttr}} role="status">
+    {{/* $iconSvg 是代码常量(仅 4 个固定 SVG),safeHTML 安全。
+       .Msg 绝不能走 safeHTML —— 它承载 Flash 消息与 query 参数,
+       走 safeHTML 等于关闭 Go 模板的自动转义,构成反射型 XSS。
+       历史事故:2026-10-08 复核确认,?error= 与 ?flash= 均可注入。 */}}
     {{if $iconSvg}}<span class="banner-icon" aria-hidden="true">{{$iconSvg | safeHTML}}</span>{{end}}
-    <div class="banner-body">{{.Msg | safeHTML}}</div>
+    <div class="banner-body">{{.Msg}}</div>
     {{/* v2.86-pr23l:× 由 .dismissable .dismiss::after 的 content 渲染,
        这里不放文字内容,避免和 pseudo 的 × 重叠(双 X 视觉 bug)。 */}}
     {{if .Dismissible}}<button type="button" class="dismiss" aria-label="关闭" title="关闭"></button>{{end}}

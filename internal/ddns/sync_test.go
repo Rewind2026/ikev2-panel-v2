@@ -43,7 +43,7 @@ func TestSync_DisabledSkipsAllLogic(t *testing.T) {
 	s.SetDetectV6(mockDetect)
 
 	// 模拟一次 tick
-	s.tick()
+	s.tick(s.snapshot())
 
 	if detectCalled.Load() != 0 {
 		t.Errorf("detectV6 should NOT be called when enabled=false, got %d calls", detectCalled.Load())
@@ -74,7 +74,7 @@ func TestSync_MissingCredentials(t *testing.T) {
 	})
 	s.SetDetectV6(mockDetect)
 
-	s.tick()
+	s.tick(s.snapshot())
 
 	if detectCalled.Load() != 0 {
 		t.Errorf("detectV6 should NOT be called when credentials missing, got %d calls", detectCalled.Load())
@@ -108,11 +108,11 @@ func TestSync_Throttle(t *testing.T) {
 
 	// 第一次:会探测(虽然会因为无法解析真实 API 而走 recordFailure 路径,
 	// 但节流窗口外,先看探测次数)
-	s.tick()
+	s.tick(s.snapshot())
 	first := detectCalled.Load()
 
 	// 第二次:节流窗口内,不应该探测
-	s.tick()
+	s.tick(s.snapshot())
 	second := detectCalled.Load()
 
 	if first != 1 {

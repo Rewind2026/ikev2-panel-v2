@@ -69,12 +69,35 @@ type ipBucket struct {
 }
 
 // IsLocked 检查 IP 是否被锁。
+//
+// 并发约定:调用方必须已持有 b.mu。当前唯一调用方 CheckLogin(L168-172)
+// 确实持锁,故本方法不自加锁 —— 若在此加锁会造成 b.mu 重复获取死锁。
 func (b *ipBucket) IsLocked(now time.Time) bool {
 	return now.Before(b.lockedUntil)
 }
 
+// Snapshot 在持有 b.mu 的前提下返回计数快照。
+//
+// 用途:RecordLoginFail 需要把 bucket 状态写进 rl.persist 做磁盘持久化,
+// 而该字段的读取发生在 RecordFail 已释放 b.mu 之后。若直接在锁外读
+// b.failCount / b.firstFailAt / b.lockedUntil,会与并发 RecordFail 的写入
+// 构成 data race(-race 实测:ratelimit.go:88 写 vs :181 读,同一地址)。
+// 修复方式:由 RecordFail 在锁内一并返回快照,调用方不再直接触碰 bucket 字段。
+func (b *ipBucket) snapshot() persistedBucket {
+	return persistedBucket{
+		FailCount:   b.failCount,
+		FirstFailAt: b.firstFailAt,
+		LockedUntil: b.lockedUntil,
+	}
+}
+
 // RecordFail 记录一次失败,返回是否触发锁定。
-func (b *ipBucket) RecordFail(now time.Time, cfg RateLimitConfig) bool {
+//
+// 第二个返回值是本次操作后 bucket 状态的快照(在 b.mu 内捕获)。
+// 调用方若需要把状态写进磁盘持久化,必须用这个快照,不能自行读取
+// b.failCount 等字段 —— RecordFail 返回时锁已释放,直接读会与并发的
+// RecordFail 构成 data race。
+func (b *ipBucket) RecordFail(now time.Time, cfg RateLimitConfig) (bool, persistedBucket) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -82,7 +105,7 @@ func (b *ipBucket) RecordFail(now time.Time, cfg RateLimitConfig) bool {
 	if b.firstFailAt.IsZero() || now.Sub(b.firstFailAt) > cfg.LoginWindow {
 		b.firstFailAt = now
 		b.failCount = 1
-		return false
+		return false, b.snapshot()
 	}
 
 	b.failCount++
@@ -91,9 +114,9 @@ func (b *ipBucket) RecordFail(now time.Time, cfg RateLimitConfig) bool {
 		// 触发锁定后清零,下次从 1 开始
 		b.firstFailAt = now
 		b.failCount = 0
-		return true
+		return true, b.snapshot()
 	}
-	return false
+	return false, b.snapshot()
 }
 
 // RecordSuccess 清零失败计数。
@@ -175,13 +198,10 @@ func (rl *RateLimiter) CheckLogin(ip string, now time.Time) bool {
 // RecordLoginFail 记录登录失败。返回是否触发新锁定。
 func (rl *RateLimiter) RecordLoginFail(ip string, now time.Time) bool {
 	b := rl.getBucket(ip)
-	locked := b.RecordFail(now, rl.cfg)
+	// snap 由 RecordFail 在 b.mu 内捕获 —— 此处已不能直接读 b.failCount 等字段。
+	locked, snap := b.RecordFail(now, rl.cfg)
 	rl.mu.Lock()
-	rl.persist[ip] = persistedBucket{
-		FailCount:   b.failCount,
-		FirstFailAt: b.firstFailAt,
-		LockedUntil: b.lockedUntil,
-	}
+	rl.persist[ip] = snap
 	rl.mu.Unlock()
 	if rl.cfg.PersistPath != "" {
 		_ = rl.saveToDisk()

@@ -375,7 +375,12 @@ func (s *Server) handleUserAndroidConfig(w http.ResponseWriter, r *http.Request)
 	admin, _ := AdminFrom(r.Context())
 	sess, _ := SessionFrom(r.Context())
 
-	flash := r.URL.Query().Get("flash")
+	// v2.86-pr23x 安全修复:不再从 query string 读取 flash。
+	// 旧读法 `r.URL.Query().Get("flash")` 会把任意用户输入灌进 banner 的 .Msg。
+	// docs/audit-2026-09-web.md:239 已确认该参数无 producer(没有任何 redirect
+	// 带 ?flash=),属死代码,故直接移除而非转义。
+	// 需要提示用户时走 POST → FlashStore.Set(见 flashConfigError / 各 handler)。
+	flash := ""
 	if s.ServerAddr == "" {
 		flash = "ServerAddr 未配置（容器未设置 IKEV2_SERVER_ADDR_V6/V4 或 IKEV2_DOMAIN）。"
 	}
