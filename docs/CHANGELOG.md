@@ -20,7 +20,191 @@ hotfix。升级前请重点看目标版本的「⚠️ 行为变更」。
 
 ## 未发布（当前工作区）
 
-工作区 = `HEAD` `1455f39`（v2.86-pr23q）之上的一批**未提交**改动。
+工作区 = `HEAD` `9b4d059`（v2.86-pr23q 之后三提交已推 main）之上的一批**未提交**改动。
+
+### v2.86-PR20c — 文本选择策略：装饰禁选，数据可复制
+
+起因是用户反馈「所有文字都可以复制，不符合常规 UI 设计理念」。核实后确认属实：
+全站除 3 处零散规则外没有任何 `user-select` 约束，双击 / 拖拽会误选一片界面文字。
+
+**没有全局禁选。** 这个面板里大量内容**必须**能复制：初始密码、服务器地址、
+swanctl 命令、证书参数、报错详情（用户要复制去搜解决方案）。一刀切禁选会把
+这些功能一起废掉。采用的是行业惯例（GitHub / GitLab / Vercel 后台）：
+**界面装饰禁选，数据可复制。**
+
+实现选「默认禁 + 白名单放开」而非逐个禁用：后者漏一处就失效，且新加组件默认
+仍可被误选。
+
+| 区域 | 选择 | 理由 |
+|------|------|------|
+| 导航、按钮、chip、卡片标题、metric 数字、空状态提示、form-help | 禁选 | 纯装饰，误选无意义 |
+| `code` / `pre` | 可复制 | 服务器地址、证书参数、命令、路径都在这里 |
+| `input` / `textarea` / `select` / `option` | 可复制 | 用户要选中编辑，禁掉直接没法用 |
+| `.banner-body` | 可复制 | 报错详情要复制去搜方案 / 提 issue |
+| `.one-time-secret` | 可复制 + 单击全选 | 页面提示「仅显示这一次」，必须能记录 |
+| `.timeline-*` / `.kv-inline` / `dd` | 可复制 | 审计详情与配置值 |
+
+#### 顺带修掉两个真实的 Safari 兼容 bug
+
+写回归测试时发现既有代码里两处 `user-select:none` **漏了 `-webkit-` 前缀**：
+`.dismissable .dismiss` 与 `.settings-card > summary`。Safari / iOS Safari 只认
+`-webkit-user-select`，漏前缀意味着折叠面板标题仍可被误选。加了断言
+`TestSel_NoWebkitPrefixGap` 全量扫描防复发。
+
+#### 回归测试
+
+新增 `internal/web/p2_text_selection_test.go`（6 项）。重点是
+`TestSel_DataWhitelistSelectable`：白名单少任何一条都是**功能受损**而非观感问题，
+测试注释里逐条写明后果。
+
+#### 实机验证（192.168.50.63）
+
+源码传到服务器本地构建 `ikev2-panel-v2:sel-p1a`，用原 project 名 `ddnsv6`
+重建容器（该容器由 `docker compose -p ddnsv6` 编排，直接 `up` 会撞容器名冲突）。
+镜像内 `user-select` 出现次数 3 → 9；部署后数据卷、`panel.db`(56K)、证书、
+面板 HTTP 200、`swanctl --list-conns`、UDP 500/4500 监听全部正常。
+
+### v2.86-PR20d — eye 切换按钮按压错位（transform 定位被全局动效覆盖）
+
+用户反馈：登录页点「显示/隐藏密码」的 eye 按钮，按下去图标整体跳一下、位置错开。
+
+**不是 JS 问题，是 CSS 层叠冲突：**
+
+```css
+.password-toggle{ transform:translateY(-50%); }   /* 垂直居中 */
+button:active    { transform:translateY(1px);  }   /* 全局按压动效 */
+```
+
+`button:active` 特异性 `(0,1,1)` > `.password-toggle` 的 `(0,1,0)`，`:active`
+命中即把 `translateY(-50%)` 整条覆盖 → 居中失效，图标下坠约 18px（自身高度一半
++1px）。且 `.password-toggle` 的 `transition` 只声明了
+`color`/`background-color`/`border-color`，不含 `transform`，所以位移是**瞬时**的，
+iOS 上 `:active` 粘住会让现象更明显。
+
+**修法（两层）**：
+
+1. 居中改用 `top:0; bottom:0; margin-top:auto; margin-bottom:auto`，
+   定位不再经过 `transform`。
+2. 再加 `.password-toggle:active{ transform:none; }` 显式抵消全局按压位移。
+   **只做第 1 层是不够的** —— 居中改掉后全局 `button:active` 的 `translateY(1px)`
+   仍然生效，这个图标浮在输入框**内部**，1px 位移同样被看成"错位"。
+   它的按压反馈本来就由 `:hover` / `[aria-pressed]` 的底色 + 描边 + 图标变色承担，
+   不需要位移。
+
+由此定下一条规矩并写进测试注释：**transform 不能同时承担定位和按压动效。**
+绝对定位元素的居中一律走 `top`/`bottom` + `margin:auto`；
+浮在表单控件**内部**的图标按钮还要额外断掉按压位移。
+
+> 过程记录：第一次只改了居中就收工，用户实机反馈"点下去还是跳"。
+> 复核发现是漏了第 2 层。**没部署就宣布修好，是这次的真实教训**——
+> 本地 CSS 改动对线上零影响，必须实机验证过才算修完。
+
+#### 回归测试
+
+新增 `internal/web/p3_press_offset_test.go`（3 项）：
+
+- `TestP3_EyeToggleCentersWithoutTransform` —— 锁住本次修复的**两层**：
+  基础规则不得出现 `transform` 且必须用 `top`/`bottom` + `margin:auto` 居中；
+  `.password-toggle:active` 必须显式 `transform:none`。第二条是补上次漏掉的。
+- `TestP3_NoAbsoluteCenteringViaTransform` —— **文件级**拦截「绝对定位 +
+  `top:50%` + `translateY(-50%)`」组合，防止同样的写法被复制到别的浮层按钮。
+- `TestP3_PressOffsetStaysSubtle` —— 全局按压位移上限 ±2px，对应用户说的
+  「动画太夸张」。
+
+测试有效性已验证：临时把 CSS 改回旧写法，三个断言如期失败并打印出错规则，
+恢复后通过 —— 不是永远绿的空测试。
+
+#### 实机部署（192.168.50.63）
+
+镜像 `ikev2-panel-v2:sel-p1b`，用原 project 名 `ddnsv6` 重建容器。
+构建需加 `--network=host`（容器内 DNS 走不通 bridge，这是既有环境问题）。
+
+| 检查项 | 结果 |
+|--------|------|
+| 容器 | `ikev2-panel-v2:sel-p1b` Up |
+| `/etc/ikev2-panel-version` | `v2.86-pr23p-4-g9b4d059` —— 不再是 `dev` |
+| `docker inspect` version label | 同上 |
+| 容器内 CSS | `top:0;bottom:0;margin-*-auto` + `.password-toggle:active{transform:none}` |
+| 线上 HTTP 拉到的 CSS | 含 `.password-toggle:active`（grep 计数 1） |
+| `/login` | HTTP 200 |
+| `/data` | `panel.db{,-shm,-wal}` `ca/ le/ server/ acme-sh/ panel-state/ panel-tls/` 齐全 |
+| 数据卷 | `/vol1/docker/volumes/ikev2-panel-data/_data`（未变） |
+| `swanctl --list-conns` | 连接已加载 |
+| UDP 500 / 4500 | IPv4 + IPv6 均监听 |
+
+> 页面 CSS 走 `assetVersion()` cache-bust（基于 mtime），改 CSS 会自动带新
+> `?v=`，不需要手动清浏览器缓存。
+
+#### 顺带记录（非代码改动）
+
+用户看到登录页版本号是 `dev`。核查确认**不是 bug**：版本号构建期注入
+（`Dockerfile` 的 `ARG PANEL_VERSION` 写进 `/etc/ikev2-panel-version`，
+`main.go` 读不到才 fallback `dev`）。CI 会传这个 build-arg，所以 ghcr.io 的正式
+镜像不会显示 `dev`；只有自测镜像是默认值。已写入
+[TROUBLESHOOTING §9.10](TROUBLESHOOTING.md#910-登录页版本号显示-dev)，附确认命令和
+正确的 `docker build --build-arg` 用法（命令已在本仓库实测）。
+
+### v2.86-PR20b — 文档对齐代码：数据卷说法纠偏（无代码改动）
+
+起因是用户问「docker compose 部署后证书 / 配置 / 数据库为什么没映射到宿主机」。
+核查 compose 实际写法后确认：**这不是部署故障，是文档过期**。本节只改文档。
+
+#### 192.168.50.63 实测证据
+
+| 命令 | 实际输出 |
+|------|---------|
+| `docker volume ls \| grep ikev2` | `local ikev2-panel-data` —— 卷名恒定，与目录名无关 |
+| `docker inspect --format '{{range .Mounts}}…'` | 3 条：`/etc/sysctl.d`(bind)、`ikev2-panel-data`(volume)、`<项目>/logs`(bind) |
+| `docker info \| grep 'docker root'` | `Docker Root Dir: /vol1/docker` —— **不是 `/var/lib/docker`** |
+| `docker volume inspect --format '{{.Mountpoint}}'` | `/vol1/docker/volumes/ikev2-panel-data/_data` |
+| `docker exec ikev2-panel ls -la /data` | `acme-sh/ ca/ le/ panel.db{,-shm,-wal} panel-state/ panel-tls/ server/` |
+| `docker logs \| grep 'limit dir'` | `limit dir: /var/lib/ikev2-panel/limits (container)` —— **带宽**限速文件不在 `/data` |
+
+#### 静态核实 → 实测后自我纠正的三处
+
+第一轮只读代码得出的结论，实测后发现自己也写错了两处，一并记录：
+
+| 项 | 只读代码时的说法 | 实测后更正 |
+|---|---|---|
+| 卷路径 | `/var/lib/docker/volumes/ikev2-panel-data/_data` | **`/vol1/docker/...`**，数据根目录可配，一律改成 `docker volume inspect --format '{{.Mountpoint}}'` 动态取 |
+| `/data` 内容 | 列了 6 项，含 `limits/` | 实测 8 项，多了 `ca/`（自签 CA 私钥）、`server/`（服务端私钥）；**带宽限速的 `limits/` 根本不在 `/data`** —— `main.go` 只在 `/var/lib/ikev2-panel/limits` 不存在时才回退，那是 dev 分支。注意别和 `/data/panel-state/ratelimit.json`（**登录**限流计数，确实在 `/data`）混淆 |
+| 备份范围 | 漏了 `ca/`、`server/` | 两者都是私钥，脚本确实不备份，已在文档里显式标注 |
+
+#### 修正的文档错误
+
+| 文档原说法 | 代码/实测实际 | 裁定 |
+|-----------|--------------|------|
+| 卷名是 `{项目目录名}_ikev2-data` | 顶层 `name: ikev2-panel-data`，恒定 | 文档错 |
+| 卷名是 `ikev2-panel-v2_ikev2-data`（本文件第 1 条判❌） | 同上，早已落地 | **CHANGELOG 判定与代码相反** |
+| 备份示例硬编码 `/var/lib/docker/volumes/ikev2-panel-v2_ikev2-data/_data` | 卷名错 + 路径根错，照抄双重失败 | 文档错 |
+| 排查示例宿主直接跑 `sqlite3 /var/lib/docker/.../panel.db` | 同上，且宿主未必装了 sqlite3 | 改为 `docker exec` |
+| `/data` 下持久化四项 | 实测 8 项 | 漏了 `ca/`、`server/`、`panel.db-wal/-shm` |
+
+#### 改了什么
+
+- **README §部署要点 / 数据卷**：命名卷 vs bind mount 说清；补「宿主可见 / 只在卷里」
+  对照表；`/data` 内容换成实测表格；加 DockerRootDir 不可硬编码的警告；
+  补限速状态实际在容器可写层的说明。
+- **README §备份与恢复**：`DATA_DIR` 改用 `{{.Mountpoint}}` 动态取；写明只备份三项、
+  哪些私钥不在内，给整卷 tar 命令。
+- **architecture §11.3**：同上重写 + 限速目录归属说明。
+- **architecture §14.2**：「看数据库」改 `docker exec ikev2-panel sqlite3 /data/panel.db`
+  （已核实 `sqlite3` 在 runtime 镜像层）。
+- **TROUBLESHOOTING**：新增 §8「数据 / 证书看不到」（8.1 找不到 `./data` 不是故障、
+  8.2 卷被换掉怎么恢复、8.3 备份脚本报"无数据"怎么解、8.4 限速计数清零不是 bug），
+  原 §8 面板 UI 异常顺延为 §9，小节号与目录锚点、两处交叉引用同步更新。
+- **CHANGELOG**：第 1 条判定 ❌ → ✅，落地数 6 → 7。
+
+**教训**：compose 的 `name:` 早在 v2.86-PR19(A10) 就写死了，但三份文档仍停留在
+PR17 之前的"随目录名漂移"叙事，且 CHANGELOG 里有一条与代码**正好相反**的判定。
+文档漂移到和代码矛盾，会让人照着错误路径排查 —— 比没有文档更糟。
+
+第二条教训更实际：**只读代码得出的结论也可能错**。第一轮我把
+`/var/lib/docker/volumes/...` 当成事实写进文档，而实机的 DockerRootDir 是
+`/vol1/docker`；又把 `limits/` 列为 `/data` 持久化项，实际它在容器可写层。
+凡是"路径在哪""哪个目录被持久化"这类问题，一律上实机 `ls` 一次再落笔。
+
+判定"某条行为变更是否落地"时，只认代码，不认上一版文档的结论。
 
 ### v2.86-PR20 — 前端可用性修复（P0 两条 + P1/F1/D3 四条）
 
@@ -319,7 +503,7 @@ Android 走项目已有的两条独立通道：
 
 | # | 变更 | 状态 |
 |---|------|------|
-| 1 | 卷名固定为 `ikev2-panel-data` | ❌ compose 仍是 `ikev2-panel-v2_ikev2-data`（随目录名漂移） |
+| 1 | 卷名固定为 `ikev2-panel-data` | ✅ compose 顶层 `name: ikev2-panel-data`，与目录名解耦（**此前本文档误记为 ❌，实际早已落地**） |
 | 2 | 面板降权 uid 10001 + `SETUID`/`SETGID` | ❌ 无 `IKEV2_PANEL_UID`，面板仍以 root 运行 |
 | 3 | VICI socket 属组处理 | ❌ entrypoint 无 `chgrp` |
 | 4 | `pull_policy: always` → `missing` | ❌ 仍是 `always` |
@@ -335,7 +519,7 @@ Android 走项目已有的两条独立通道：
 | 14 | 密码策略改 NIST SP 800-63B | ❌ 已裁定保留「用户决策 Q1」，不改 |
 | 15 | 数据库 schema 版本化（`PRAGMA user_version`） | ❌ |
 
-**结论**：pr24 的 15 条行为变更落地 6 条，其余 9 条均为**明确裁定不做**（不是遗漏）。
+**结论**：pr24 的 15 条行为变更落地 7 条，其余 8 条均为**明确裁定不做**（不是遗漏）。
 `go build ./...` / `go vet ./...` / `go test ./...` 现已全绿。
 
 ⚠️ **一次被撤销的实现**：第 11 条（`--load-conn`）中途被实现并标 ✅，随后核实官方文档

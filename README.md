@@ -124,23 +124,73 @@ devices: [/dev/net/tun]
 ### 数据卷
 
 ```yaml
+# 挂载点
+- type: volume
+  source: ikev2-data      # 顶层 key
+  target: /data
+- ./logs:/var/log:rw
+- /etc/sysctl.d:/host-sysctl.d:rw
+
+# 顶层定义
 volumes:
-  - ikev2-panel-v2_ikev2-data:/data
-  - ./logs:/var/log:rw
-  - /etc/sysctl.d:/host-sysctl.d:rw
+  ikev2-data:
+    name: ikev2-panel-data
 ```
 
-命名卷的实际名字是 `{项目目录名}_ikev2-data`，即默认的 `ikev2-panel-v2_ikev2-data`。
-**这意味着改名仓库目录会换一个卷名**：Compose 找不到旧卷就静默建一个空的，
-面板数据与证书看起来"消失"且不报错。迁移或改名后请显式对齐：
+**`/data` 是 Docker 命名卷，不是 bind mount。** 数据落在 Docker 数据根目录下的
+`volumes/ikev2-panel-data/_data`，**不在项目目录下** —— 在仓库根目录找 `./data`
+永远找不到，这是预期行为而非部署失败。
+
+⚠️ **数据根目录不一定是 `/var/lib/docker`。** 192.168.50.63 实测：
+`docker info` 显示 `Docker Root Dir: /vol1/docker`，实际路径是
+`/vol1/docker/volumes/ikev2-panel-data/_data`。**别硬编码路径**，用命令动态取：
 
 ```bash
-# 改名后把旧卷挂到新名字上
-docker volume rename ikev2-panel-v2_ikev2-data <新目录名>_ikev2-data
+docker volume inspect ikev2-panel-data --format '{{.Mountpoint}}'
 ```
 
-`/data` 下持久化四类数据：`panel.db`（用户 / 审计）、`panel-state/`（运行时配置与凭证）、
-`le/`（LE 证书）、`acme-sh/`（acme.sh 工作目录，避免重启触发 LE 速率限制）。
+| 宿主可见？ | 挂载 |
+|---|---|
+| ✅ 直接可见 | `./logs`、`/etc/sysctl.d` |
+| ❌ 只在卷里 | `/data`（数据库 / 证书 / 配置） |
+
+卷名由顶层 `name: ikev2-panel-data` 显式锁定，**与项目目录名解耦**：
+改名仓库目录、多份 clone 共存都指向同一个卷。早先用 `{目录名}_ikev2-data` 时，
+目录改名会让 Compose 静默建一个空卷 —— `panel.db`、LE 证书"消失"且零报错
+（192.168.50.63 实测）。从旧命名迁过来的用户执行一次：
+
+```bash
+docker volume rename ikev2-panel-v2_ikev2-data ikev2-panel-data
+```
+
+`/data` 下持久化（192.168.50.63 实测目录清单）：
+
+| 路径 | 内容 |
+|---|---|
+| `panel.db` | SQLite 用户 / 审计（旁边有 `-wal` / `-shm`） |
+| `panel-state/` | `cert.conf`、`aliyun.creds`、`ddns-runtime.conf`、`ratelimit.json`（**登录**限流计数）、`INITIAL_ADMIN_PASSWORD.txt` |
+| `le/` | Let's Encrypt `fullchain.pem` / `privkey.pem` |
+| `acme-sh/` | acme.sh 工作目录（丢了会触发 LE 速率限制） |
+| `ca/` | 自签 CA 证书与私钥 |
+| `server/` | IKEv2 服务端证书与私钥 |
+| `panel-tls/` | 面板 HTTPS 证书 |
+
+**带宽限速文件不在 `/data` 里。** 两个「限流」别混：
+
+| | 位置 | 容器重建后 |
+|---|---|---|
+| 登录限流计数 | `/data/panel-state/ratelimit.json`（持久化） | 保留 |
+| 带宽限速（tc） | `/var/lib/ikev2-panel/limits`（容器可写层） | 清零 |
+
+带宽限速文件丢失不影响功能：限速**配置**存在 `panel.db` 里，容器启动时按配置
+重新下发。`main.go` 只在该目录**不存在**时才回退到 `/data/limits`，那是 dev 分支。
+
+在宿主上直接查看：
+
+```bash
+docker exec ikev2-panel ls -la /data       # 容器视角，日常排查用这个
+docker volume inspect ikev2-panel-data    # 看 Mountpoint（注意不是 /var/lib/docker）
+```
 
 `/etc/sysctl.d:/host-sysctl.d:rw` 只在 forwarding 自愈成功时才会被写入 `99-ikev2.conf`，
 让宿主重启后仍然生效；宿主上原本没有该文件时，自愈不会留下任何配置痕迹。
@@ -195,10 +245,22 @@ docker compose logs -f          # 容器 stdout
 ## 备份与恢复
 
 [`scripts/backup-restore.sh`](scripts/backup-restore.sh) 在**宿主机**上运行，
-用 `DATA_DIR` 指向命名卷的挂载点（默认 `/data` 是容器内路径，宿主机上没有）：
+用 `DATA_DIR` 指向命名卷在宿主上的挂载点 —— 默认值 `/data` 是**容器内**路径，
+在宿主上不存在，不覆盖就会静默跳过（脚本会提示"无任何运行时数据可备份"）：
 
 ```bash
-DATA_DIR=/var/lib/docker/volumes/ikev2-panel-v2_ikev2-data/_data ./scripts/backup-restore.sh backup
+DATA_DIR="$(docker volume inspect ikev2-panel-data --format '{{.Mountpoint}}')" \
+  ./scripts/backup-restore.sh backup
+```
+
+脚本实际只备份三项：`panel.db`、`panel-state/`、`le/`。
+`acme-sh/`（LE 账号与 CA 缓存）、`panel-tls/`、`limits/` **不在备份范围内** ——
+acme.sh 丢了会在下次签发时重新注册账号，代价是更接近 LE 速率限制；
+真要完整备份请直接打包整个卷：
+
+```bash
+docker run --rm -v ikev2-panel-data:/src:ro -v /opt/ikev2-backups:/dst \
+  alpine tar czf /dst/data-full.tar.gz -C /src .
 ```
 
 | 子命令 | 作用 |
@@ -281,7 +343,7 @@ strongSwan 侧**不存在**任何能改这个权限的配置项（改 `charon.co
 | 要改代码 | [architecture.md](docs/architecture.md) |
 | **要改前端模板** | [architecture.md §12.9](docs/architecture.md)（CSP 与模板转义两条硬边界） |
 | 要调接口 | [API.md](docs/API.md) |
-| 出问题了 | [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)（§1-7 服务端 · §8 纯前端） |
+| 出问题了 | [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)（§1-7 服务端 · §8 数据/证书看不到 · §9 纯前端） |
 | 升级前必看 | [CHANGELOG.md](docs/CHANGELOG.md) |
 | 配置项清单 | [.env.example](.env.example)（唯一权威） |
 
@@ -300,6 +362,33 @@ strongSwan 侧**不存在**任何能改这个权限的配置项（改 `charon.co
    动态值（密码、用户名、外部 API 错误串）不进 `MsgHTML`，拆成同级独立元素。
 
 两条都有回归测试锁住（`internal/web/p0_banner_confirm_test.go`）。
+
+### 文本选择的约定
+
+界面装饰（导航、按钮、chip、标题）**禁止选中**，避免双击 / 拖拽误选；
+但密码、服务器地址、命令、证书参数、报错详情**必须能复制**。所以是
+「`body` 默认禁选 + 白名单放开」，**不要全局 `user-select: none`** ——
+那会把复制功能一起废掉。
+
+新组件默认继承 `body` 的禁选；确定需要复制的（如新加的数据展示区），
+显式写 `user-select: text`。任何 `user-select` 都**必须同时写
+`-webkit-user-select`**，否则 Safari / iOS 上整条策略失效。
+详见 [architecture.md §12.11](docs/architecture.md)，
+回归测试 `internal/web/p2_text_selection_test.go`。
+
+### 前端两条易踩的约定
+
+1. **`transform` 不能同时承担定位和动效。** 绝对定位元素居中用
+   `top`/`bottom` + `margin:auto`，不要用 `transform:translateY(-50%)` ——
+   全局 `button:active{transform:translateY(1px)}` 特异性更高，会把它整条覆盖，
+   按压时元素"跳出去"。浮在输入框里的图标按钮（eye / 复制）还要额外写
+   `transform:none` 断掉按压位移。
+   详见 [architecture.md §12.12](docs/architecture.md)，
+   回归测试 `internal/web/p3_press_offset_test.go`。
+
+2. **改完 CSS 要实机验证。** CSS 改动不进浏览器等于没改；重建镜像部署后
+   在真机确认再收工。页面 CSS 走 `assetVersion()` cache-bust（基于 mtime），
+   不需要手动清浏览器缓存。
 
 ## 模块结构
 

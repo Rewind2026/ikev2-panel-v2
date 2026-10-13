@@ -1115,22 +1115,63 @@ devices: /dev/net/tun
 
 ### 11.3 数据卷
 
-| 挂载 | 内容 |
-|------|------|
-| `ikev2-panel-v2_ikev2-data:/data` | 命名卷 |
-| `./logs:/var/log:rw` | 审计日志 + charon 日志 |
-| `/etc/sysctl.d:/host-sysctl.d:rw` | forwarding 自愈成功后才写 `99-ikev2.conf` |
+| 挂载 | 类型 | 宿主可见 |
+|------|------|---------|
+| `ikev2-panel-data:/data` | 命名卷 | ❌ `{DockerRootDir}/volumes/ikev2-panel-data/_data` |
+| `./logs:/var/log:rw` | bind | ✅ |
+| `/etc/sysctl.d:/host-sysctl.d:rw` | bind | ✅ |
 
-⚠️ **命名卷的名字是 `{项目目录名}_ikev2-data`** —— 目录改名就换一个卷名，
-compose 找不到旧卷会**静默建一个空的**，面板数据与证书看起来"消失"且不报错。
-改名或迁移后必须显式对齐：
+`/data` 是**命名卷而非 bind mount**，数据不在项目目录下 —— 部署后"看不到"
+数据库和证书是预期行为。排查用 `docker exec ikev2-panel ls -la /data`。
+
+⚠️ **`{DockerRootDir}` 不等于 `/var/lib/docker`。** 192.168.50.63 实测
+`Docker Root Dir: /vol1/docker`，卷路径是 `/vol1/docker/volumes/...`。
+硬编码 `/var/lib/docker/volumes/...` 在这类宿主上会指向不存在的目录：
 
 ```bash
-docker volume rename <旧目录名>_ikev2-data <新目录名>_ikev2-data
+docker volume inspect ikev2-panel-data --format '{{.Mountpoint}}'   # 唯一可靠取法
 ```
 
-`/data` 下持久化：`panel.db`、`panel-state/`（运行时配置与凭证）、`le/`（LE 证书）、
-`acme-sh/`（acme.sh 工作目录，避免重启触发 LE 速率限制）。
+卷名由 compose 顶层 `name: ikev2-panel-data` 显式锁定，与项目目录名解耦：
+
+```yaml
+services.ikev2-panel.volumes:
+  - type: volume
+    source: ikev2-data      # 顶层 key
+    target: /data
+volumes:
+  ikev2-data:
+    name: ikev2-panel-data  # 实际卷名，恒定
+```
+
+⚠️ 早先用短名 `{项目目录名}_ikev2-data` 有个静默数据丢失的坑：目录改名后
+compose 找不到旧卷会**自动建一个同名空卷**，`panel.db`、LE 证书、acme account
+全部"消失"，容器照常启动、面板可访问、零报错（192.168.50.63 实测）。
+从旧命名迁移：
+
+```bash
+docker volume rename ikev2-panel-v2_ikev2-data ikev2-panel-data
+```
+
+`/data` 下持久化（192.168.50.63 实测清单）：`panel.db`（+ `-wal` / `-shm`）、
+`panel-state/`（`cert.conf`、`aliyun.creds`、`ddns-runtime.conf`、`ratelimit.json`、
+`INITIAL_ADMIN_PASSWORD.txt`）、`le/`、`acme-sh/`、`ca/`（自签 CA 证书与私钥）、
+`server/`（IKEv2 服务端证书与私钥）、`panel-tls/`。
+
+**带宽限速文件（tc）不在 `/data`**：`main.go` 只在 `/var/lib/ikev2-panel/limits`
+**不存在**时才回退到 `/data/limits`（dev 分支）。生产环境该目录由镜像预置，
+走容器可写层，容器重建即清空 —— 但限速配置在 `panel.db`，重启后重新下发，无影响。
+注意别和上表的 `panel-state/ratelimit.json` 混淆：那是**登录**限流计数，
+确实持久化在 `/data`。
+
+`scripts/backup-restore.sh` 只备份 `panel.db`、`panel-state/`、`le/` 三项
+（`ca/`、`server/`、`acme-sh/`、`panel-tls/` 都不在内），
+`DATA_DIR` 默认 `/data` 是容器内路径 —— 在宿主上跑必须覆盖，否则静默跳过：
+
+```bash
+DATA_DIR="$(docker volume inspect ikev2-panel-data --format '{{.Mountpoint}}')" \
+  ./scripts/backup-restore.sh backup
+```
 
 ### 11.4 启动链与失败退出码
 
@@ -1470,6 +1511,89 @@ html { scroll-padding-top: calc(var(--ikev2-topbar-h) + 0.75rem); }
 
 程序化复位用 `behavior: 'instant'`，避免页面加载时出现一段动画位移。
 
+### 12.11 文本选择：装饰禁选，数据可复制
+
+管理后台双击 / 拖拽会误选一片界面文字，选中块高亮后还要再点一次才能取消。
+但**不能一刀切禁选** —— 本面板里初始密码、服务器地址、swanctl 命令、证书参数、
+报错详情都靠手动复制（报错还要复制去搜解决方案）。禁掉等于废功能。
+
+采用行业惯例（GitHub / GitLab / Vercel 后台）：**界面装饰禁选，数据可复制**。
+
+实现方向是「**默认禁 + 白名单放开**」，不是逐个禁用 —— 后者漏一处就失效，
+而且新加的组件默认仍可被误选：
+
+```css
+/* style.css §2.1 */
+body{ -webkit-user-select:none; user-select:none;}
+
+/* 白名单：缺任何一条都是功能受损 */
+code,pre,kbd,samp, input,textarea,select, option,
+.banner-body, .one-time-secret,
+.timeline-time,.timeline-event,.timeline-actor,.timeline-detail,
+.kv-inline, .users-grid-row .cell-name, dd{
+  -webkit-user-select:text; user-select:text;
+}
+.one-time-secret code{ -webkit-user-select:all; user-select:all;}
+```
+
+两个必须记住的点：
+
+1. **`-webkit-user-select` 不能省。** Safari / iOS Safari 只认带前缀的那个，
+   漏了整条策略在这些平台上静默失效。`internal/web/p2_text_selection_test.go`
+   的 `TestSel_NoWebkitPrefixGap` 会全量扫描 `style.css`，任何一处漏前缀即失败
+   —— 这条断言已经抓到过 `.dismiss` 与 `.settings-card > summary` 两处存量问题。
+
+2. **`summary` 必须显式禁选。** 它是 UA 默认允许选择的少数元素之一，
+   不覆盖的话折叠面板标题仍能误选（`.settings-card > summary` 另有一条带
+   `::before` 箭头的独立规则）。
+
+一次性密码用 `user-select:all` 而非 `text`：双击只选中一段，用户很容易漏掉
+前后字符。
+
+### 12.12 transform 不能同时承担定位和动效
+
+写这个约定是因为踩过：`.password-toggle`（密码框里的 eye 图标）用
+`transform:translateY(-50%)` 做垂直居中，而全局有
+
+```css
+button:active{ transform:translateY(1px); }   /* 全局按压反馈 */
+```
+
+`button:active` 特异性 `(0,1,1)` > `.password-toggle` 的 `(0,1,0)`，
+`:active` 一命中就把 `translateY(-50%)` **整条覆盖** —— 居中失效，图标按压时
+下坠约 18px。该按钮的 `transition` 又不含 `transform`，位移是瞬时的，
+iOS 上 `:active` 粘住让现象更明显。症状是"点一下按钮跳出去"。
+
+**两条规则**：
+
+1. **绝对定位元素的居中走 `top`/`bottom` + `margin:auto`**，不用 `transform`。
+   全局 `button:active` / `button[type=submit]:active` 都会动 `transform`，
+   用它定位等于把定位交给一个会被覆盖的属性。
+
+   ```css
+   /* ✅ */
+   .password-toggle{
+     position:absolute; right:0.45rem;
+     top:0; bottom:0; margin-top:auto; margin-bottom:auto;
+   }
+   ```
+
+2. **浮在表单控件内部的图标按钮要显式断掉按压位移**（`transform:none`）。
+   居中改掉后全局的 1px 仍然生效，而这类图标"浮在输入框里"，1px 位移
+   同样被看成错位。它们的按压反馈已由 `:hover` / `[aria-pressed]` 的
+   底色 + 描边 + 图标变色承担，不需要位移。
+
+   流式按钮（登录按钮、表格操作按钮）**保留**全局的 1px 下沉 —— 那是有效的
+   按压反馈，不要一刀切禁掉。
+
+回归测试 `internal/web/p3_press_offset_test.go`：`TestP3_NoAbsoluteCenteringViaTransform`
+在整个 `style.css` 上拦截「绝对定位 + `top:50%` + `translateY(-50%)`」组合，
+防止同样的写法被复制到别的浮层按钮上。
+
+> ⚠️ **改完 CSS 必须实机验证。** CSS 改动不进浏览器等于没改 ——
+> 本地工作区改完就宣布"修好了"是错的，要重建镜像部署后在真机确认。
+> 页面 CSS 走 `assetVersion()` cache-bust（基于 mtime），不需要手动清浏览器缓存。
+
 ## 13. 已知陷阱
 
 只列**今天仍然成立**的坑。历史上已修掉的不列 —— 那是 [CHANGELOG](CHANGELOG.md) 的事。
@@ -1694,8 +1818,8 @@ docker compose exec ikev2-panel swanctl --load-conn --list
 # DNS 记录到底存不存在（别用 dig，见 docs/README 排查方法论）
 docker compose exec ikev2-panel /usr/local/bin/dnsq <domain> <rr>
 
-# 看数据库
-sqlite3 /var/lib/docker/volumes/ikev2-panel-v2_ikev2-data/_data/panel.db \
+# 看数据库（/data 是命名卷，宿主上不在项目目录）
+docker exec ikev2-panel sqlite3 /data/panel.db \
   "select username, enabled, expires_at, speed_limit_mbps from users;"
 ```
 

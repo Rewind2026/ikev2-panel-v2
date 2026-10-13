@@ -15,10 +15,11 @@
 5. [限速不生效](#5-限速不生效)
 6. [admin 密码忘](#6-admin-密码忘)
 7. [DB 损坏](#7-db-损坏)
-8. [面板 UI 异常](#8-面板-ui-异常)（确认弹窗 / 横幅乱码 / 滚动位置 / 复制假成功 / 双层滚动条）
+8. [数据 / 证书看不到](#8-数据--证书看不到)
+9. [面板 UI 异常](#9-面板-ui-异常)（确认弹窗 / 横幅乱码 / 滚动位置 / 复制假成功 / 双层滚动条）
 
-> 前 7 节是 **VPN 与容器**问题，第 8 节是**纯前端**问题。
-> VPN 正常但界面不对，直接跳第 8 节。
+> 前 8 节是 **VPN 与容器**问题，第 9 节是**纯前端**问题。
+> VPN 正常但界面不对，直接跳第 9 节。
 
 ---
 
@@ -782,7 +783,11 @@ docker compose logs ikev2-panel | grep -A5 "默认管理员已创建"
 
 ## 7. DB 损坏
 
-DB 是单文件 SQLite：`/data/panel.db`（在命名卷里，容器重建不会丢）。
+DB 是单文件 SQLite：`/data/panel.db`。`/data` 是 Docker **命名卷**（卷名恒为
+`ikev2-panel-data`），数据落在宿主 Docker 数据根目录下，**不在项目目录下** ——
+容器重建不会丢，但在仓库根目录找不到 `./data` 是正常的。
+挂载点路径用 `docker volume inspect ikev2-panel-data --format '{{.Mountpoint}}'` 取，
+**别硬编码 `/var/lib/docker`**（数据根目录可以改，详见 [§8.1](#81-在项目目录找不到-data)）。
 
 ### 7.1 sqlite3 .recover
 
@@ -825,11 +830,102 @@ docker compose logs ikev2-panel | grep -A5 "默认管理员已创建"
 
 ---
 
-## 8. 面板 UI 异常
+## 8. 数据 / 证书看不到
+
+### 8.1 在项目目录找不到 `./data`
+
+**这不是故障。** `/data` 挂的是 Docker **命名卷**，不是 bind mount：
+
+```yaml
+# docker-compose.yml
+services.ikev2-panel.volumes:
+  - type: volume
+    source: ikev2-data
+    target: /data
+volumes:
+  ikev2-data:
+    name: ikev2-panel-data   # 实际卷名，恒定
+```
+
+数据在宿主的 Docker 数据根目录下，所以仓库根目录里永远不会有 `./data`
+（`./logs` 才是 bind mount，能直接看到）。
+
+```bash
+docker exec ikev2-panel ls -la /data        # 日常排查用这个，最省事
+docker volume inspect ikev2-panel-data     # 看 Mountpoint
+```
+
+⚠️ **别硬编码 `/var/lib/docker/volumes/...`。** Docker 数据根目录可以改，
+192.168.50.63 就是 `Docker Root Dir: /vol1/docker`，实际卷路径是
+`/vol1/docker/volumes/ikev2-panel-data/_data`。硬编码路径在那台机上直接不存在。
+唯一可靠取法：
+
+```bash
+docker volume inspect ikev2-panel-data --format '{{.Mountpoint}}'
+```
+
+### 8.2 数据真的丢了（卷被换掉）
+
+**症状**：面板用户全没了、LE 证书要重新签、面板显示正常但一切像全新部署。
+
+**原因**：早期 compose 用短名 `{项目目录名}_ikev2-data`，项目目录改名后
+compose 找不到旧卷会**静默建一个同名空卷** —— 容器正常启动、面板可访问、
+零报错，但 `panel.db`、LE 证书、acme account 全留在老卷里。
+192.168.50.63 实测踩过这个坑。
+
+现在 compose 顶层写死 `name: ikev2-panel-data`，与目录名解耦，不会再发生。
+从旧版本迁过来的用户补一次改名：
+
+```bash
+docker volume ls | grep ikev2     # 找到老卷名
+docker volume rename <老卷名> ikev2-panel-data
+docker compose up -d              # 重新挂载
+```
+
+确认挂对了：
+
+```bash
+docker inspect ikev2-panel --format '{{range .Mounts}}{{.Name}} -> {{.Destination}}{{"\n"}}{{end}}'
+# 期望输出 ikev2-panel-data -> /data
+```
+
+### 8.3 备份脚本提示"无任何运行时数据可备份"
+
+**症状**：`backup-restore.sh` 报 `无任何运行时数据可备份(尚未部署?DATA_DIR 默认 /data)`。
+
+**原因**：脚本默认 `DATA_DIR=/data`，那是**容器内**路径，在宿主上不存在。
+`/data` 在命名卷里，不设 `DATA_DIR` 就一条都找不到。
+
+```bash
+DATA_DIR="$(docker volume inspect ikev2-panel-data --format '{{.Mountpoint}}')" \
+  ./scripts/backup-restore.sh backup
+```
+
+另外脚本只备份 `panel.db`、`panel-state/`、`le/` 三项 ——
+`ca/`、`server/`、`acme-sh/`、`panel-tls/` 都不在内。要完整备份直接打包整个卷：
+
+```bash
+docker run --rm -v ikev2-panel-data:/src:ro -v /opt/ikev2-backups:/dst \
+  alpine tar czf /dst/data-full.tar.gz -C /src .
+```
+
+### 8.4 容器重建后限速计数清零
+
+**这是正常的，不是 bug。** 限速状态在 `/var/lib/ikev2-panel/limits`
+（容器可写层，不在任何挂载里），容器重建即清空。
+`/data/limits` 是 dev 分支的回落路径，生产环境不会用到。
+
+限速**配置**存在 `panel.db`，重启后按配置重新下发，不影响限速生效。
+实测 192.168.50.63：`docker logs` 里 `limit dir: /var/lib/ikev2-panel/limits (container)`，
+且 `docker inspect` 的 Mounts 只有 `/data`、`/var/log`、`/host-sysctl.d` 三条。
+
+---
+
+## 9. 面板 UI 异常
 
 前端问题**不影响 VPN 数据通路**，VPN 正常但面板界面不对时查这里。
 
-### 8.1 破坏性操作没有二次确认弹窗
+### 9.1 破坏性操作没有二次确认弹窗
 
 **症状**：点「删除」「停用」「重置密码」立刻执行，没有确认框。
 
@@ -848,7 +944,7 @@ script-src 'self' 'nonce-…'      # 没有 'unsafe-inline'，也没有 'unsafe-
 `initConfirmGuard()` 事件委托处理。**不要**为了"让它能用"去给 CSP 加
 `'unsafe-hashes'` —— 那等于对所有内联处理器放行。见 architecture §12.9。
 
-### 8.2 页面顶部横幅显示成一串标签文本
+### 9.2 页面顶部横幅显示成一串标签文本
 
 **症状**：横幅里出现 `&lt;strong&gt;…&lt;/strong&gt;` 这种字面量。
 
@@ -858,7 +954,7 @@ script-src 'self' 'nonce-…'      # 没有 'unsafe-inline'，也没有 'unsafe-
 **解法**：字面量 HTML 用 `MsgHTML`，动态值（密码、用户名、外部 API 错误串）
 拆成同级独立元素走默认转义。**不要**把变量拼进 `MsgHTML`。
 
-### 8.3 刷新后页面不在最顶部
+### 9.3 刷新后页面不在最顶部
 
 两个独立原因，只修一个仍会复现（详见 architecture §12.10）：
 
@@ -869,7 +965,7 @@ script-src 'self' 'nonce-…'      # 没有 'unsafe-inline'，也没有 'unsafe-
 
 **临时绕过**：F12 → Console 执行 `sessionStorage.clear()` 后刷新。
 
-### 8.4 点「复制」显示已复制，剪贴板里却是空的
+### 9.4 点「复制」显示已复制，剪贴板里却是空的
 
 **症状**：按钮闪「已复制 ✓」，但粘贴出来不是内容。
 
@@ -881,7 +977,7 @@ script-src 'self' 'nonce-…'      # 没有 'unsafe-inline'，也没有 'unsafe-
 
 **当前行为**：失败会如实显示「复制失败，请手动选中复制」，不再是假成功。
 
-### 8.5 终端卡片出现两层横向滚动条
+### 9.5 终端卡片出现两层横向滚动条
 
 **症状**：命令卡片里内层 `<pre>` 和外层卡片各有一条横向滚动条，手机上几乎没法操作。
 
@@ -891,14 +987,14 @@ script-src 'self' 'nonce-…'      # 没有 'unsafe-inline'，也没有 'unsafe-
 内部 `<pre>` 用 `overflow-x: visible`。**注意别把卡片的也改成 `visible`**，
 那会让超长命令把整张卡片撑破容器。
 
-### 8.6 表单校验失败后落到一个纯文本页
+### 9.6 表单校验失败后落到一个纯文本页
 
 **症状**：提交非法值后页面变成没有导航的白底黑字，还带着一串英文错误。
 
 **原因**：handler 用了 `http.Error(w, ..., 400)`。已修（见 §3.11 数据流），
 如果你在自己的分支上又看到了，先确认 `failMCOpts()` 走的是 303 而不是 400。
 
-### 8.7 「活跃隧道」的本地 / 远端是空的
+### 9.7 「活跃隧道」的本地 / 远端是空的
 
 **症状**：首页隧道列表有连接，但本地 / 远端地址两栏空白。
 
@@ -916,7 +1012,116 @@ docker compose exec ikev2-panel swanctl --list-sas
 # 对照输出里的 host / port 两列
 ```
 
-### 8.8 排查手法
+### 9.8 页面文字双击就能全选出来
+
+**这是 `user-select` 策略缺失或白名单被误删。** 当前设计是
+**界面装饰禁选、数据可复制**（见 architecture §12.11），所以：
+
+| 现象 | 判定 |
+|------|------|
+| 导航 / 按钮 / chip / 卡片标题能选中 | 正常就该禁选，若能选中说明 `body` 的 `user-select:none` 没了 |
+| 服务器地址 / 命令 / 报错详情**选不中** | ❗ 白名单被误删 —— 这是功能受损，不是观感问题 |
+| 折叠面板 `<summary>` 标题能选中 | 该元素是 UA 默认允许选择的，必须显式禁选 |
+
+在 **iOS Safari** 上尤其容易漏：只写 `user-select` 而不写
+`-webkit-user-select` 会被**静默忽略**，整条策略看起来完全没生效。
+`internal/web/p2_text_selection_test.go` 的 `TestSel_NoWebkitPrefixGap`
+会全量扫描 `style.css` 抓这种漏写。
+
+自己跑一遍断言：
+
+```bash
+go test ./internal/web/ -run TestSel_ -v
+```
+
+### 9.9 点 eye 切换密码时按钮整体跳一下
+
+**症状**：登录页 / 修改密码页点「显示密码」的 eye 按钮，图标瞬间下坠半个身位
+（约 18px）再弹回。iPhone 上 `:active` 会粘住，现象被拉长，更明显。
+
+**根因是 CSS 层叠冲突，不是 JS**：
+
+```css
+.password-toggle{ transform:translateY(-50%); }   /* 用 transform 做垂直居中 */
+button:active    { transform:translateY(1px);  }   /* 全局按压动效 */
+```
+
+`button:active` 特异性 `(0,1,1)` > `.password-toggle` 的 `(0,1,0)`，`:active`
+一命中就把 `translateY(-50%)` **整条覆盖**，居中失效；又因为 `.password-toggle`
+的 `transition` 不含 `transform`，位移没有任何过渡，是瞬时跳变。
+
+**已修（两层，缺一不可）**：
+
+1. 居中改用 `top:0; bottom:0; margin-top:auto; margin-bottom:auto`，
+   定位不再经过 `transform`。
+2. 再加 `.password-toggle:active{ transform:none; }` 显式抵消全局按压位移。
+
+**只做第 1 层会残留 1px 跳动** —— 居中改掉后全局 `button:active` 的
+`translateY(1px)` 照样生效。这个图标是**浮在输入框内部**的，不是流式按钮，
+1px 也被看成"错位"；它的按压反馈已由 `:hover` / `[aria-pressed]` 的底色 +
+描边 + 图标变色承担，不需要位移。
+
+**规矩**：
+- transform 不能同时承担定位和按压动效。绝对定位元素的居中一律走
+  `top`/`bottom` + `margin:auto`；按压反馈（全局 1px 下沉）可以保留，但不能靠它定位。
+- 浮在表单控件**内部**的图标按钮（eye / 复制 / 清除），额外断掉按压位移。
+
+自己跑一遍断言：
+
+```bash
+go test ./internal/web/ -run TestP3_ -v
+```
+
+`TestP3_NoAbsoluteCenteringViaTransform` 会在**整个 style.css** 上拦截
+「绝对定位 + `top:50%` + `translateY(-50%)`」这个组合，防止同样的写法被复制到
+别的浮层按钮上。
+
+> ⚠️ 改完 CSS **必须实机验证**。CSS 改动不进浏览器就等于没改 ——
+> 本地工作区改完直接告诉用户"修好了"是错的，要重建镜像部署后在真机确认。
+> 页面 CSS 走 `assetVersion()` cache-bust（基于 mtime），不需要手动清浏览器缓存。
+
+### 9.10 登录页版本号显示 `dev`
+
+**这通常不是 bug，是构建时没传版本号。**
+
+版本号在**构建期**注入，运行期只读文件：
+
+```
+Dockerfile            ARG PANEL_VERSION=dev → RUN echo "${PANEL_VERSION}" > /etc/ikev2-panel-version
+cmd/ikev2-panel/main.go  读 /etc/ikev2-panel-version；读不到 → fallback "dev"
+web/templates/login_content.html   版本 <code>{{.Version}}</code>
+```
+
+确认当前值：
+
+```bash
+docker exec ikev2-panel cat /etc/ikev2-panel-version
+# 或看镜像元数据
+docker inspect ikev2-panel --format '{{index .Config.Labels "org.opencontainers.image.version"}}'
+```
+
+| 场景 | 显示 | 是否正常 |
+|------|------|---------|
+| 从 ghcr.io 拉 `:latest` / tag 镜像 | `main-<sha>` 或 tag 号 | 正常，CI 传了 `PANEL_VERSION` |
+| 本地/服务器上手工 `docker build` | `dev` | 默认值，**要手动补 build-arg** |
+
+CI（`.github/workflows/docker-publish.yml`）会按 tag / main push 算出
+`PANEL_VERSION` 传给 Dockerfile，所以正式镜像不会出现 `dev`。自建镜像要显式传：
+
+```bash
+docker build -t ikev2-panel-v2:local \
+  --build-arg PANEL_VERSION="$(git describe --tags --always)" \
+  --build-arg VCS_REF="$(git rev-parse --short HEAD)" \
+  --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" .
+```
+
+用 `docker compose build` 时不用管，`docker-compose.yml` 已经把
+`PANEL_VERSION: ${PANEL_TAG:-latest}` 透传过去了。
+
+> 注意：`cert.PanelVersion`（写进 `.mobileconfig` 的 `PayloadDescription`）是
+> 另一处独立的常量，与本条无关，它不随镜像变化。
+
+### 9.11 排查手法
 
 前端问题容易误判成后端问题。定顺序：
 

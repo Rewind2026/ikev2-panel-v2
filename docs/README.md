@@ -21,7 +21,7 @@
 要改代码      → architecture.md（包结构 → 数据流 → 实现细节 → 调试）
               ↳ 前端两条硬边界在 §12.9（CSP / 模板转义），改模板前必读
 要调接口      → API.md（鉴权模型 → 端点表）
-出问题了      → TROUBLESHOOTING.md（§1-7 服务端，§8 纯前端）
+出问题了      → TROUBLESHOOTING.md（§1-7 服务端，§8 数据/证书看不到，§9 纯前端）
 要升级        → CHANGELOG.md（★ 破坏性变更都在这）
 查配置项      → ../.env.example（唯一权威，文档只写要点）
 ```
