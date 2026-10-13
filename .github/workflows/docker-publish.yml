@@ -123,27 +123,38 @@ jobs:
         # 防御：矩阵时代的静默覆盖就是缺这一步才漏掉的。
         # push 完立刻确认 manifest 里确实有两个架构，而不是被覆盖成单架构。
         #
-        # 注意匹配方式：`--raw` 输出是压缩 JSON，architecture 的值带空格
-        # （"architecture": "amd64"），且不存在 "linux/amd64" 这种连续子串。
-        # 早先用字面量匹配导致在**正确的**多架构镜像上误报失败，已踩过一次。
+        # 两个踩过的坑：
+        # 1) `--raw` 输出是 JSON，platform 拆成 "architecture"/"os" 两个字段，
+        #    不存在 "linux/amd64" 这种连续子串；且冒号后有空格。字面量匹配
+        #    会在**正确的**镜像上误报。
+        # 2) GHCR 的 manifest 索引更新有传播延迟。Build 结束瞬间 inspect 拿到的
+        #    仍是上一次的 manifest —— 实测 push 完成到校验执行只隔 2 秒，
+        #    读到的还是旧的单架构 manifest，于是误报。所以必须轮询重试。
         run: |
-          set -euo pipefail
+          set -uo pipefail
           TAGS='${{ steps.meta.outputs.tags }}'
           REF="${REGISTRY}/${IMAGE_NAME}:${TAGS%%,*}"
           echo "检查 $REF"
-          docker buildx imagetools inspect "$REF" --raw > manifest.json
-          if ! grep -q '"manifests"' manifest.json; then
-            echo "::error::manifest 里没有 manifests 数组 —— 单架构镜像，arm64 丢了"
+
+          ok=0
+          for i in $(seq 1 18); do
+            docker buildx imagetools inspect "$REF" --raw > manifest.json 2>/dev/null || true
+            if grep -q '"manifests"' manifest.json \
+               && grep -Eq '"architecture"[[:space:]]*:[[:space:]]*"amd64"' manifest.json \
+               && grep -Eq '"architecture"[[:space:]]*:[[:space:]]*"arm64"' manifest.json; then
+              echo "已确认多架构: $(grep -oE '"architecture"[[:space:]]*:[[:space:]]*"[a-z0-9]*"' manifest.json | sort -u | tr '\n' ' ')"
+              ok=1
+              break
+            fi
+            echo "第 $i 次: manifest 尚未反映双架构，等 10s 重试"
+            sleep 10
+          done
+
+          if [ "$ok" -ne 1 ]; then
+            echo "::error::$REF 始终没有同时包含 linux/amd64 与 linux/arm64"
+            echo "manifest 实际内容(截断): $(head -c 400 manifest.json)"
             exit 1
           fi
-          for arch in amd64 arm64; do
-            if ! grep -Eq "\"architecture\"[[:space:]]*:[[:space:]]*\"$arch\"" manifest.json; then
-              echo "::error::manifest 里缺少 linux/$arch"
-              exit 1
-            fi
-            echo "OK linux/$arch"
-          done
-          echo "已确认多架构: $(grep -oE '"architecture"[[:space:]]*:[[:space:]]*"[a-z0-9]*"' manifest.json | sort -u | tr '\n' ' ')"
 
       - name: Image digest summary
         run: |
