@@ -199,6 +199,47 @@ pre{
 }
 pre code{ background:transparent; padding:0; border:0;}
 
+/* ===== 2.1 Text Selection Policy =======================================
+   管理后台的双击/拖拽会误选一片界面文字，选中块又高亮又难取消。行业惯例
+   (GitHub / GitLab / Vercel 后台) 是:**界面装饰禁选,数据可复制**。
+
+   实现方式是「默认禁 + 白名单放开」而不是逐个禁用 —— 后者漏一处就失效,
+   且新加组件默认仍可被误选。
+
+   白名单(必须能复制,否则功能受损):
+     code / pre       —— 服务器地址、证书参数、命令、路径、错误码
+     input / textarea —— 用户要选中编辑,禁掉会直接没法用
+     .banner-body     —— 报错详情要复制去搜解决方案 / 提 issue
+     .one-time-secret —— 初始密码,页面明确要求"请记录"
+     .timeline-*      —— 审计日志的操作者与详情
+     .kv-inline       —— 配置项键值对
+   其余(导航、按钮、标题、chip、卡片头、空状态提示等)一律禁选。          */
+
+body{ -webkit-user-select:none; user-select:none;}
+
+/* --- 白名单:放开可选可复制 --- */
+code,pre,kbd,samp,
+input,textarea,select,
+option,
+.banner-body,
+.one-time-secret,
+.timeline-time,.timeline-event,.timeline-actor,.timeline-detail,
+.kv-inline,
+.users-grid-row .cell-name,
+dd{
+  -webkit-user-select:text;
+  user-select:text;
+}
+/* 显式禁选的只有两类,其余靠 body 继承:
+   1. summary —— UA 默认允许选择,不覆盖的话折叠面板标题仍能误选;
+      另 .settings-card > summary 已单列一条(含 ::before 箭头)。
+   2. 装饰文字里最容易被误拖到的整块区域(page-header 含 h1 + 副标题),
+      显式声明是为了不依赖继承 —— 将来有人给 main 加 user-select 会连带失效。 */
+summary,.page-header,.page-sub,.empty-title,.empty-hint,.form-help{
+  -webkit-user-select:none;
+  user-select:none;
+}
+
 /* link */
 a{ color:var(--ikev2-brand); text-decoration:none; transition:color .15s, text-shadow .2s;}
 a:hover{ color:var(--ikev2-brand-hover); text-decoration:none; text-shadow:0 0 14px var(--ikev2-brand-glow);}
@@ -1038,7 +1079,7 @@ main#main, .main-area{
   font-size:1rem;
   letter-spacing:0.04em;
   overflow-wrap:anywhere;
-  user-select:all;
+  -webkit-user-select:all; user-select:all;
 }
 .one-time-secret small{
   display:block;
@@ -1105,7 +1146,7 @@ main#main, .main-area{
   flex-shrink:0;
   border-radius:4px;
   pointer-events:auto;
-  user-select:none;
+  -webkit-user-select:none; user-select:none;
   transition: opacity 160ms ease, background-color 160ms ease;
 }
 .dismissable .dismiss:hover{
@@ -1198,7 +1239,7 @@ main#main, .main-area{
   display:flex; align-items:center; gap:0.75rem;
   font-size:0.875rem; font-weight:700;
   text-transform:uppercase; letter-spacing:0.08em;
-  user-select:none; list-style:none;
+  -webkit-user-select:none; user-select:none; list-style:none;
 }
 .settings-card > summary::-webkit-details-marker{ display:none;}
 .settings-card > summary::before{
