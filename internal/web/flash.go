@@ -42,8 +42,8 @@ var ErrFlashNotFound = errors.New("flash not found")
 
 // Flash 一次性消息。
 type Flash struct {
-	NewPassword string    // 用户创建/重置密码后一次性显示
-	Message     string    // 普通提示（"用户已删除"等）
+	NewPassword string // 用户创建/重置密码后一次性显示
+	Message     string // 普通提示（"用户已删除"等）
 	// Kind v2.86-pr23h:flash 类别。
 	//   "" / "info"  — 普通提示(蓝色 banner-info)
 	//   "success"   — 成功(绿色)
@@ -51,22 +51,33 @@ type Flash struct {
 	// 模板渲染时按 Kind 切换 CSS class,前端 JS 也用 data-kind 做自动滚动/dismiss 行为。
 	Kind      string
 	ExpiresAt time.Time
+
+	// MCOptsBackfill 校验失败时回填表单用的 mobileconfig 覆盖项草稿。
+	//
+	// 为什么需要它(P1-1 修复):
+	//   mc 表单 POST 校验失败原本走 http.Error() → 浏览器显示裸文本页,
+	//   用户丢失全部已填内容且无返回路径。改成 303 回详情页 + flash 后,
+	//   必须把用户刚填的值带回去,否则"不丢数据"只是换了个丢法。
+	//
+	// 存放的是 *cert.MobileConfigOpts 的 JSON(由 mcOptsBackfill 槽位消费),
+	// 只在 FlashStore 内存里活一次,不写 query string、不落盘。
+	MCOptsBackfill string
 }
 
 // FlashStore flash 存储（按 sessionID 索引）。
 type FlashStore struct {
-	mu    sync.Mutex
+	mu      sync.Mutex
 	flashes map[string]Flash // key = sessionID
-	ttl   time.Duration
-	now   func() time.Time // 可注入，便于测试
+	ttl     time.Duration
+	now     func() time.Time // 可注入，便于测试
 }
 
 // NewFlashStore 构造 flash 存储，ttl 通常 5 分钟。
 func NewFlashStore(ttl time.Duration) *FlashStore {
 	return &FlashStore{
 		flashes: make(map[string]Flash),
-		ttl:    ttl,
-		now:    time.Now,
+		ttl:     ttl,
+		now:     time.Now,
 	}
 }
 
@@ -74,7 +85,8 @@ func NewFlashStore(ttl time.Duration) *FlashStore {
 //
 // 设计选择：不是 push（保留多个），是 set（最新覆盖）。
 // 原因：用户不会同时有"密码 + 普通消息"两条需要展示，
-//       且 set 更简单，避免"取哪个"的歧义。
+//
+//	且 set 更简单，避免"取哪个"的歧义。
 func (s *FlashStore) Set(sessionID string, f Flash) {
 	s.SetFor(sessionID, "", f)
 }

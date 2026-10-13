@@ -1,8 +1,9 @@
 // /account 账号自服务：管理员修改自己的密码。
 //
 // 路由：
-//   GET  /account               渲染修改密码表单
-//   POST /api/account/password  处理表单提交
+//
+//	GET  /account               渲染修改密码表单
+//	POST /api/account/password  处理表单提交
 //
 // 设计要点（v2.86-pr21）：
 //   - 只有 admin 自助场景，没有"忘记密码"流程（那是 main.go 首次启动随机生成的）
@@ -43,11 +44,11 @@ func (s *Server) handleAccountPage(w http.ResponseWriter, r *http.Request) {
 
 	s.RenderPage(w, r, http.StatusOK, "account", accountPageData{
 		PageMeta: PageMeta{
-			Page:         "account",
-			Title:        "账号设置",
-			PageKey:      "account",
+			Page:          "account",
+			Title:         "账号设置",
+			PageKey:       "account",
 			AdminUsername: admin.Username,
-			CSRFToken:    csrfTokenOf(sess),
+			CSRFToken:     csrfTokenOf(sess),
 		},
 		Username: admin.Username,
 	})
@@ -66,7 +67,7 @@ func (s *Server) handleAccountPage(w http.ResponseWriter, r *http.Request) {
 //  8. flash "密码已更新" → 302 → /account（带 success flash）
 func (s *Server) handleAccountChangePassword(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
-		http.Error(w, "bad form", http.StatusBadRequest)
+		http.Error(w, "表单解析失败", http.StatusBadRequest)
 		return
 	}
 
@@ -100,7 +101,7 @@ func (s *Server) handleAccountChangePassword(w http.ResponseWriter, r *http.Requ
 	// 2. 取当前 admin
 	admin, ok := AdminFrom(r.Context())
 	if !ok || admin == nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		http.Error(w, "内部错误，请查看服务日志", http.StatusInternalServerError)
 		return
 	}
 
@@ -117,7 +118,7 @@ func (s *Server) handleAccountChangePassword(w http.ResponseWriter, r *http.Requ
 	fresh, err := s.Store.GetAdminByUsername(r.Context(), admin.Username)
 	if err != nil {
 		s.Logger.Error("get admin for password change", "err", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		http.Error(w, "内部错误，请查看服务日志", http.StatusInternalServerError)
 		return
 	}
 
@@ -125,18 +126,18 @@ func (s *Server) handleAccountChangePassword(w http.ResponseWriter, r *http.Requ
 	newHash, err := auth.BaseHashPassword(newPw)
 	if err != nil {
 		s.Logger.Error("hash new password", "err", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		http.Error(w, "内部错误，请查看服务日志", http.StatusInternalServerError)
 		return
 	}
 
 	// 6. 写库
 	if err := s.Store.UpdateAdminPassword(r.Context(), fresh.Username, newHash); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			http.Error(w, "admin not found", http.StatusNotFound)
+			http.Error(w, "管理员账号不存在", http.StatusNotFound)
 			return
 		}
 		s.Logger.Error("update admin password", "err", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		http.Error(w, "内部错误，请查看服务日志", http.StatusInternalServerError)
 		return
 	}
 
@@ -149,6 +150,7 @@ func (s *Server) handleAccountChangePassword(w http.ResponseWriter, r *http.Requ
 	if sess2 != nil && s.FlashStore != nil {
 		s.FlashStore.Set(sess2.ID, Flash{
 			Message: "密码已更新",
+			Kind:    "success",
 		})
 	}
 

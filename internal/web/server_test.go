@@ -191,7 +191,11 @@ func TestInstallHandler_OneShot(t *testing.T) {
 	id := createTestUser(t, srv, "alice")
 
 	// 1) 模拟 QR handler issue token
-	token := srv.InstallTokens.Issue(id)
+	// v2.86-PR19(B4):Issue 现在返回 error;测试里忽略(成功路径)。
+	token, err := srv.InstallTokens.Issue(id)
+	if err != nil {
+		t.Fatalf("installtoken issue: %v", err)
+	}
 
 	// 2) 模拟手机扫码访问 /install/{token}（无 cookie、无 session）
 	req := httptest.NewRequest("GET", "/install/"+token, nil)

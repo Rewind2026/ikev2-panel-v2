@@ -4,11 +4,11 @@
 */}}
 <header class="page-header">
   <hgroup>
-    <h1>Users</h1>
+    <h1>用户管理</h1>
     <p class="page-sub">{{len .Users}} 个账号 · 管理签发的证书、限速、流量</p>
   </hgroup>
   <div class="page-actions">
-    <a href="/users/new" class="btn-primary">+ New User</a>
+    <a href="/users/new" class="btn-primary">+ 新建用户</a>
   </div>
 </header>
 
@@ -17,38 +17,42 @@
   {{template "banner" (dict "Kind" $kind "Msg" .Flash "ExtraClass" "mb-2")}}
 {{end}}
 {{if .NewPassword}}
-  {{template "banner" (dict "Kind" "warn" "Msg" (printf "<strong>用户密码已生成:</strong><code style=\"font-size: 0.9375rem;\">%s</code><small style=\"display: block; margin-top: 0.4rem;\">⚠️ 仅显示这一次,请记录后再关闭。</small>" .NewPassword))}}
+  {{template "banner" (dict "Kind" "warn" "MsgHTML" "<strong>用户密码已生成：</strong>" "Dismissible" false)}}
+  <div class="one-time-secret">
+    <code>{{.NewPassword}}</code>
+    <small>⚠️ 仅显示这一次，请记录后再关闭。</small>
+  </div>
 {{end}}
 
 {{if .Users}}
 <div class="users-table">
   <div class="users-grid users-grid-head" role="row">
-    <div class="cell cell-id">ID</div>
-    <div class="cell cell-name">Username</div>
-    <div class="cell cell-status">Status</div>
-    <div class="cell cell-limit">Limit</div>
-    <div class="cell cell-expires">Expires</div>
-    <div class="cell cell-traffic">Traffic</div>
-    <div class="cell cell-seen">Last Seen</div>
-    <div class="cell cell-note">Note</div>
-    <div class="cell cell-actions">Actions</div>
+    <div class="cell cell-id">编号</div>
+    <div class="cell cell-name">用户名</div>
+    <div class="cell cell-status">状态</div>
+    <div class="cell cell-limit">限速</div>
+    <div class="cell cell-expires">有效期</div>
+    <div class="cell cell-traffic">流量</div>
+    <div class="cell cell-seen">最近连接</div>
+    <div class="cell cell-note">备注</div>
+    <div class="cell cell-actions">操作</div>
   </div>
   {{range .Users}}
   <div class="users-grid users-grid-row" role="row">
-    <div class="cell cell-id user-id" data-label="ID">#{{.ID}}</div>
-    <div class="cell cell-name user-name" data-label="Username"><a href="/users/{{.ID}}">{{.Username}}</a></div>
-    <div class="cell cell-status" data-label="Status">
-      {{if .Enabled}}<span class="chip ok no-dot">Enabled</span>
-      {{else}}<span class="chip muted no-dot">Disabled</span>{{end}}
+    <div class="cell cell-id user-id" data-label="编号">#{{.ID}}</div>
+    <div class="cell cell-name user-name" data-label="用户名"><a href="/users/{{.ID}}">{{.Username}}</a></div>
+    <div class="cell cell-status" data-label="状态">
+      {{if .Enabled}}<span class="chip ok no-dot">已启用</span>
+      {{else}}<span class="chip muted no-dot">已停用</span>{{end}}
     </div>
-    <div class="cell cell-limit" data-label="Limit">{{if eq .SpeedLimitMbps 0}}<span class="text-muted">unlimited</span>{{else}}<code>{{.SpeedLimitMbps}} Mbps</code>{{end}}</div>
-    <div class="cell cell-expires" data-label="Expires">{{if eq .ExpiresAt 0}}<span class="text-muted">never</span>{{else}}<code>{{formatTime .ExpiresAt}}</code>{{end}}</div>
-    <div class="cell cell-traffic" data-label="Traffic"><code>↓ {{formatBytes .BytesInTotal}} / ↑ {{formatBytes .BytesOutTotal}}</code></div>
-    <div class="cell cell-seen" data-label="Last Seen">{{if eq .LastUsedAt 0}}<span class="text-muted">never</span>{{else}}<code>{{formatTime .LastUsedAt}}</code>{{end}}</div>
-    <div class="cell cell-note" data-label="Note">{{.Note}}</div>
-    <div class="cell cell-actions user-actions" data-label="Actions">
-      <a href="/users/{{.ID}}" class="btn-secondary btn-sm">View</a>
-      <a href="/users/{{.ID}}/delete" class="btn-danger btn-sm">Delete</a>
+    <div class="cell cell-limit" data-label="限速">{{if eq .SpeedLimitMbps 0}}<span class="text-muted">不限速</span>{{else}}<code>{{.SpeedLimitMbps}} Mbps</code>{{end}}</div>
+    <div class="cell cell-expires" data-label="有效期">{{if eq .ExpiresAt 0}}<span class="text-muted">永不过期</span>{{else}}<code>{{formatTime .ExpiresAt}}</code>{{end}}</div>
+    <div class="cell cell-traffic" data-label="流量"><code>↓ {{formatBytes .BytesInTotal}} / ↑ {{formatBytes .BytesOutTotal}}</code></div>
+    <div class="cell cell-seen" data-label="最近连接">{{if eq .LastUsedAt 0}}<span class="text-muted">从未连接</span>{{else}}<code>{{formatTime .LastUsedAt}}</code>{{end}}</div>
+    <div class="cell cell-note" data-label="备注">{{.Note}}</div>
+    <div class="cell cell-actions user-actions" data-label="操作">
+      <a href="/users/{{.ID}}" class="btn-secondary btn-sm">详情</a>
+      <a href="/users/{{.ID}}/delete" class="btn-danger btn-sm">删除</a>
     </div>
   </div>
   {{end}}
@@ -61,9 +65,9 @@
       <circle cx="9" cy="7" r="4"/>
       <path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>
     </svg>
-    <div class="empty-title">No Users Yet</div>
-    <div class="empty-hint">创建用户后会出现在这里，他们可以在 iOS / macOS / Android / Linux 上扫码配置 VPN</div>
-    <a href="/users/new" class="btn-primary">+ Create First User</a>
+    <div class="empty-title">还没有用户</div>
+    <div class="empty-hint">创建用户后会出现在这里，他们可以在 iOS / macOS 上扫码配置 VPN；Android / Linux 请用用户详情页里的对应入口</div>
+    <a href="/users/new" class="btn-primary">+ 创建第一个用户</a>
   </div>
 </article>
 {{end}}

@@ -27,12 +27,12 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 	events, err := s.Store.ListAudit(r.Context(), 100)
 	if err != nil {
 		s.Logger.Error("list audit", "err", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		http.Error(w, "内部错误，请查看服务日志", http.StatusInternalServerError)
 		return
 	}
 
 	s.RenderPage(w, r, http.StatusOK, "audit", auditPageData{
-		PageMeta: PageMeta{Page: "audit", Title: "操作日志", PageKey: "audit", AdminUsername: admin.Username, CSRFToken: csrfTokenOf(sess)},
+		PageMeta: PageMeta{Page: "audit", Title: "审计日志", PageKey: "audit", AdminUsername: admin.Username, CSRFToken: csrfTokenOf(sess)},
 		Events:   events,
 	})
 }

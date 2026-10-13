@@ -15,7 +15,7 @@
 // 这样表单提交后浏览器刷新回首页,用户停留在原卡片位置(配合 layout.html
 // 的 scroll restore),无白屏、无原生错误页。
 //
-// 设计见 docs/design.md §19.6(v2-83)。
+// 见 docs/architecture.md §1（internal/panelstate）。
 package web
 
 import (
@@ -76,11 +76,11 @@ func (s *Server) handleAliyunStatus(w http.ResponseWriter, r *http.Request) {
 //   - 更新内存缓存(DDNS 下次 tick 用新凭证)
 func (s *Server) handleAliyunSave(w http.ResponseWriter, r *http.Request) {
 	if s.PanelState == nil {
-		http.Error(w, "panel state not initialized", http.StatusInternalServerError)
+		http.Error(w, "面板状态存储未初始化", http.StatusInternalServerError)
 		return
 	}
 	if err := r.ParseForm(); err != nil {
-		http.Error(w, "bad form", http.StatusBadRequest)
+		http.Error(w, "表单解析失败", http.StatusBadRequest)
 		return
 	}
 
@@ -107,7 +107,7 @@ func (s *Server) handleAliyunSave(w http.ResponseWriter, r *http.Request) {
 	}); err != nil {
 		s.Logger.Error("aliyun creds save failed", "err", err)
 		s.respondAliyunFlash(w, r, "error",
-			"保存失败: "+err.Error())
+			"保存失败："+err.Error())
 		return
 	}
 
@@ -127,12 +127,12 @@ func (s *Server) handleAliyunSave(w http.ResponseWriter, r *http.Request) {
 //   - 清内存缓存(DDNS 下次 tick 用 env fallback)
 func (s *Server) handleAliyunClear(w http.ResponseWriter, r *http.Request) {
 	if s.PanelState == nil {
-		http.Error(w, "panel state not initialized", http.StatusInternalServerError)
+		http.Error(w, "面板状态存储未初始化", http.StatusInternalServerError)
 		return
 	}
 	if err := s.PanelState.ClearAliyun(); err != nil {
 		s.Logger.Error("aliyun creds clear failed", "err", err)
-		s.respondAliyunFlash(w, r, "error", "清除失败: "+err.Error())
+		s.respondAliyunFlash(w, r, "error", "清除失败："+err.Error())
 		return
 	}
 	s.Logger.Info("aliyun creds cleared via panel")

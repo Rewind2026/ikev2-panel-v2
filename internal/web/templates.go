@@ -360,7 +360,7 @@ func (s *Server) RenderPage(w http.ResponseWriter, r *http.Request, status int, 
 		if s.Logger != nil {
 			s.Logger.Error("render content", "page", page, "err", err)
 		}
-		http.Error(w, "template error", http.StatusInternalServerError)
+		http.Error(w, "页面模板渲染失败", http.StatusInternalServerError)
 		return
 	}
 
@@ -369,7 +369,7 @@ func (s *Server) RenderPage(w http.ResponseWriter, r *http.Request, status int, 
 		if s.Logger != nil {
 			s.Logger.Error("set BodyHTML", "page", page, "err", err)
 		}
-		http.Error(w, "template error", http.StatusInternalServerError)
+		http.Error(w, "页面模板渲染失败", http.StatusInternalServerError)
 		return
 	}
 

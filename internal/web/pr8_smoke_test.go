@@ -143,7 +143,7 @@ func TestPR8_E2E_OnboardingChecklist(t *testing.T) {
 }
 
 // TestPR8_E2E_DeleteConfirmPage 验证 U10:GET /users/{id}/delete 渲染确认页不真删。
-// 模板文案:v2.86-PR-Redesign 后页面标题为 "Delete User"（英文）,按钮为 "Confirm Delete"。
+// 模板文案:统一中文后页面标题为 "删除用户",按钮为 "确认删除"。
 func TestPR8_E2E_DeleteConfirmPage(t *testing.T) {
 	e := newPR8Env(t)
 	ts := httptest.NewServer(e.httpHandler)
@@ -170,10 +170,10 @@ func TestPR8_E2E_DeleteConfirmPage(t *testing.T) {
 	resp, _ = client.Get(ts.URL + "/users/" + intToStr(id) + "/delete")
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if !strings.Contains(string(body), "Delete User") {
+	if !strings.Contains(string(body), "删除用户") {
 		t.Errorf("U10: confirm page not rendered:\n%s", string(body))
 	}
-	if !strings.Contains(string(body), "Confirm Delete") {
+	if !strings.Contains(string(body), "确认删除") {
 		t.Errorf("U10: confirm button not rendered:\n%s", string(body))
 	}
 
@@ -231,7 +231,7 @@ func TestPR8_E2E_AuditPage(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	html := string(body)
-	if !strings.Contains(html, "操作日志") {
+	if !strings.Contains(html, "审计日志") {
 		t.Errorf("U11: /audit page missing title")
 	}
 	if !strings.Contains(html, "test.event") {

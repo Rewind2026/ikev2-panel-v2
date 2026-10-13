@@ -5,11 +5,11 @@
 
 <header class="page-header">
   <hgroup>
-    <h1>Mobileconfig Defaults</h1>
+    <h1>描述文件默认值</h1>
     <p class="page-sub">管理员全局默认 · 运行时热改，无需重启</p>
   </hgroup>
   <div class="page-actions">
-    {{if .Current}}<span class="chip ok no-dot">Customized</span>{{else}}<span class="chip muted no-dot">Built-in</span>{{end}}
+    {{if .Current}}<span class="chip ok no-dot">已自定义</span>{{else}}<span class="chip muted no-dot">使用出厂值</span>{{end}}
   </div>
 </header>
 
@@ -19,7 +19,7 @@
 <article class="card card-pad">
   <p class="text-sm" style="line-height: 1.6;">
     这组默认值影响 <strong>所有用户</strong> 下载的 <code>.mobileconfig</code>（除非用户在
-    详情页单独设过覆盖项）。优先级：<strong>用户 overlay &gt; 本页 admin defaults &gt; 出厂</strong>。
+    详情页单独设过覆盖项）。优先级：<strong>用户详情页覆盖项 &gt; 本页全局默认 &gt; 出厂值</strong>。
   </p>
   <p class="text-sm mt-3" style="line-height: 1.6;">
     修改保存后<strong>立即生效</strong>，用户下次扫码 / 下载 / 重新拉取描述文件就用新值。<strong>无需重启容器</strong>。
@@ -52,19 +52,23 @@
       <div class="form-section">
         <label class="form-label" for="mc-profile">OnDemand 场景</label>
         <select id="mc-profile" name="on_demand_profile">
-          <option value="" {{if not $cur}}selected{{end}}>— Builtin 出厂 (always) —</option>
+          <option value="" {{if not $cur}}selected{{end}}>— 使用出厂值（始终连接）—</option>
           <option value="always" {{if and $cur (eq $cur.OnDemandProfile "always")}}selected{{end}}>始终连接（任何网络都连）</option>
-          <option value="home_wifi_disconnect" {{if and $cur (eq $cur.OnDemandProfile "home_wifi_disconnect")}}selected{{end}}>家里 Wi-Fi 断开 VPN（SSID 必须在每用户详情页填）</option>
+          <option value="home_wifi_disconnect" {{if and $cur (eq $cur.OnDemandProfile "home_wifi_disconnect")}}selected{{end}}>家里 Wi-Fi 断开 VPN（SSID 在每用户详情页填）</option>
           <option value="cellular_only" {{if and $cur (eq $cur.OnDemandProfile "cellular_only")}}selected{{end}}>仅蜂窝连接 VPN，Wi-Fi 不连</option>
           <option value="captive_probe" {{if and $cur (eq $cur.OnDemandProfile "captive_probe")}}selected{{end}}>智能判断（能上 captive.apple.com 不连）</option>
           <option value="manual" {{if and $cur (eq $cur.OnDemandProfile "manual")}}selected{{end}}>完全手动（关闭按需）</option>
         </select>
+        <p class="form-help" style="color: var(--ikev2-fg-muted); font-size: 0.85em; margin-top: 4px;">
+          选「家里 Wi-Fi 断开 VPN」时，具体 SSID 需在<b>每个用户详情页</b>单独填写；
+          未填的用户在渲染描述文件时会被校验拦下并报错。
+        </p>
       </div>
 
       <div class="form-section">
         <label class="form-label" for="mc-on-demand">启用按需自动连接</label>
         <select id="mc-on-demand" name="on_demand_enabled">
-          <option value="" {{if or (not $cur) (not $cur.OnDemandEnabled)}}selected{{end}}>— Builtin —</option>
+          <option value="" {{if or (not $cur) (not $cur.OnDemandEnabled)}}selected{{end}}>— 使用出厂值 —</option>
           <option value="1" {{if and $cur (eq (boolPtrVal $cur.OnDemandEnabled) "1")}}selected{{end}}>启用</option>
           <option value="0" {{if and $cur (eq (boolPtrVal $cur.OnDemandEnabled) "0")}}selected{{end}}>停用</option>
         </select>
@@ -79,16 +83,16 @@
     </summary>
     <div class="settings-body">
       <div class="form-section">
-        <label class="form-label" for="mc-name">连接显示名 <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(iOS 设置里的连接名)</small></label>
+        <label class="form-label" for="mc-name">连接显示名 <small style="color: var(--ikev2-fg-muted); font-weight: 400;">（iOS 设置里的连接名）</small></label>
         <input id="mc-name" type="text" name="user_defined_name" maxlength="64"
-               placeholder='留空 = 用 builtin "IKEv2 VPN"'
+               placeholder='留空 = 使用出厂值 "IKEv2 VPN"'
                value="{{if $cur}}{{$cur.UserDefinedName}}{{end}}">
       </div>
 
       <div class="form-section">
         <label class="form-label" for="mc-sleep">睡眠时断开 VPN</label>
         <select id="mc-sleep" name="disconnect_on_sleep">
-          <option value="" {{if or (not $cur) (not $cur.DisconnectOnSleep)}}selected{{end}}>— Builtin —</option>
+          <option value="" {{if or (not $cur) (not $cur.DisconnectOnSleep)}}selected{{end}}>— 使用出厂值 —</option>
           <option value="1" {{if and $cur (eq (boolPtrVal $cur.DisconnectOnSleep) "1")}}selected{{end}}>是（锁屏断 VPN，省电）</option>
           <option value="0" {{if and $cur (eq (boolPtrVal $cur.DisconnectOnSleep) "0")}}selected{{end}}>否（锁屏保持连接，推送及时）</option>
         </select>
@@ -98,15 +102,15 @@
         <div class="form-section">
           <label class="form-label" for="mc-keepalive">NAT 保活</label>
           <select id="mc-keepalive" name="nat_keepalive_enabled">
-            <option value="" {{if or (not $cur) (not $cur.NATKeepaliveEnabled)}}selected{{end}}>— Builtin —</option>
+            <option value="" {{if or (not $cur) (not $cur.NATKeepaliveEnabled)}}selected{{end}}>— 使用出厂值 —</option>
             <option value="1" {{if and $cur (eq (boolPtrVal $cur.NATKeepaliveEnabled) "1")}}selected{{end}}>启用（防运营商 NAT 过期）</option>
             <option value="0" {{if and $cur (eq (boolPtrVal $cur.NATKeepaliveEnabled) "0")}}selected{{end}}>停用</option>
           </select>
         </div>
         <div class="form-section">
-          <label class="form-label" for="mc-keepalive-int">NAT 保活间隔 <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(秒, 20-600)</small></label>
+          <label class="form-label" for="mc-keepalive-int">NAT 保活间隔 <small style="color: var(--ikev2-fg-muted); font-weight: 400;">（秒，20-600）</small></label>
           <input id="mc-keepalive-int" type="number" name="nat_keepalive_interval" min="20" max="600"
-                 placeholder="留空 = builtin (60)"
+                 placeholder="留空 = 使用出厂值（60）"
                  value="{{if $cur}}{{intPtrVal $cur.NATKeepaliveInterval}}{{end}}">
         </div>
       </div>
@@ -122,7 +126,7 @@
       <div class="form-section">
         <label class="form-label" for="mc-include-all">全局路由（全部流量进 VPN）</label>
         <select id="mc-include-all" name="include_all_networks">
-          <option value="" {{if or (not $cur) (not $cur.IncludeAllNetworks)}}selected{{end}}>— Builtin —</option>
+          <option value="" {{if or (not $cur) (not $cur.IncludeAllNetworks)}}selected{{end}}>— 使用出厂值 —</option>
           <option value="1" {{if and $cur (eq (boolPtrVal $cur.IncludeAllNetworks) "1")}}selected{{end}}>是（推荐，iOS 17+ 默认行为）</option>
           <option value="0" {{if and $cur (eq (boolPtrVal $cur.IncludeAllNetworks) "0")}}selected{{end}}>否（split tunnel，部分流量直连）</option>
         </select>
@@ -131,16 +135,20 @@
       <div class="form-section">
         <label class="form-label" for="mc-exclude-lan">排除局域网（192.168/10/172.16）</label>
         <select id="mc-exclude-lan" name="exclude_local_networks">
-          <option value="" {{if or (not $cur) (not $cur.ExcludeLocalNetworks)}}selected{{end}}>— Builtin —</option>
-          <option value="1" {{if and $cur (eq (boolPtrVal $cur.ExcludeLocalNetworks) "1")}}selected{{end}}>是（保留局域网访问）</option>
+          <option value="" {{if or (not $cur) (not $cur.ExcludeLocalNetworks)}}selected{{end}}>— 使用出厂值 —</option>
+          <option value="1" {{if and $cur (eq (boolPtrVal $cur.ExcludeLocalNetworks) "1")}}selected{{end}}>是</option>
           <option value="0" {{if and $cur (eq (boolPtrVal $cur.ExcludeLocalNetworks) "0")}}selected{{end}}>否</option>
         </select>
+        <p class="form-help" style="color: var(--ikev2-fg-muted); font-size: 0.85em; margin-top: 4px;">
+          注意：「所有流量都走 VPN」开启时，iOS 会接管包括局域网在内的<b>全部</b>流量，
+          本项按 Apple 语义不再产生实际差异。
+        </p>
       </div>
 
       <div class="form-section">
-        <label class="form-label" for="mc-dns">DNS 服务器 <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(每行一个 IP，最多 6 个)</small></label>
+        <label class="form-label" for="mc-dns">DNS 服务器 <small style="color: var(--ikev2-fg-muted); font-weight: 400;">（每行一个 IP，最多 6 个）</small></label>
         <textarea id="mc-dns" name="dns_servers" rows="4"
-                  placeholder="留空 = 用 builtin 出厂&#10;例:&#10;1.1.1.1&#10;8.8.8.8&#10;2606:4700:4700::1111">{{if and $cur $cur.DNSServers}}{{range $cur.DNSServers}}{{.}}
+                  placeholder="留空 = 使用出厂值&#10;例：&#10;1.1.1.1&#10;8.8.8.8&#10;2606:4700:4700::1111">{{if and $cur $cur.DNSServers}}{{range $cur.DNSServers}}{{.}}
 {{end}}{{end}}</textarea>
       </div>
     </div>
@@ -155,11 +163,11 @@
       <div class="form-section">
         <label class="form-label" for="mc-dpd">DPD 心跳速率</label>
         <select id="mc-dpd" name="dead_peer_detection_rate">
-          <option value="" {{if or (not $cur) (eq $cur.DeadPeerDetectionRate "")}}selected{{end}}>— Builtin —</option>
+          <option value="" {{if or (not $cur) (eq $cur.DeadPeerDetectionRate "")}}selected{{end}}>— 使用出厂值 —</option>
           <option value="None" {{if and $cur (eq $cur.DeadPeerDetectionRate "None")}}selected{{end}}>None（不检测）</option>
-          <option value="Low" {{if and $cur (eq $cur.DeadPeerDetectionRate "Low")}}selected{{end}}>Low（30 分钟）</option>
-          <option value="Medium" {{if and $cur (eq $cur.DeadPeerDetectionRate "Medium")}}selected{{end}}>Medium（10 分钟，默认）</option>
-          <option value="High" {{if and $cur (eq $cur.DeadPeerDetectionRate "High")}}selected{{end}}>High（1 分钟）</option>
+          <option value="Low" {{if and $cur (eq $cur.DeadPeerDetectionRate "Low")}}selected{{end}}>Low（30 分钟一次）</option>
+          <option value="Medium" {{if and $cur (eq $cur.DeadPeerDetectionRate "Medium")}}selected{{end}}>Medium（10 分钟一次，默认）</option>
+          <option value="High" {{if and $cur (eq $cur.DeadPeerDetectionRate "High")}}selected{{end}}>High（1 分钟一次）</option>
         </select>
       </div>
     </div>
@@ -183,8 +191,8 @@
   {{end}}
 
   <div class="settings-actions settings-actions-end mt-4">
-    <a href="/" class="btn-secondary">Cancel</a>
-    <button type="submit" class="btn-primary">Save (effective on next user download)</button>
+    <a href="/" class="btn-secondary">取消</a>
+    <button type="submit" class="btn-primary">保存（用户下次下载时生效）</button>
   </div>
 
   </div>{{/* /.settings-form-main */}}
@@ -194,7 +202,7 @@
 <form method="POST" action="/admin/mobileconfig-defaults/clear" class="mt-4">
   <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
   <button type="submit" class="btn-danger"
-          onclick="return confirm('确认恢复 builtin 出厂值?\n所有用户下载的 mobileconfig 将立刻改回默认参数。')">Restore Built-in Defaults</button>
+          data-confirm="确认恢复出厂默认值？&#10;所有用户下载的描述文件将立刻改回默认参数。">恢复出厂默认值</button>
 </form>
 {{end}}
 
@@ -224,24 +232,24 @@
 
 {{if .Current}}
 <article class="card card-pad mt-5">
-  <h4>当前 builtin 出厂值参考（只读）</h4>
-  <p class="text-sm text-muted">留空的字段会回退到这些值。</p>
+  <h4>当前生效的出厂默认值参考（只读）</h4>
+  <p class="text-sm text-muted">本页留空的字段会回退到下面这些值。</p>
   <dl class="kv-block">
-    <dt>UserDefinedName</dt><dd>留空时显示为 "IKEv2 VPN"</dd>
-    <dt>OnDemandProfile</dt><dd>always</dd>
-    <dt>OnDemandEnabled</dt><dd>true</dd>
-    <dt>DisconnectOnSleep</dt><dd>false（锁屏保活）</dd>
-    <dt>NATKeepaliveEnabled</dt><dd>true</dd>
-    <dt>NATKeepaliveInterval</dt><dd>60 秒</dd>
-    <dt>IncludeAllNetworks</dt><dd>true</dd>
-    <dt>ExcludeLocalNetworks</dt><dd>true</dd>
-    <dt>DNSServers</dt><dd>1.1.1.1, 8.8.8.8, 2606:4700:4700::1111, 2001:4860:4860::8888</dd>
-    <dt>DeadPeerDetectionRate</dt><dd>Medium</dd>
+    <dt>连接显示名</dt><dd>留空时显示为 "IKEv2 VPN"</dd>
+    <dt>按需连接场景</dt><dd>始终连接</dd>
+    <dt>启用按需自动连接</dt><dd>启用</dd>
+    <dt>睡眠时断开 VPN</dt><dd>否（锁屏保活）</dd>
+    <dt>NAT 保活</dt><dd>启用</dd>
+    <dt>NAT 保活间隔</dt><dd>60 秒</dd>
+    <dt>全局路由</dt><dd>是（全部流量进 VPN）</dd>
+    <dt>排除局域网</dt><dd>是</dd>
+    <dt>DNS 服务器</dt><dd>1.1.1.1, 8.8.8.8, 2606:4700:4700::1111, 2001:4860:4860::8888</dd>
+    <dt>DPD 心跳速率</dt><dd>Medium（10 分钟一次）</dd>
   </dl>
 </article>
 {{end}}
 
 <p class="mt-4 text-sm text-muted">
-  💡 用户详情页 "⚙️ 高级选项" 里的覆盖项优先级<strong>高于</strong>本页 admin defaults。
-  修改每用户覆盖请到 <a href="/users">用户列表</a>。
+  💡 用户详情页「⚙️ 高级选项」里的覆盖项优先级<strong>高于</strong>本页全局默认。
+  修改单个用户的覆盖项，请到 <a href="/users">用户管理</a> → 点进对应用户详情页。
 </p>

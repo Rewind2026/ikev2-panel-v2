@@ -3,11 +3,11 @@
 */}}
 <header class="page-header">
   <hgroup>
-    <h1>Audit Log</h1>
+    <h1>审计日志</h1>
     <p class="page-sub">最近 {{len .Events}} 条 · SA 生命周期 + 用户/凭证变更 + 管理员操作</p>
   </hgroup>
   <div class="page-actions">
-    <span class="chip muted">{{len .Events}} entries</span>
+    <span class="chip muted">共 {{len .Events}} 条</span>
   </div>
 </header>
 
@@ -21,7 +21,7 @@
       <span class="chip {{auditSeverity .Event}} no-dot">{{.Event}}</span>
     </span>
     <span class="timeline-actor">
-      {{if .Actor}}<code>{{.Actor}}</code>{{else}}<span class="text-muted">system</span>{{end}}
+      {{if .Actor}}<code>{{.Actor}}</code>{{else}}<span class="text-muted">系统</span>{{end}}
     </span>
     <span class="timeline-detail">
       {{$kv := parseAuditDetails .Details}}
@@ -39,13 +39,12 @@
       <line x1="9" y1="13" x2="15" y2="13"/>
       <line x1="9" y1="17" x2="13" y2="17"/>
     </svg>
-    <div class="empty-title">No Logs Yet</div>
-    <div class="empty-hint">用户创建 / 删除、阿里云凭证变更、DDNS 切换、SA 生命周期事件都会自动写入审计。
-       详情见 <a href="/docs/TROUBLESHOOTING.md" target="_blank" rel="noopener">TROUBLESHOOTING</a>。</div>
+    <div class="empty-title">暂无审计记录</div>
+    <div class="empty-hint">用户创建 / 删除、阿里云凭证变更、DDNS 切换、SA 生命周期事件都会自动写入审计。</div>
   </div>
 </article>
 {{end}}
 
 <div class="mt-5">
-  <a href="/" class="btn-secondary">← Back to Home</a>
+  <a href="/" class="btn-secondary">← 返回首页</a>
 </div>

@@ -8,11 +8,11 @@
 //   - 现在:layout.html 里 inline script 必须带 nonce="{{.CSPNonce}}",CSP 才能放行
 //
 // 本测试做的事:
-//   1. 直接读 layout.html 文件源码(避免启 HTTP server)
-//   2. 剥掉 Go template 注释 {{/* ... */}}(不会渲染到响应)
-//   3. 扫所有 <script>...</script> 节点,过滤掉有 src 的(<script src="..."> 不需要 nonce)
-//   4. 对每个 inline <script nonce="..."> 节点,检查是否带 nonce 属性
-//   5. 如果有任何 inline script 缺 nonce — 测试 fail,提示真正根因
+//  1. 直接读 layout.html 文件源码(避免启 HTTP server)
+//  2. 剥掉 Go template 注释 {{/* ... */}}(不会渲染到响应)
+//  3. 扫所有 <script>...</script> 节点,过滤掉有 src 的(<script src="..."> 不需要 nonce)
+//  4. 对每个 inline <script nonce="..."> 节点,检查是否带 nonce 属性
+//  5. 如果有任何 inline script 缺 nonce — 测试 fail,提示真正根因
 package web
 
 import (
@@ -24,10 +24,10 @@ import (
 
 // scriptNode 描述一个扫描到的 <script> 标签。
 type scriptNode struct {
-	body  string // 标签体 (空表示自闭合如 <script src="..."></script> 中空)
-	hasSrc bool
+	body     string // 标签体 (空表示自闭合如 <script src="..."></script> 中空)
+	hasSrc   bool
 	hasNonce bool
-	attrs string // 整个 attrs 字符串,用于调试输出
+	attrs    string // 整个 attrs 字符串,用于调试输出
 }
 
 // scanScriptNodes 返回 HTML 里所有 <script> 标签的扫描结果。

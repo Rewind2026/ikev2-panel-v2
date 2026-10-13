@@ -1,6 +1,6 @@
 // DDNS 面板 API (v2-82 新增)
 //
-// 设计见 docs/design.md §19 + docs/release-notes-v2.82.md
+// 见 docs/architecture.md §1 与 docs/CHANGELOG.md(v2.82)
 //
 // 路由:
 //   - GET  /api/ddns/status        返回 {enabled, last_sync, failed}
@@ -34,7 +34,7 @@ type DDNSStatusResp struct {
 	Family string `json:"family"`
 	// LastSync 最近一次同步结果(v2-84:per-family 独立字段)
 	LastSync struct {
-		Time    string `json:"time"`    // ISO8601 (空 = 从未同步)
+		Time    string `json:"time"` // ISO8601 (空 = 从未同步)
 		Success bool   `json:"success"`
 		Error   string `json:"error,omitempty"`
 		NewIP   string `json:"new_ip,omitempty"`
@@ -102,12 +102,12 @@ func (s *Server) handleDDNSStatus(w http.ResponseWriter, r *http.Request) {
 // 副作用:更新 ddns.conf 状态文件,下次 goroutine tick 生效。
 func (s *Server) handleDDNSToggle(w http.ResponseWriter, r *http.Request) {
 	if s.DDNSSync == nil {
-		http.Error(w, "DDNS not configured", http.StatusNotFound)
+		http.Error(w, "DDNS 未配置，请先在配置卡里启用", http.StatusNotFound)
 		return
 	}
 
 	if err := r.ParseForm(); err != nil {
-		http.Error(w, "bad form", http.StatusBadRequest)
+		http.Error(w, "表单解析失败", http.StatusBadRequest)
 		return
 	}
 
@@ -116,7 +116,7 @@ func (s *Server) handleDDNSToggle(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.DDNSSync.SetEnabled(enabled); err != nil {
 		s.Logger.Error("ddns toggle failed", "err", err, "enabled", enabled)
-		http.Error(w, "failed to update state: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "保存状态失败："+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -130,10 +130,10 @@ func (s *Server) handleDDNSToggle(w http.ResponseWriter, r *http.Request) {
 	if sess != nil && s.FlashStore != nil {
 		var msg, kind string
 		if enabled {
-			msg = "DDNS 已启用,后台将按 period 周期自动同步"
+			msg = "DDNS 已启用，后台将按设定周期自动同步"
 			kind = "success"
 		} else {
-			msg = "DDNS 已关闭,后台同步已停止"
+			msg = "DDNS 已关闭，后台同步已停止"
 			kind = "info"
 		}
 		s.FlashStore.Set(sess.ID, Flash{Message: msg, Kind: kind})
@@ -156,12 +156,12 @@ func (s *Server) handleDDNSToggle(w http.ResponseWriter, r *http.Request) {
 // 副作用:更新 ddns.conf 状态文件,下次 goroutine tick 生效。
 func (s *Server) handleDDNSFamily(w http.ResponseWriter, r *http.Request) {
 	if s.DDNSSync == nil {
-		http.Error(w, "DDNS not configured", http.StatusNotFound)
+		http.Error(w, "DDNS 未配置，请先在配置卡里启用", http.StatusNotFound)
 		return
 	}
 
 	if err := r.ParseForm(); err != nil {
-		http.Error(w, "bad form", http.StatusBadRequest)
+		http.Error(w, "表单解析失败", http.StatusBadRequest)
 		return
 	}
 
@@ -171,13 +171,13 @@ func (s *Server) handleDDNSFamily(w http.ResponseWriter, r *http.Request) {
 	case "v4", "v6", "dual":
 		// ok
 	default:
-		http.Error(w, "invalid family (supported: v4, v6, dual)", http.StatusBadRequest)
+		http.Error(w, "地址族无效（可选值：v4、v6、dual）", http.StatusBadRequest)
 		return
 	}
 
 	if err := s.DDNSSync.SetFamily(family); err != nil {
 		s.Logger.Error("ddns family change failed", "err", err, "family", family)
-		http.Error(w, "failed to update state: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "保存状态失败："+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -227,12 +227,12 @@ func lastDDNSFailedExists() bool {
 // 但没人跑),所以走 /api/ddns/config 也要先校验 Sync 已初始化。
 func (s *Server) handleDDNSConfig(w http.ResponseWriter, r *http.Request) {
 	if s.DDNSSync == nil {
-		http.Error(w, "DDNS not configured", http.StatusNotFound)
+		http.Error(w, "DDNS 未配置，请先在配置卡里启用", http.StatusNotFound)
 		return
 	}
 
 	if err := r.ParseForm(); err != nil {
-		http.Error(w, "bad form", http.StatusBadRequest)
+		http.Error(w, "表单解析失败", http.StatusBadRequest)
 		return
 	}
 
@@ -272,7 +272,7 @@ func (s *Server) handleDDNSConfig(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.DDNSSync.SetConfig(rr, enableA, enableAAAA, periodSec, domain); err != nil {
 		s.Logger.Error("ddns config save failed", "err", err)
-		s.flashConfigError(w, r, "保存失败: "+err.Error())
+		s.flashConfigError(w, r, "保存失败："+err.Error())
 		return
 	}
 
@@ -332,13 +332,13 @@ func isValidDomainForPanel(s string) bool {
 //
 // 行为:
 //   - 非阻塞:Sync.TriggerNow() 立即返回(handler 不等 tick 完成)
-//   - flash 提示"已触发同步,刷新页面查看结果"
+//   - flash 提示"已触发同步，刷新页面查看结果"
 //   - 用户刷新后能在 ddns-card 看到新的 LastSync 时间戳 / V4IP / V6IP
 //
 // 节流:节流照常生效 — 刚同步过就 skip,所以多次点击不会撞 alidns 限流。
 func (s *Server) handleDDNSSyncNow(w http.ResponseWriter, r *http.Request) {
 	if s.DDNSSync == nil {
-		http.Error(w, "DDNS not configured", http.StatusNotFound)
+		http.Error(w, "DDNS 未配置，请先在配置卡里启用", http.StatusNotFound)
 		return
 	}
 
@@ -350,7 +350,7 @@ func (s *Server) handleDDNSSyncNow(w http.ResponseWriter, r *http.Request) {
 	if sess != nil && s.FlashStore != nil {
 		s.FlashStore.Set(sess.ID, Flash{
 			Kind:    "info",
-			Message: "已触发同步,刷新页面查看结果",
+			Message: "已触发同步，刷新页面查看结果",
 		})
 	}
 
@@ -374,7 +374,7 @@ func (s *Server) handleDDNSSyncNow(w http.ResponseWriter, r *http.Request) {
 // 跟 DDNS 同步用的同一套)。不会修改任何记录。
 func (s *Server) handleDDNSFetchRemote(w http.ResponseWriter, r *http.Request) {
 	if s.DDNSSync == nil {
-		http.Error(w, "DDNS not configured", http.StatusNotFound)
+		http.Error(w, "DDNS 未配置，请先在配置卡里启用", http.StatusNotFound)
 		return
 	}
 
@@ -396,7 +396,7 @@ func (s *Server) handleDDNSFetchRemote(w http.ResponseWriter, r *http.Request) {
 		var msg string
 		kind := "success"
 		if snap.Error != "" {
-			msg = fmt.Sprintf("查询阿里云记录失败: %s", snap.Error)
+			msg = fmt.Sprintf("查询阿里云记录失败：%s", snap.Error)
 			kind = "error"
 		} else {
 			parts := []string{}
@@ -423,10 +423,10 @@ func (s *Server) handleDDNSFetchRemote(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		// 序列化为简单 JSON,只暴露 A/AAAA/Error
 		out := struct {
-			OK     bool   `json:"ok"`
-			A      string `json:"a,omitempty"`
-			AAAA   string `json:"aaaa,omitempty"`
-			Error  string `json:"error,omitempty"`
+			OK    bool   `json:"ok"`
+			A     string `json:"a,omitempty"`
+			AAAA  string `json:"aaaa,omitempty"`
+			Error string `json:"error,omitempty"`
 		}{
 			OK:    err == nil,
 			A:     snap.A,
@@ -484,12 +484,12 @@ func validRRChars(s string) bool {
 // 注意:这是**写**操作,RAM 权限需要 alidns:AddDomainRecord(用户配置时已勾)。
 func (s *Server) handleDDNSCreateRecord(w http.ResponseWriter, r *http.Request) {
 	if s.DDNSSync == nil {
-		http.Error(w, "DDNS not configured", http.StatusNotFound)
+		http.Error(w, "DDNS 未配置，请先在配置卡里启用", http.StatusNotFound)
 		return
 	}
 
 	if err := r.ParseForm(); err != nil {
-		http.Error(w, "bad form", http.StatusBadRequest)
+		http.Error(w, "表单解析失败", http.StatusBadRequest)
 		return
 	}
 
@@ -497,11 +497,11 @@ func (s *Server) handleDDNSCreateRecord(w http.ResponseWriter, r *http.Request) 
 	value := strings.TrimSpace(r.PostFormValue("value"))
 
 	if recordType != dns.RecordTypeA && recordType != dns.RecordTypeAAAA {
-		http.Error(w, "record_type 必须是 A 或 AAAA", http.StatusBadRequest)
+		http.Error(w, "记录类型必须是 A 或 AAAA", http.StatusBadRequest)
 		return
 	}
 	if value == "" {
-		http.Error(w, "value 不能为空", http.StatusBadRequest)
+		http.Error(w, "记录值不能为空", http.StatusBadRequest)
 		return
 	}
 
@@ -519,7 +519,7 @@ func (s *Server) handleDDNSCreateRecord(w http.ResponseWriter, r *http.Request) 
 	}
 
 	client := dns.NewAliyunClient(keyID, keySecret)
-	recordID, err := client.AddDomainRecord(domain, rr, recordType, value, 600)
+	recordID, err := client.AddDomainRecord(r.Context(), domain, rr, recordType, value, 600)
 	if err != nil {
 		s.Logger.Error("ddns create record failed", "err", err,
 			"domain", domain, "rr", rr, "record_type", recordType, "value", value)
@@ -531,7 +531,7 @@ func (s *Server) handleDDNSCreateRecord(w http.ResponseWriter, r *http.Request) 
 		if sess != nil && s.FlashStore != nil {
 			s.FlashStore.Set(sess.ID, Flash{
 				Kind:    "error",
-				Message: fmt.Sprintf("创建记录失败: %s", err.Error()),
+				Message: fmt.Sprintf("创建记录失败：%s", err.Error()),
 			})
 		}
 		http.Redirect(w, r, "/", http.StatusFound)
@@ -548,8 +548,8 @@ func (s *Server) handleDDNSCreateRecord(w http.ResponseWriter, r *http.Request) 
 	sess, _ := SessionFrom(r.Context())
 	if sess != nil && s.FlashStore != nil {
 		s.FlashStore.Set(sess.ID, Flash{
-			Kind:    "success",
-			Message: fmt.Sprintf("已在阿里云创建 %s 记录:%s → %s",
+			Kind: "success",
+			Message: fmt.Sprintf("已在阿里云创建 %s 记录：%s → %s",
 				recordType, rr+"."+domain, value),
 		})
 	}

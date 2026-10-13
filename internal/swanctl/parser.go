@@ -1,28 +1,30 @@
 // VICI list-sas 协议解析。
-// 设计见 docs/design.md §3.5 + architecture §11.3 + §18
+// 见 docs/architecture.md §12.4 与 §4.4
 //
 // 协议：list-sas 是 streaming 命令，每次 SA 变化都会推一个 "list-sa" event。
-//   用 CallStreaming(ctx, "list-sas", "list-sa", msg) 拿到 iter.Seq2[*Message, error]，
-//   每个元素就是单个 IKE_SA 的结构化 Message。
+//
+//	用 CallStreaming(ctx, "list-sas", "list-sa", msg) 拿到 iter.Seq2[*Message, error]，
+//	每个元素就是单个 IKE_SA 的结构化 Message。
 //
 // 协议 Message 结构（strongSwan 6.0.1 govici v0.8.1 实测, v2.86-PR12.18 修正）：
-//   {
-//       ikev2-rw: {                          // 顶层 key = connection-name
-//           uniqueid:    "1"
-//           state:       "ESTABLISHED"
-//           local-id:    "1 ikev2.example.com"   // "type id"
-//           remote-id:   "2 alice"
-//           local-addr:  "2001:db8::75[500]"
-//           remote-addr: "2001:db8::63[4500]"
-//           child-sas:   {                     // 再嵌套: key=child name, val=Message
-//               ikev2-rw: {
-//                   bytes-in:  N
-//                   bytes-out: N
-//                   ...
-//               }
-//           }
-//       }
-//   }
+//
+//	{
+//	    ikev2-rw: {                          // 顶层 key = connection-name
+//	        uniqueid:    "1"
+//	        state:       "ESTABLISHED"
+//	        local-id:    "1 ikev2.example.com"   // "type id"
+//	        remote-id:   "2 alice"
+//	        local-host:  "2001:db8::75"    local-port:  500
+//	        remote-host: "2001:db8::63"    remote-port: 4500
+//	        child-sas:   {                     // 再嵌套: key=child name, val=Message
+//	            ikev2-rw: {
+//	                bytes-in:  N
+//	                bytes-out: N
+//	                ...
+//	            }
+//	        }
+//	    }
+//	}
 //
 // 注意:list-sas streaming 顶层 Message 是 connection-name 包裹的结构,
 // 跟 ike-updown 事件的 payload 一样。原 parser 误以为是平铺结构,
@@ -118,25 +120,37 @@ func (m *Manager) ListSAs(ctx context.Context) ([]SA, error) {
 // 这跟 ike-updown 事件的 payload 一样,但跟最初设计注释假设的"顶层就是 SA 字段"
 // 不一致。原实现导致 uniqueid/state/remote-id 全部空,child-sas 也丢了,
 // collector 永远拿不到 RemoteID,用户流量永远不更新。
-func parseSingleSA(m *vici.Message) (SA, error) {
-	// 1) 找到嵌套的 SA Message（遍历顶层 keys,找第一个 *vici.Message）
-	var inner *vici.Message
+// unwrapSA 剥掉 VICI 响应的外层连接名,返回真正的 SA Message。
+//
+// strongSwan 6 的 list-sas 是逐 conn 返回的:{connName: {uniqueid, state, remote-id, ...}}。
+// 老格式(5.x 或未来改回)是扁平的 —— 顶层本身就是 SA 字段,原样返回。
+//
+// 这一步不是洁癖:uniqueid / remote-id 只存在于**内层**。剥不掉这两个字段,
+// Terminate 就找不到对应的 SA,"终止成功"是假的 —— 调用方拿到成功回执,
+// SA 其实还挂着,用户那头表现为"点了断开,过一会儿自己又连上了"。
+func unwrapSA(m *vici.Message) *vici.Message {
+	if m == nil {
+		return nil
+	}
 	for _, k := range m.Keys() {
 		if v, ok := m.Get(k).(*vici.Message); ok {
-			inner = v
-			break
+			return v
 		}
 	}
+	return m
+}
+
+func parseSingleSA(m *vici.Message) (SA, error) {
+	inner := unwrapSA(m)
 	if inner == nil {
-		// 兼容老格式:顶层就是 SA 字段（早期 strongSwan 5.x 或未来可能改回）
-		inner = m
+		return SA{}, fmt.Errorf("vici SA message is nil")
 	}
 
 	sa := SA{
 		UniqueID:   getString(inner, "uniqueid"),
 		IkeState:   getString(inner, "state"),
-		LocalAddr:  getString(inner, "local-addr"),
-		RemoteAddr: getString(inner, "remote-addr"),
+		LocalAddr:  getHostPort(inner, "local"),
+		RemoteAddr: getHostPort(inner, "remote"),
 		RemoteID:   extractID(getString(inner, "remote-id")),
 		LocalID:    extractID(getString(inner, "local-id")),
 	}
@@ -171,6 +185,27 @@ func parseChildSAs(m *vici.Message) map[string]ChildSA {
 		}
 	}
 	return out
+}
+
+// getHostPort 拼 "<prefix>-host" + "<prefix>-port" 成 "host[port]"。
+//
+// strongSwan 6 的 list-sas **不返回** "local-addr"/"remote-addr"，
+// 只有拆开的 host/port 两个 key：
+//
+//	local-host=2408:832e:...:f6cf  local-port=4500
+//	remote-host=2408:832e:...:c1d  remote-port=4500
+//
+// 早先按 "local-addr" 读，字段永远取不到 → SA.LocalAddr/RemoteAddr 恒为空串。
+// 端口用方括号而非冒号，跟 swanctl CLI 自身显示一致（IPv6 不需要额外转义）。
+func getHostPort(m *vici.Message, prefix string) string {
+	host := getString(m, prefix+"-host")
+	if host == "" {
+		return ""
+	}
+	if port := getString(m, prefix+"-port"); port != "" {
+		return host + "[" + port + "]"
+	}
+	return host
 }
 
 // getString 安全取字符串字段。
@@ -216,7 +251,8 @@ func getNumber(m *vici.Message, key string) int64 {
 // extractID 从 "N id" 形式提取最后的 id（VICI local-id / remote-id 格式）。
 //
 // 例："2 alice" → "alice"
-//      "1 ikev2.example.com" → "ikev2.example.com"
+//
+//	"1 ikev2.example.com" → "ikev2.example.com"
 func extractID(v string) string {
 	parts := strings.Fields(v)
 	if len(parts) >= 2 {

@@ -246,7 +246,10 @@ button[type="submit"]:active, button.btn-primary:active, .btn-primary:active{
 }
 
 /* Secondary — ghost outline, subtle */
-button.secondary, .btn-secondary, .btn-secondary:not([class]){
+/* 注:早先这里是 `.btn-secondary, .btn-secondary:not([class])`。
+   `:not([class])` 匹配"没有 class 属性"的元素,而 `.btn-secondary` 本身
+   就要求有 class —— 该分支恒不匹配,是误导性死代码,已删。 */
+button.secondary, .btn-secondary{
   display:inline-flex; align-items:center; justify-content:center;
   padding:0.5rem 0.95rem;
   border-radius:var(--ikev2-radius-pill);
@@ -723,6 +726,28 @@ main#main, .main-area{
 .side-stat-value.brand{ color:var(--ikev2-brand-hover);}
 .side-stat-value .v-num{ font-size:1.0625rem; font-weight:700;}
 
+/* 活跃隧道行 — 侧栏 320px 放不下 3 列表格，改成行内标签的两列布局 */
+.tunnel-row{ flex-direction:column; align-items:stretch; gap:0.35rem; }
+.tunnel-row-head{
+  display:flex; align-items:center; justify-content:space-between;
+  gap:0.6rem; min-width:0;
+}
+.tunnel-user{
+  font-size:0.875rem; font-weight:600; color:var(--ikev2-fg-strong);
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0;
+}
+.tunnel-line{
+  display:flex; align-items:baseline; gap:0.5rem; min-width:0;
+}
+.tunnel-label{
+  flex:0 0 auto; font-size:0.6875rem; letter-spacing:0.10em;
+  color:var(--ikev2-fg-muted);
+}
+.tunnel-addr{
+  font-size:0.75rem; color:var(--ikev2-fg); min-width:0;
+  overflow-wrap:anywhere; padding:0.05em 0.35em;
+}
+
 /* ============================================================================
    12. Timeline (audit + home activity)
    ========================================================================== */
@@ -793,6 +818,10 @@ main#main, .main-area{
   font-family:var(--ikev2-font-mono);
   font-size:0.8125rem;
   line-height:1.7;
+  /* P1-3:卡片本身就是唯一的横向滚动容器。早先这里与内部 pre 的
+     overflow-x:auto 构成嵌套双层滚动 —— 内层 pre 消化掉溢出,
+     外层永远不滚,滚动条浮在 1.25rem 内边距里像"悬空"。
+     见下方 .terminal-card pre 的 overflow 覆盖。 */
   overflow-x:auto;
   margin-bottom:1rem;
   box-shadow:inset 0 0 60px rgba(34,211,238,0.04);
@@ -807,10 +836,43 @@ main#main, .main-area{
   font-size:0.6875rem; font-weight:700;
   letter-spacing:0.10em; text-transform:uppercase;
 }
-.terminal-card pre{ background:transparent; border:0; padding:0; margin:0; color:inherit;}
+/* P1-3:pre 不再自己滚动,统一交给 .terminal-card。
+   overflow 设为 visible 是关键 —— 内层消化溢出会让外层永远不滚。 */
+.terminal-card pre{
+  background:transparent; border:0; padding:0; margin:0; color:inherit;
+  overflow-x:visible;
+}
 .terminal-card pre code{ background:transparent; color:inherit; padding:0; border:0;}
 .terminal-card .term-comment{ color:#475569;}
 .terminal-card .term-prompt{ color:var(--ikev2-brand);}
+
+/* 复制按钮(F1)。早先 .copy-btn 在本文件零定义,导致同一交互在两页外观迥异:
+   user_detail 的"复制命令"是无边框深色小按钮,android 的"复制全部参数"
+   是全宽青色主按钮 —— 同一个动作、两种视觉语言。 */
+.copy-btn{
+  display:inline-flex; align-items:center; justify-content:center;
+  padding:0.35rem 0.75rem;
+  border:1px solid rgba(34,211,238,0.35);
+  border-radius:var(--ikev2-radius-pill);
+  background:rgba(34,211,238,0.10);
+  color:var(--ikev2-brand-hover);
+  font-size:0.75rem; font-weight:600; line-height:1.4;
+  font-family:inherit;
+  cursor:pointer;
+  transition:background .15s ease, border-color .15s ease, color .15s ease;
+  white-space:nowrap;
+}
+.copy-btn:hover:not(:disabled){
+  background:rgba(34,211,238,0.18);
+  border-color:rgba(34,211,238,0.55);
+  color:var(--ikev2-brand-hover);
+}
+.copy-btn:focus-visible{
+  outline:2px solid var(--ikev2-brand);
+  outline-offset:2px;
+}
+.copy-btn:disabled{ opacity:0.6; cursor:default; }
+.copy-btn-block{ display:flex; width:100%; }
 .terminal-card .term-string{ color:#fde68a;}
 
 /* ============================================================================
@@ -929,6 +991,70 @@ main#main, .main-area{
   font-size:0.75rem;
 }
 .banner strong{ font-weight:700;}
+
+/* mc 表单校验失败(P1-1):折叠区展开 + 提示文案 + 非法态高亮 */
+.mc-opts-hint{
+  margin:-0.35rem 0 0.85rem;
+  font-size:0.8125rem;
+}
+
+/* banner 拆出的补充说明(错误详情 / 时间戳等)。
+   banner-body 只承载标题,动态内容单独成段并保持默认转义边界。 */
+.banner-detail{
+  margin:-0.5rem 0 0.85rem;
+  padding-left:2.15rem;
+  font-size:0.8125rem;
+  overflow-wrap:anywhere;
+}
+.banner-detail small{
+  display:block;
+  margin-top:0.2rem;
+  font-size:0.75rem;
+  opacity:0.85;
+}
+/* DDNS 同步失败详情 */
+.ddns-failed-detail{
+  margin:-0.5rem 0 0.85rem;
+  font-size:0.8125rem;
+  overflow-wrap:anywhere;
+}
+.ddns-failed-detail small{
+  display:block;
+  margin-top:0.2rem;
+  font-size:0.75rem;
+  opacity:0.85;
+}
+/* 一次性密码(新建/重置后展示)—— 密码必须在 <code> 里等宽易读,
+   提醒单独一行,与 banner 标题分离。 */
+.one-time-secret{
+  margin:-0.5rem 0 0.9rem;
+  padding:0.65rem 0.85rem;
+  border:1px dashed rgba(245,158,11,0.4);
+  border-radius:var(--ikev2-radius-lg);
+  background:rgba(245,158,11,0.06);
+}
+.one-time-secret code{
+  display:block;
+  font-size:1rem;
+  letter-spacing:0.04em;
+  overflow-wrap:anywhere;
+  user-select:all;
+}
+.one-time-secret small{
+  display:block;
+  margin-top:0.35rem;
+  font-size:0.75rem;
+  color:var(--ikev2-fg-muted);
+}
+/* 删除确认页首段 */
+.delete-confirm-lead{
+  margin:0.75rem 0 1rem;
+  font-size:0.875rem;
+}
+.delete-confirm-lead code{
+  padding:0.05em 0.35em;
+  overflow-wrap:anywhere;
+}
 
 /* success(成功)— 绿 #4ade80 */
 .banner-ok, .banner-success,
@@ -1316,6 +1442,12 @@ main#main, .main-area{
 @media (prefers-reduced-motion: no-preference){
   html{ scroll-behavior:smooth;}
 }
+
+/* 顶栏是 sticky 48px。浏览器锚点跳转和 JS scrollIntoView 默认把目标顶到
+   视口顶端 → 正好藏在顶栏底下。scroll-padding-top 统一留出"顶栏 + 12px
+   呼吸位",原生锚点跳转和 scrollIntoView 都吃这个值,JS 里就不用再手动
+   scrollBy 抵消(手动抵消会和平滑动画打架,锚点最终仍停在顶栏下面)。*/
+html{ scroll-padding-top:calc(var(--ikev2-topbar-h) + 12px);}
 
 .radio-group{
   display:flex; gap:0.5rem; flex-wrap:wrap;
@@ -2000,6 +2132,13 @@ body.login-page main#main{
   color:var(--ikev2-brand);
   border-color:rgba(34,211,238,0.45);
   box-shadow:0 0 0 1px rgba(34,211,238,0.20) inset;
+}
+/* P1-1:校验失败跳回来时标红。必须放在上面 [open] 规则之后,
+   否则 border-color 会被那条青色规则覆盖(同特异性,后写的赢)。 */
+.mobileconfig-options[data-invalid="1"] > summary{
+  color:var(--ikev2-danger);
+  border-color:rgba(248,113,113,0.45);
+  box-shadow:0 0 0 1px rgba(248,113,113,0.18) inset;
 }
 .mobileconfig-options > summary::before{ content:'⚙';}
 .mobileconfig-options form{ margin-top:0.75rem;}

@@ -1,5 +1,5 @@
-﻿// Web 上下文：从请求 context 取 session + admin。
-// 设计见 docs/design.md §3.2
+// Web 上下文：从请求 context 取 session + admin。
+// 见 docs/API.md §1
 package web
 
 import (

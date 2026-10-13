@@ -1,5 +1,5 @@
 // HTTP server + middleware + handler 注册。
-// 设计见 docs/design.md §3 + §7
+// 见 docs/architecture.md §7
 package web
 
 import (
@@ -147,7 +147,7 @@ func New(srv *Server, staticDir string) http.Handler {
 	//   protect       = requireSession（防未登录访问）
 	//   protectPOST   = protect + requireCSRF（防 CSRF 攻击）
 	// GET 路由只用 protect；POST 路由用 protectPOST。
-	// 设计见 docs/design.md §4.1 + §7.3
+	// 见 docs/API.md §1
 	protect := srv.requireSession
 	protectPOST := func(h http.Handler) http.Handler {
 		chained := protect(srv.requireCSRF(h))
@@ -237,7 +237,7 @@ func New(srv *Server, staticDir string) http.Handler {
 	// recover 必须最外层，否则 logging 自身 panic 或 mux panic 会逃逸。
 	// secureHeaders 必须在 logging 之内,这样所有响应(含 panic 500)都有安全 header。
 	// trailingSlashRedirect 在 logging 之内、mux 之外,这样 301 响应也走 secureHeaders。
-	// 设计见 docs/design.md §3（错误处理策略）+ v2-80+ backlog（panic recover）+ v2.86-PR9
+	// 见 docs/architecture.md §7
 	return recoverPanic(srv.Logger)(secureHeaders()(logging(srv.Logger, srv.Metrics)(trailingSlashRedirect(mux))))
 }
 
@@ -390,21 +390,54 @@ func certLERenewStatus(dataDir string) cert.LERenewStatus {
 	return cert.CheckLERenewStatus(certPath)
 }
 
-// normalizePath v2.85-PR8(U04):把 /users/123 收成 /users/{id},避免 metric label cardinality 爆炸。
+// normalizePath 把动态路径段收成占位符,避免 metric label cardinality 爆炸。
 //
-// 规则:匹配数字段(纯整数)→ {id}。其他动态段(用户名、token)保留原样,
-// 因为 handler 端已用 PathValue 把这些归一化(我们的路由只有 {id})。
+// 规则(按段判断):
+//   - 纯数字段              → {id}
+//   - /install/ 后的 base64url token → {token}
+//
+// 为什么必须认 install token:GET /install/{token} 是公开无鉴权路由(server.go),
+// token 是 base64url(32B)=43 字符(installtoken.Generate)。原规则只认纯数字段,
+// 攻击者用任意随机路径反复请求就能让 httpRequests map 无界增长(无认证内存 DoS),
+// 同时一次性凭证明文进 /metrics。
 func normalizePath(p string) string {
 	parts := strings.Split(p, "/")
 	for i, seg := range parts {
 		if seg == "" {
 			continue
 		}
-		if isAllDigits(seg) {
+		switch {
+		case isAllDigits(seg):
 			parts[i] = "{id}"
+		case isInstallToken(seg):
+			parts[i] = "{token}"
 		}
 	}
 	return strings.Join(parts, "/")
+}
+
+// isInstallToken 判断一个路径段是否为 installtoken 生成的凭证形态。
+//
+// 判据:长度 >= 40 且全部字符属于 base64url 无填充字符集(A-Za-z0-9-_)。
+// 取 40 而非精确 43 是留一点余量;因为该判定只影响 metric label,
+// 误判一个超长路径段的代价只是少一个细分 label,可接受;
+// 反向(把真 token 判成非 token)才是要避免的,因为那正是 DoS 的入口。
+func isInstallToken(s string) bool {
+	if len(s) < 40 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z',
+			c >= 'A' && c <= 'Z',
+			c >= '0' && c <= '9',
+			c == '-', c == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func isAllDigits(s string) bool {
@@ -618,13 +651,13 @@ func (s *Server) requireSession(next http.Handler) http.Handler {
 				http.Redirect(w, r, "/login", http.StatusFound)
 				return
 			}
-			http.Error(w, "internal error", http.StatusInternalServerError)
+			http.Error(w, "内部错误，请查看服务日志", http.StatusInternalServerError)
 			return
 		}
 
 		admin, err := s.Store.GetDefaultAdmin(r.Context())
 		if err != nil {
-			http.Error(w, "internal error", http.StatusInternalServerError)
+			http.Error(w, "内部错误，请查看服务日志", http.StatusInternalServerError)
 			return
 		}
 
@@ -640,7 +673,7 @@ func (s *Server) requireSession(next http.Handler) http.Handler {
 //   - 校验方式：与 session.CSRFToken 常量时间比较（防 timing attack）
 //   - 缺失或不匹配：返回 403 Forbidden，不调用 next
 //
-// 设计见 docs/design.md §4.1 + §7.3
+// 见 docs/API.md §1
 //
 // 注意：本中间件必须在 requireSession 之后使用（依赖 session 已写入 ctx）。
 func (s *Server) requireCSRF(next http.Handler) http.Handler {
@@ -648,29 +681,29 @@ func (s *Server) requireCSRF(next http.Handler) http.Handler {
 		sess, ok := SessionFrom(r.Context())
 		if !ok || sess == nil {
 			// requireSession 没跑或 session 无效——这属于编程错误
-			http.Error(w, "internal error: no session in ctx", http.StatusInternalServerError)
+			http.Error(w, "内部错误：会话已失效，请重新登录", http.StatusInternalServerError)
 			return
 		}
 
 		// ParseForm 让 PostFormValue 可用
 		if err := r.ParseForm(); err != nil {
-			http.Error(w, "bad form", http.StatusBadRequest)
+			http.Error(w, "表单解析失败", http.StatusBadRequest)
 			return
 		}
 
 		token := auth.GetCSRFToken(r)
 		if token == "" {
-			http.Error(w, "csrf token missing", http.StatusForbidden)
+			http.Error(w, "CSRF 令牌缺失，请刷新页面后重试", http.StatusForbidden)
 			return
 		}
 		// 常量时间比较（防 timing attack）
 		if subtle.ConstantTimeCompare([]byte(token), []byte(sess.CSRFToken)) != 1 {
-			s.Logger.Warn("csrf token mismatch",
+			s.Logger.Warn("CSRF 校验失败，请刷新页面后重试",
 				"path", r.URL.Path,
 				"remote", r.RemoteAddr,
 				"ua", r.UserAgent(),
 			)
-			http.Error(w, "csrf token mismatch", http.StatusForbidden)
+			http.Error(w, "CSRF 校验失败，请刷新页面后重试", http.StatusForbidden)
 			return
 		}
 		next.ServeHTTP(w, r)

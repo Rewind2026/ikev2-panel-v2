@@ -52,13 +52,13 @@ type mobileconfigDefaultsData struct {
 // v2.86-pr23l:flash 反馈从 query string (?flash=...&error=...) 切到 FlashStore session,
 // 跟 aliyun / ddns / users 等页面一致 ——
 //
-//	- 无 query string(避免密码泄露历史教训,见 flash.go 注释)
-//	- 操作反馈由 banner 就近在表单上方显示
-//	- 错误用 banner-danger(红色),成功用 banner-success(绿色)
+//   - 无 query string(避免密码泄露历史教训,见 flash.go 注释)
+//   - 操作反馈由 banner 就近在表单上方显示
+//   - 错误用 banner-danger(红色),成功用 banner-success(绿色)
 func (s *Server) handleAdminMobileconfigDefaults(w http.ResponseWriter, r *http.Request) {
 	admin, ok := AdminFrom(r.Context())
 	if !ok {
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		http.Error(w, "内部错误，请查看服务日志", http.StatusInternalServerError)
 		return
 	}
 	sess, _ := SessionFrom(r.Context())
@@ -85,14 +85,14 @@ func (s *Server) handleAdminMobileconfigDefaults(w http.ResponseWriter, r *http.
 
 	data := mobileconfigDefaultsData{
 		PageMeta: PageMeta{
-			Page:         "admin_mobileconfig_defaults",
-			Title:        "Mobileconfig 默认值",
-			PageKey:      "admin",
+			Page:          "admin_mobileconfig_defaults",
+			Title:         "描述文件默认值",
+			PageKey:       "admin",
 			AdminUsername: admin.Username,
 			CSRFToken:     csrfTokenOf(sess),
 			Breadcrumb: []Breadcrumb{
 				{Label: "首页", Href: "/"},
-				{Label: "Mobileconfig 默认值", Href: ""},
+				{Label: "描述文件默认值", Href: ""},
 			},
 		},
 		Current:   current,
@@ -122,12 +122,12 @@ func (s *Server) handleAdminMobileconfigDefaults(w http.ResponseWriter, r *http.
 //
 // v2.86-pr23l:反馈从 query string 切到 FlashStore session ——
 //
-//	- 错误 → kind="error"(红色 banner-danger)
-//	- 成功 → kind="success"(绿色 banner-success)
-//	- 写完 flash 后 302 redirect 到无 query string 的页面,GET handler 渲染 banner
+//   - 错误 → kind="error"(红色 banner-danger)
+//   - 成功 → kind="success"(绿色 banner-success)
+//   - 写完 flash 后 302 redirect 到无 query string 的页面,GET handler 渲染 banner
 func (s *Server) handleAdminMobileconfigDefaultsSave(w http.ResponseWriter, r *http.Request) {
 	if s.MobileConfigDefaults == nil {
-		http.Error(w, "mobileconfig defaults store not initialized", http.StatusInternalServerError)
+		http.Error(w, "描述文件默认值存储未初始化", http.StatusInternalServerError)
 		return
 	}
 	if err := r.ParseForm(); err != nil {
@@ -138,13 +138,13 @@ func (s *Server) handleAdminMobileconfigDefaultsSave(w http.ResponseWriter, r *h
 	d, err := parseMobileConfigDefaultsFromForm(&r.Form)
 	if err != nil {
 		s.Logger.Warn("admin: parse mobileconfig defaults", "err", err)
-		s.writeMCDefaultsFlash(w, r, "error", "保存失败: "+err.Error())
+		s.writeMCDefaultsFlash(w, r, "error", "保存失败："+err.Error())
 		return
 	}
 
 	if err := s.MobileConfigDefaults.WriteMobileConfigDefaults(d); err != nil {
 		s.Logger.Warn("admin: write mobileconfig defaults", "err", err)
-		s.writeMCDefaultsFlash(w, r, "error", "保存失败: "+err.Error())
+		s.writeMCDefaultsFlash(w, r, "error", "保存失败："+err.Error())
 		return
 	}
 
@@ -198,12 +198,12 @@ func (s *Server) writeMCDefaultsFlash(w http.ResponseWriter, r *http.Request, ki
 // v2.86-pr23l:跟 save 一致,反馈改走 FlashStore session。
 func (s *Server) handleAdminMobileconfigDefaultsClear(w http.ResponseWriter, r *http.Request) {
 	if s.MobileConfigDefaults == nil {
-		http.Error(w, "mobileconfig defaults store not initialized", http.StatusInternalServerError)
+		http.Error(w, "描述文件默认值存储未初始化", http.StatusInternalServerError)
 		return
 	}
 	if err := s.MobileConfigDefaults.ClearMobileConfigDefaults(); err != nil {
 		s.Logger.Error("admin: clear mobileconfig defaults", "err", err)
-		s.writeMCDefaultsFlash(w, r, "error", "清除失败: "+err.Error())
+		s.writeMCDefaultsFlash(w, r, "error", "清除失败："+err.Error())
 		return
 	}
 	s.writeAudit(r, "admin.mobileconfig_defaults.clear", "")

@@ -8,12 +8,14 @@
 // 设计要点:
 //   - 跟 cert.conf 一样持久化,但**不需要重启容器** —— Go 进程写完 panelstate
 //     后立即调 Manager.UpdatePoolsAndReload,运行期生效
-//   - 副作用:swanctl --load-all 会中断活跃 SA(~500ms),客户端需要重新拨号
+//   - 副作用:swanctl --load-all 会中断活跃 SA(~500ms),客户端需要重新拨号。
+//     改的是 pool 段,只有 --load-all 含 --load-pools,无法更窄
+//     (见 internal/swanctl/loader.go 的 "P1-8 已撤销" 注释块)
 //   - 不需要 audit + mask(IP 段不是凭证)
 //   - clear() 不动 swanctl.conf —— 因为"清除 panelstate"≠"清空 swanctl.conf 段",
 //     要清空 swanctl.conf 必须重新给一对合法值。clear 等价于"重启容器时不再用 panelstate 覆盖"
 //
-// 设计见 docs/design.md §19.6(v2-83 panelstate 基础)+ v2.86-PR13.2 扩展。
+// 见 docs/architecture.md §1（internal/panelstate）。
 package web
 
 import (
@@ -99,15 +101,15 @@ func (s *Server) handleSubnetStatus(w http.ResponseWriter, r *http.Request) {
 //   - swanctl 写入/Reload 失败 → 500 + 错误(此时 panelstate 已写,swanctl 未生效,需要重试)
 func (s *Server) handleSubnetSave(w http.ResponseWriter, r *http.Request) {
 	if s.SubnetConfigStore == nil {
-		http.Error(w, "subnet config store not initialized", http.StatusInternalServerError)
+		http.Error(w, "IP 段配置存储未初始化", http.StatusInternalServerError)
 		return
 	}
 	if s.Swanctl == nil {
-		http.Error(w, "swanctl manager not initialized", http.StatusInternalServerError)
+		http.Error(w, "swanctl 管理器未初始化", http.StatusInternalServerError)
 		return
 	}
 	if err := r.ParseForm(); err != nil {
-		http.Error(w, "bad form", http.StatusBadRequest)
+		http.Error(w, "表单解析失败", http.StatusBadRequest)
 		return
 	}
 
@@ -119,7 +121,7 @@ func (s *Server) handleSubnetSave(w http.ResponseWriter, r *http.Request) {
 	// 1. 校验 + 写 panelstate
 	if err := s.SubnetConfigStore.WriteSubnetConfig(cfg); err != nil {
 		s.Logger.Warn("subnet config save failed", "err", err)
-		http.Error(w, "保存失败: "+err.Error(), http.StatusBadRequest)
+		http.Error(w, "保存失败："+err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -135,7 +137,7 @@ func (s *Server) handleSubnetSave(w http.ResponseWriter, r *http.Request) {
 			"ipv4", cfg.IPv4Subnet,
 			"ipv6", effectiveV6,
 		)
-		http.Error(w, "panelstate 已保存,但 swanctl reload 失败: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "面板已保存，但 swanctl 重载失败："+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -166,7 +168,7 @@ func (s *Server) handleSubnetSave(w http.ResponseWriter, r *http.Request) {
 //     返回 msg 提示用户"重启容器后回 env"。老语义保留,避免 dev 模式 crash。
 func (s *Server) handleSubnetClear(w http.ResponseWriter, r *http.Request) {
 	if s.SubnetConfigStore == nil {
-		http.Error(w, "subnet config store not initialized", http.StatusInternalServerError)
+		http.Error(w, "IP 段配置存储未初始化", http.StatusInternalServerError)
 		return
 	}
 
@@ -177,7 +179,7 @@ func (s *Server) handleSubnetClear(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.SubnetConfigStore.ClearSubnetConfig(); err != nil {
 		s.Logger.Error("subnet config clear failed", "err", err)
-		http.Error(w, "清除失败: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "清除失败："+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	s.Logger.Info("subnet config cleared via panel", "audit", "subnet.clear")
@@ -192,7 +194,7 @@ func (s *Server) handleSubnetClear(w http.ResponseWriter, r *http.Request) {
 				"target_v4", targetV4,
 				"target_v6", targetV6,
 			)
-			http.Error(w, "panelstate 已清除,但 swanctl 回滚失败: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, "面板已清除，但 swanctl 回滚失败："+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		s.Logger.Info("subnet config cleared + swanctl reverted to startup pools",

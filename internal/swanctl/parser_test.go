@@ -6,27 +6,35 @@
 //   - 覆盖：ESTABLISHED SA、CONNECTING SA、多个 child SA、nil 字段
 //
 // 注意：govici v0.8 的 CallStreaming 返回 iter.Seq2[*Message, error]，是流式迭代器。
-//   这里直接测 Message → SA 的转换（不带 list-sa wrapper）。
+//
+//	这里直接测 Message → SA 的转换（不带 list-sa wrapper）。
 package swanctl
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/strongswan/govici/vici"
 )
 
-// makeSAFlat 构造一个老格式 IKE_SA Message（顶层就是 SA 字段）。
+// makeSAFlat 构造一个 IKE_SA Message（顶层就是 SA 字段）。
 // 用于覆盖 parseSingleSA 的 fallback 路径（inner == nil）。
 //
 // children map 的 val 必须是 *vici.Message（govici 协议层要求）。
+//
+// 地址字段名跟 strongSwan 6 实测的 list-sas 一致：只有 -host / -port，
+// 没有 -addr。这里必须用真实 key，否则测试跟生产一起错，测不出问题。
 func makeSAFlat(uniqueid, state, remoteID, remoteAddr string, children map[string]*vici.Message) *vici.Message {
+	host, port := splitHostPort(remoteAddr)
 	m := vici.NewMessage()
 	m.Set("uniqueid", uniqueid)
 	m.Set("state", state)
 	m.Set("local-id", "1 ikev2.example.com")
 	m.Set("remote-id", "2 "+remoteID)
-	m.Set("local-addr", "2001:db8::75[500]")
-	m.Set("remote-addr", remoteAddr)
+	m.Set("local-host", "2001:db8::75")
+	m.Set("local-port", "500")
+	m.Set("remote-host", host)
+	m.Set("remote-port", port)
 
 	// child-sas: 嵌套 Message
 	if len(children) > 0 {
@@ -51,6 +59,16 @@ func makeStreamingSA(connName string, uniqueid, state, remoteID, remoteAddr stri
 	out := vici.NewMessage()
 	out.Set(connName, inner)
 	return out
+}
+
+// splitHostPort 把 "2001:db8::63[4500]" 拆成 ("2001:db8::63", "4500")，
+// 供测试构造 VICI 的 host/port 字段。
+func splitHostPort(addr string) (host, port string) {
+	i := strings.LastIndexByte(addr, '[')
+	if i < 0 || !strings.HasSuffix(addr, "]") {
+		return addr, ""
+	}
+	return addr[:i], addr[i+1 : len(addr)-1]
 }
 
 // makeChild 构造一个 child SA Message。
@@ -88,6 +106,9 @@ func TestParseSingleSA_Established(t *testing.T) {
 	}
 	if sa.RemoteAddr != "2001:db8::63[4500]" {
 		t.Errorf("RemoteAddr: got %q", sa.RemoteAddr)
+	}
+	if sa.LocalAddr != "2001:db8::75[500]" {
+		t.Errorf("LocalAddr: got %q want %q", sa.LocalAddr, "2001:db8::75[500]")
 	}
 	if sa.LocalID != "ikev2.example.com" {
 		t.Errorf("LocalID: got %q", sa.LocalID)
@@ -201,8 +222,29 @@ func TestExtractID(t *testing.T) {
 	}
 }
 
+func TestGetHostPort(t *testing.T) {
+	m := vici.NewMessage()
+	m.Set("remote-host", "2408:832e:882:4a16:fd:ca6d:deb6:c1d")
+	m.Set("remote-port", "4500")
+
+	if got := getHostPort(m, "remote"); got != "2408:832e:882:4a16:fd:ca6d:deb6:c1d[4500]" {
+		t.Errorf("getHostPort with port: got %q", got)
+	}
+
+	// 无 port 时只返回 host
+	m2 := vici.NewMessage()
+	m2.Set("local-host", "10.0.0.1")
+	if got := getHostPort(m2, "local"); got != "10.0.0.1" {
+		t.Errorf("getHostPort without port: got %q", got)
+	}
+
+	// host 缺失时返回空串
+	if got := getHostPort(m, "local"); got != "" {
+		t.Errorf("getHostPort missing host: got %q want empty", got)
+	}
+}
+
 func TestGetNumber(t *testing.T) {
-	// int64 类型（VICI 协议默认）
 	m := vici.NewMessage()
 	m.Set("a", int64(42))
 	if got := getNumber(m, "a"); got != 42 {

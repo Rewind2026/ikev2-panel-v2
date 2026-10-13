@@ -15,7 +15,7 @@
 //   - 跟 cfg.ServerCN 不同步:ServerCN 在 cfg 启动时已固定(handler 看到的
 //     server 字段是 cfg 启动时的值,不在运行时改)
 //
-// 设计见 docs/design.md §19.6(v2-83) + v2.86-PR12.5 扩展。
+// 见 docs/architecture.md §1（internal/panelstate）。
 package web
 
 import (
@@ -106,11 +106,11 @@ func (s *Server) handleCertStatus(w http.ResponseWriter, r *http.Request) {
 //   - 写审计(只记 mode/domain/cn/email,不算敏感凭证)
 func (s *Server) handleCertSave(w http.ResponseWriter, r *http.Request) {
 	if s.CertConfigStore == nil {
-		http.Error(w, "cert config store not initialized", http.StatusInternalServerError)
+		http.Error(w, "证书配置存储未初始化", http.StatusInternalServerError)
 		return
 	}
 	if err := r.ParseForm(); err != nil {
-		http.Error(w, "bad form", http.StatusBadRequest)
+		http.Error(w, "表单解析失败", http.StatusBadRequest)
 		return
 	}
 
@@ -123,7 +123,7 @@ func (s *Server) handleCertSave(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.CertConfigStore.WriteCertConfig(cfg); err != nil {
 		s.Logger.Warn("cert config save failed", "err", err)
-		http.Error(w, "保存失败: "+err.Error(), http.StatusBadRequest)
+		http.Error(w, "保存失败："+err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -147,12 +147,12 @@ func (s *Server) handleCertSave(w http.ResponseWriter, r *http.Request) {
 //   - 重启后 Go 进程从 env 读 CertMode/Domain/CN
 func (s *Server) handleCertClear(w http.ResponseWriter, r *http.Request) {
 	if s.CertConfigStore == nil {
-		http.Error(w, "cert config store not initialized", http.StatusInternalServerError)
+		http.Error(w, "证书配置存储未初始化", http.StatusInternalServerError)
 		return
 	}
 	if err := s.CertConfigStore.ClearCertConfig(); err != nil {
 		s.Logger.Error("cert config clear failed", "err", err)
-		http.Error(w, "清除失败: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "清除失败："+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	s.Logger.Info("cert config cleared via panel")

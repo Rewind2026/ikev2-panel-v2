@@ -1,5 +1,5 @@
 // 客户端配置下载 handler：mobileconfig / sswan / CA cert / 二维码 / 一次性安装 token。
-// 设计见 docs/design.md §7.1 + §10
+// 见 docs/API.md §3
 package web
 
 import (
@@ -70,7 +70,7 @@ func (s *Server) handleUserMobileconfig(w http.ResponseWriter, r *http.Request) 
 
 	serverAddr := s.ServerAddr
 	if serverAddr == "" {
-		http.Error(w, "server address missing", http.StatusInternalServerError)
+		http.Error(w, "服务器地址未配置", http.StatusInternalServerError)
 		return
 	}
 
@@ -98,7 +98,7 @@ func (s *Server) handleUserMobileconfig(w http.ResponseWriter, r *http.Request) 
 	out, err := cert.RenderMobileconfig(u.Username, u.Password, serverAddr, s.ServerCN, caPEM, s.DisplayTimezone, opts)
 	if err != nil {
 		s.Logger.Error("render mobileconfig", "err", err)
-		http.Error(w, "render mobileconfig failed", http.StatusInternalServerError)
+		http.Error(w, "生成描述文件失败", http.StatusInternalServerError)
 		return
 	}
 
@@ -132,12 +132,18 @@ func (s *Server) handleUserMobileconfigQR(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if s.PanelHost == "" {
-		http.Error(w, "panel host missing", http.StatusInternalServerError)
+		http.Error(w, "服务器地址未配置", http.StatusInternalServerError)
 		return
 	}
 
 	// 生成一次性 token（10 分钟 TTL，扫码 + 装配置必须 < 10 分钟完成）
-	token := s.InstallTokens.Issue(id)
+	// v2.86-PR19(B4):Issue 现在返回 error;crypto/rand 失败时写 500 而不是 panic 挂进程。
+	token, err := s.InstallTokens.Issue(id)
+	if err != nil {
+		s.Logger.Error("installtoken issue", "err", err, "user_id", id)
+		http.Error(w, "生成安装令牌失败", http.StatusInternalServerError)
+		return
+	}
 
 	// QR 内容：scheme://panelHost/install/{token}，极短（~70 字节），
 	// 二维码密度正常，手机相机好扫。
@@ -152,13 +158,13 @@ func (s *Server) handleUserMobileconfigQR(w http.ResponseWriter, r *http.Request
 	q, err := qrcode.New(installURL, qrcode.Medium)
 	if err != nil {
 		s.Logger.Error("qr new", "err", err, "url_len", len(installURL))
-		http.Error(w, "qr encode failed", http.StatusInternalServerError)
+		http.Error(w, "生成二维码失败", http.StatusInternalServerError)
 		return
 	}
 	png, err := q.PNG(-8)
 	if err != nil {
 		s.Logger.Error("qr png", "err", err)
-		http.Error(w, "qr encode failed", http.StatusInternalServerError)
+		http.Error(w, "生成二维码失败", http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "image/png")
@@ -193,7 +199,7 @@ func (s *Server) handleInstallByToken(w http.ResponseWriter, r *http.Request) {
 	}
 	serverAddr := s.ServerAddr
 	if serverAddr == "" {
-		http.Error(w, "server address missing", http.StatusInternalServerError)
+		http.Error(w, "服务器地址未配置", http.StatusInternalServerError)
 		return
 	}
 
@@ -208,7 +214,7 @@ func (s *Server) handleInstallByToken(w http.ResponseWriter, r *http.Request) {
 	if u.MobileConfigOpts != "" {
 		if _, err := cert.DecodeMobileConfigOpts(u.MobileConfigOpts); err != nil {
 			s.Logger.Error("install: decode mobileconfig opts", "user_id", userID, "err", err)
-			http.Error(w, "mobileconfig 配置损坏", http.StatusInternalServerError)
+			http.Error(w, "描述文件配置损坏", http.StatusInternalServerError)
 			return
 		}
 	}
@@ -216,7 +222,7 @@ func (s *Server) handleInstallByToken(w http.ResponseWriter, r *http.Request) {
 	out, err := cert.RenderMobileconfig(u.Username, u.Password, serverAddr, s.ServerCN, caPEM, s.DisplayTimezone, opts)
 	if err != nil {
 		s.Logger.Error("install: render mobileconfig", "err", err)
-		http.Error(w, "render mobileconfig failed", http.StatusInternalServerError)
+		http.Error(w, "生成描述文件失败", http.StatusInternalServerError)
 		return
 	}
 
@@ -266,34 +272,56 @@ func (s *Server) handleUserSSwan(w http.ResponseWriter, r *http.Request) {
 
 	serverAddr := s.ServerAddr
 	if serverAddr == "" {
-		http.Error(w, "server address missing", http.StatusInternalServerError)
+		http.Error(w, "服务器地址未配置", http.StatusInternalServerError)
 		return
 	}
 
-	conf := fmt.Sprintf(`# strongSwan IKEv2 客户端配置
-# 用户名: %s
-# 服务端: %s (CN: %s)
+	conf := renderSSwanTemplate(u.Username, s.ServerCN, serverAddr)
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.sswan"`, u.Username))
+	_, _ = w.Write([]byte(conf))
+}
+
+// renderSSwanTemplate 生成 strongSwan 客户端配置(Android app / Linux 共用)。
+//
+// 抽成独立函数而不是内联在 handler 里,是为了让
+// TestSSwanConfig_* 能在不启 HTTP server 的前提下断言渲染结果 ——
+// 这个模板的 Sprintf 格式符与实参数量必须严格配对,而 Go 编译期不检查,
+// 数量错了只会在运行时产出 %!s(MISSING) 之类的垃圾。
+func renderSSwanTemplate(username, serverCN, serverAddr string) string {
+	connID := "ikev2-rw-" + username
+	return fmt.Sprintf(`# strongSwan IKEv2 客户端配置
+# 用户名: %[1]s
+# 服务端: %[3]s (CN: %[2]s)
 #
 # Linux strongSwan 客户端:
-#   1. 写入 /etc/swanctl/conf.d/%s.conf
+#   1. 写入 /etc/swanctl/conf.d/%[1]s.conf
 #   2. swanctl --load-all
-#   3. swanctl -i -c ikev2-rw-%s
+#   3. swanctl -i -c %[4]s
 #
-# Android strongSwan app: 扫码导入配置
+# Android strongSwan app:
+#   strongSwan App → 设置 → 导入配置 → 选本文件(%[1]s.sswan)
+#   导入后手动填写密码(本文件不含密码,secret 留空)。
+#   LE 模式(Lets Encrypt)下**无需**额外装 CA,系统已信任 ISRG Root;
+#   自签模式才需要先把面板 CA 装到系统信任存储。
+#   导入后还要在连接属性里确认 "本地 ID" 已填,%[1]s。
+#
+# iOS / macOS 不走本文件 —— 它们用 .mobileconfig(面板二维码)。
 
 connections {
-    ikev2-rw-%s {
+    %[4]s {
         local {
             auth = eap-mschapv2
-            eap_id = %s
+            eap_id = %[1]s
         }
         remote {
             auth = pubkey
-            id = %s
+            id = %[2]s
         }
-        remote_addrs = %s
+        remote_addrs = %[3]s
         children {
-            ikev2-rw-%s {
+            %[4]s {
                 remote_ts = 0.0.0.0/0, ::/0
                 mode = tunnel
                 esp_proposals = aes256gcm16-sha256, aes128gcm16-sha256
@@ -301,7 +329,18 @@ connections {
         }
         version = 2
         mobike = yes
-        proposals = aes256gcm16-sha256-modp2048, aes128gcm16-sha256-modp2048
+        # v2.86-PR19(A15):对齐服务端 proposals(见 configs/swanctl-ipv6-only.conf)。
+        #
+        # 原来这里只发 modp2048:
+        #     aes256gcm16-sha256-modp2048, aes128gcm16-sha256-modp2048
+        # 服务端虽有 modp2048 兜底(不会协商失败),但客户端**只发一条** proposal
+        # 时,best-of 的结果必然是 modp2048 —— 即每次都落到最弱的 DH 组。
+        # 这与服务端 :66-98 刻意做的"算法去弱"(curve25519 / ecp256 / modp3072
+        # 优先,modp2048 仅兜底)完全背道而驰。
+        #
+        # strongSwan 的 proposals 列表顺序 = 优先级(preferred 在前),服务端会
+        # 挑双方都支持的最强那一条。这里与服务端保持同序即可。
+        proposals = aes256gcm16-sha256-curve25519, aes128gcm16-sha256-curve25519, aes256gcm16-sha256-ecp256, aes128gcm16-sha256-ecp256, aes256gcm16-sha256-modp3072, aes128gcm16-sha256-modp3072, aes256gcm16-sha256-modp2048, aes128gcm16-sha256-modp2048
         send_certreq = yes
         unique = replace
         rekey_time = 24h
@@ -309,18 +348,12 @@ connections {
 }
 
 secrets {
-    eap-%s {
-        id = %s
-        secret = "由用户输入"
+    eap-%[1]s {
+        id = %[1]s
+        secret = ""
     }
 }
-`, u.Username, serverAddr, s.ServerCN, u.Username, u.Username,
-		u.Username, u.Username, s.ServerCN, serverAddr, u.Username,
-		u.Username, u.Username)
-
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.sswan"`, u.Username))
-	_, _ = w.Write([]byte(conf))
+`, username, serverCN, serverAddr, connID)
 }
 
 // handleUserCACert GET /ca.cert.pem
@@ -354,6 +387,9 @@ type androidConfigData struct {
 	CACertPEM  []byte
 	Flash      string
 	Error      string
+	// v2.86-PR19(A15):CertIncludeCA=false 时(LE 模式)页面不该渲染 /ca.cert.pem
+	// 链接 —— 该路由在 LE 模式下返回 404,点了就是死链。
+	CertIncludeCA bool
 }
 
 // handleUserAndroidConfig GET /users/{id}/android
@@ -377,20 +413,21 @@ func (s *Server) handleUserAndroidConfig(w http.ResponseWriter, r *http.Request)
 
 	// v2.86-pr23x 安全修复:不再从 query string 读取 flash。
 	// 旧读法 `r.URL.Query().Get("flash")` 会把任意用户输入灌进 banner 的 .Msg。
-	// docs/audit-2026-09-web.md:239 已确认该参数无 producer(没有任何 redirect
-	// 带 ?flash=),属死代码,故直接移除而非转义。
+	// 该参数无 producer(没有任何 redirect 带 ?flash=),属死代码,故直接移除而非转义。
 	// 需要提示用户时走 POST → FlashStore.Set(见 flashConfigError / 各 handler)。
+	// 参见 docs/architecture.md §12.9「FlashStore:为什么 flash 不走 query string」。
 	flash := ""
 	if s.ServerAddr == "" {
 		flash = "ServerAddr 未配置（容器未设置 IKEV2_SERVER_ADDR_V6/V4 或 IKEV2_DOMAIN）。"
 	}
 
 	s.RenderPage(w, r, http.StatusOK, "android", androidConfigData{
-		PageMeta:   PageMeta{Page: "android", Title: "Android 配置", PageKey: "users", AdminUsername: admin.Username, CSRFToken: csrfTokenOf(sess)},
-		User:       u,
-		ServerAddr: s.ServerAddr,
-		ServerCN:   s.ServerCN,
-		CACertPEM:  s.CACertPEM,
-		Flash:      flash,
+		PageMeta:      PageMeta{Page: "android", Title: "Android 配置", PageKey: "users", AdminUsername: admin.Username, CSRFToken: csrfTokenOf(sess)},
+		User:          u,
+		ServerAddr:    s.ServerAddr,
+		ServerCN:      s.ServerCN,
+		CACertPEM:     s.CACertPEM,
+		Flash:         flash,
+		CertIncludeCA: s.CertIncludeCA,
 	})
 }

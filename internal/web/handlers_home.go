@@ -1,5 +1,5 @@
 // / 首页（M6 完整版）：欢迎 + 用户数 + 在线 SA 列表 + LE 续签告警 + IPv6 变化提示。
-// 设计见 docs/design.md §5.7 + architecture §3
+// 见 docs/architecture.md §3.1
 package web
 
 import (
@@ -121,7 +121,7 @@ type homeData struct {
 func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 	admin, ok := AdminFrom(r.Context())
 	if !ok {
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		http.Error(w, "内部错误，请查看服务日志", http.StatusInternalServerError)
 		return
 	}
 	sess, _ := SessionFrom(r.Context())
@@ -129,7 +129,7 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 	total, err := s.Store.CountUsers(r.Context())
 	if err != nil {
 		s.Logger.Error("count users", "err", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		http.Error(w, "内部错误，请查看服务日志", http.StatusInternalServerError)
 		return
 	}
 
@@ -421,7 +421,7 @@ func loadLEWarning(s *Server) string {
 		// v2.85-PR3 U07 修复:同时提示两个真实日志路径(acme-renew.log 是 acme.sh 输出,
 		// ikev2-renew.log 是 entrypoint 调我们的 renew-cert.sh 时的输出)。
 		// 之前只说 ikev2-renew.log → 用户 grep 找不到 → 误以为问题不存在。
-		return "⚠️ Let's Encrypt 续签失败！最后一次续签失败,面板仍用旧证书运行。" +
+		return "⚠️ Let's Encrypt 续签失败！最后一次续签失败，面板仍用旧证书运行。" +
 			"请检查 /var/log/acme-renew.log（acme.sh 输出）和 /var/log/ikev2-renew.log（renew-cert.sh 输出）"
 	}
 	if cert.ShouldWarn(st.DaysLeft) {

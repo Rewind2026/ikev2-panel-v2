@@ -470,8 +470,8 @@ func TestHome_ActiveSAsCount(t *testing.T) {
 	if !strings.Contains(body, "活跃隧道") {
 		t.Errorf("首页应显示'活跃隧道'区块:\n%s", body)
 	}
-	if !strings.Contains(body, "无活跃连接") && !strings.Contains(body, "No Active Tunnels") {
-		t.Errorf("Swanctl=nil 时应显示'无活跃连接'(中文模板) 或 'No Active Tunnels'(英文模板):\n%s", body)
+	if !strings.Contains(body, "暂无活跃隧道") {
+		t.Errorf("Swanctl=nil 时应显示'暂无活跃隧道'空状态:\n%s", body)
 	}
 }
 

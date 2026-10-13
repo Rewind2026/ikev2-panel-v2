@@ -7,21 +7,21 @@
 //   - Referrer-Policy             strict-origin-when-cross-origin(防 Referrer 泄漏)
 //   - Permissions-Policy          关闭不需要的浏览器 API(geo/camera/mic)
 //   - Content-Security-Policy     nonce-based。script/style 各有针对性策略:
-//                                    script-src 'self' 'nonce-...'   每个请求随机 nonce,
-//                                                              允许 inline <script nonce="...">
-//                                                              (PR12.21 时代 CSP 只 'self',
-//                                                              inline 被静默拒绝,所有交互失灵)
-//                                    style-src  'self' 'unsafe-inline' 模板里有 inline style
-//                                                              (保留旧行为)
+//     script-src 'self' 'nonce-...'   每个请求随机 nonce,
+//     允许 inline <script nonce="...">
+//     (PR12.21 时代 CSP 只 'self',
+//     inline 被静默拒绝,所有交互失灵)
+//     style-src  'self' 'unsafe-inline' 模板里有 inline style
+//     (保留旧行为)
 //   - Cross-Origin-Opener-Policy  same-origin(防 XS-Leaks)
 //
 // CSP 设计权衡:
 //   - default-src 'self'                    只允许本站资源
 //   - script-src 'self' 'nonce-{随机}'      每响应独立 nonce (16B → 22 char base64),
-//                                            inline <script nonce="{{.CSPNonce}}"> 允许,
-//                                            没有 nonce 的 inline 一律拒绝。这是 XSS 防御核心。
-//                                            nonce 由 secureHeaders 生成,通过 r.Context 传给 handler,
-//                                            handler 再注入到 data.PageMeta.CSPNonce 给模板。
+//     inline <script nonce="{{.CSPNonce}}"> 允许,
+//     没有 nonce 的 inline 一律拒绝。这是 XSS 防御核心。
+//     nonce 由 secureHeaders 生成,通过 r.Context 传给 handler,
+//     handler 再注入到 data.PageMeta.CSPNonce 给模板。
 //   - style-src 'self' 'unsafe-inline'      允许内联 style(模板里有)
 //   - img-src 'self' data:                  允许 base64 图(LE cert QR 等)
 //   - frame-ancestors 'none'                防 clickjacking(等同 X-Frame-Options: DENY)

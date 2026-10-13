@@ -3,11 +3,11 @@
 */}}
 <header class="page-header">
   <hgroup>
-    <h1>New User</h1>
+    <h1>新建用户</h1>
     <p class="page-sub">创建一个新的 VPN 用户</p>
   </hgroup>
   <div class="page-actions">
-    <a href="/users" class="btn-secondary">← Back</a>
+    <a href="/users" class="btn-secondary">← 返回列表</a>
   </div>
 </header>
 
@@ -17,23 +17,23 @@
   <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
 
   <div class="form-section">
-    <label class="form-label" for="new-username">Username</label>
+    <label class="form-label" for="new-username">用户名</label>
     <input id="new-username" name="username" value="{{.Username}}" required autofocus
-           placeholder="3-32 chars · [a-z0-9_-]">
+           placeholder="3-32 位 · 仅限小写字母、数字、下划线、连字符">
   </div>
 
   <div class="form-section">
-    <label class="form-label" for="new-note">Note <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(≤200 字)</small></label>
+    <label class="form-label" for="new-note">备注 <small style="color: var(--ikev2-fg-muted); font-weight: 400;">（≤200 字）</small></label>
     <input id="new-note" name="note" value="{{.Note}}" maxlength="200">
   </div>
 
   <div class="form-row">
     <div class="form-section">
-      <label class="form-label" for="new-speed">Speed Limit <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(Mbps, 0 = unlimited)</small></label>
+      <label class="form-label" for="new-speed">限速 <small style="color: var(--ikev2-fg-muted); font-weight: 400;">（Mbps，0 = 不限速）</small></label>
       <input id="new-speed" name="speed_limit_mbps" type="number" min="0" max="1000" value="{{.SpeedLimit}}">
     </div>
     <div class="form-section">
-      <label class="form-label" for="new-expires">Expires <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(YYYY-MM-DD, empty = never)</small></label>
+      <label class="form-label" for="new-expires">有效期 <small style="color: var(--ikev2-fg-muted); font-weight: 400;">（格式 YYYY-MM-DD，留空 = 永不过期）</small></label>
       <input id="new-expires" name="expires_at" type="text" placeholder="2026-12-31" value="{{.ExpiresAt}}">
     </div>
   </div>
@@ -41,12 +41,12 @@
   <div class="form-section">
     <label style="display:flex; align-items:center; gap:0.5rem;">
       <input type="checkbox" name="enabled" value="1" {{if .Enabled}}checked{{end}}>
-      <span style="font-size:0.875rem;">Enabled immediately</span>
+      <span style="font-size:0.875rem;">创建后立即启用</span>
     </label>
   </div>
 
   <div class="settings-actions settings-actions-end">
-    <a href="/users" class="btn-secondary">Cancel</a>
-    <button type="submit" class="btn-primary">Create User (auto 12-char password)</button>
+    <a href="/users" class="btn-secondary">取消</a>
+    <button type="submit" class="btn-primary">创建用户（自动生成 12 位密码）</button>
   </div>
 </form>

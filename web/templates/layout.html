@@ -26,6 +26,13 @@
        template 只引用 URL,读 / 维护 / 替换都直观。 */}}
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg{{assetVersion "/static/favicon.svg"}}">
     <link rel="stylesheet" href="/static/style.css{{assetVersion "/static/style.css"}}">
+    {{/* 关闭浏览器原生滚动恢复:默认 F5/后退会把页面停在上次的位置,
+         管理面板里刷新是为了拿最新状态,不是想接着看那一屏。
+         必须放在 <head> —— 浏览器在 load 阶段做恢复,等到 </body> 的
+         交互脚本再设置就已经晚了。落地位置由 initDetailsPersistence 决定。 */}}
+    <script nonce="{{.CSPNonce}}">
+      if ('scrollRestoration' in history) { history.scrollRestoration = 'manual'; }
+    </script>
     <script src="/static/js/topology.js{{assetVersion "/static/js/topology.js"}}" defer></script>
   </head>
   <body data-page="{{.PageKey}}" {{if eq .PageKey "login"}}class="login-page"{{end}}>
@@ -238,6 +245,20 @@
           });
         }
 
+        // flashBtn 临时替换按钮文案,并在 ms 后还原。
+        //
+        // 注意用 textContent 赋值会**清掉按钮内的子元素**(svg 图标等),
+        // 还原时必须把原 innerHTML 存回来,否则点一次图标就没了。
+        function flashBtn(btn, msg, ms) {
+          var origHTML = btn.innerHTML;
+          btn.textContent = msg;
+          btn.disabled = true;
+          setTimeout(function () {
+            btn.innerHTML = origHTML;
+            btn.disabled = false;
+          }, ms || 1500);
+        }
+
         function initCopyBtn() {
           document.querySelectorAll('.copy-btn').forEach(function (btn) {
             if (btn.__ikev2CopyInit) return;
@@ -253,9 +274,7 @@
               if (!text) return;
               if (navigator.clipboard && navigator.clipboard.writeText) {
                 navigator.clipboard.writeText(text).then(function () {
-                  var orig = btn.textContent;
-                  btn.textContent = '已复制 ✓';
-                  setTimeout(function () { btn.textContent = orig; }, 1500);
+                  flashBtn(btn, '已复制 ✓', 1500);
                 }).catch(function () { fallbackCopy(btn, text); });
               } else {
                 fallbackCopy(btn, text);
@@ -264,16 +283,48 @@
           });
         }
 
+        // fallbackCopy execCommand 降级路径。
+        //
+        // D3 修复:早先这里吞掉异常、忽略 execCommand 的布尔返回值,
+        // 无条件显示"已复制 ✓" —— 复制其实失败,用户却以为密码已在剪贴板。
+        // Android 参数页尤其致命:警告文案让用户"用完清空剪贴板",
+        // 失败却报成功等于让用户放松警惕、反复点复制。
+        //
+        // 现在:检查返回值,失败时如实告知并让用户手动复制。
         function fallbackCopy(btn, text) {
           var t = document.createElement('textarea');
           t.value = text;
+          // 必须定位到视口外且不可见 —— 否则它作为正常流元素插到
+          // document.body 末尾,会撑高页面并把视口顶下去(可见闪动)。
+          t.setAttribute('readonly', '');
+          t.style.position = 'fixed';
+          t.style.top = '0';
+          t.style.left = '0';
+          t.style.width = '1px';
+          t.style.height = '1px';
+          t.style.padding = '0';
+          t.style.border = 'none';
+          t.style.outline = 'none';
+          t.style.boxShadow = 'none';
+          t.style.background = 'transparent';
+          t.style.opacity = '0';
           document.body.appendChild(t);
-          t.select();
-          try { document.execCommand('copy'); } catch (e) {}
+
+          var ok = false;
+          try {
+            t.select();
+            t.setSelectionRange(0, t.value.length);
+            ok = document.execCommand('copy');
+          } catch (e) {
+            ok = false;
+          }
           t.remove();
-          var orig = btn.textContent;
-          btn.textContent = '已复制 ✓';
-          setTimeout(function () { btn.textContent = orig; }, 1500);
+
+          if (ok) {
+            flashBtn(btn, '已复制 ✓', 1500);
+          } else {
+            flashBtn(btn, '复制失败，请手动选中复制', 3000);
+          }
         }
 
         // v2.86-pr21:顶栏 user pill 齿轮下拉 ——
@@ -371,10 +422,10 @@
             // 规则集合:5 条,固定顺序
             var RULES = [
               { id: 'len',     label: '至少 8 位',           test: function (v) { return v.length >= 8; } },
-              { id: 'lower',   label: '包含小写字母 (a-z)',   test: function (v) { return /[a-z]/.test(v); } },
-              { id: 'upper',   label: '包含大写字母 (A-Z)',   test: function (v) { return /[A-Z]/.test(v); } },
-              { id: 'digit',   label: '包含数字 (0-9)',       test: function (v) { return /\d/.test(v); } },
-              { id: 'special', label: '包含特殊字符 (!@#$)',  test: function (v) { return /[!@#$%^&*()_+\-=\[\]{}|;:,.<>?\/`~]/.test(v); } },
+              { id: 'lower',   label: '包含小写字母（a-z）',   test: function (v) { return /[a-z]/.test(v); } },
+              { id: 'upper',   label: '包含大写字母（A-Z）',   test: function (v) { return /[A-Z]/.test(v); } },
+              { id: 'digit',   label: '包含数字（0-9）',       test: function (v) { return /\d/.test(v); } },
+              { id: 'special', label: '包含特殊字符（!@#$）',  test: function (v) { return /[!@#$%^&*()_+\-=\[\]{}|;:,.<>?\/`~]/.test(v); } },
             ];
 
             // 强度档位:0=空,1=弱,2=偏弱,3=中,4=强
@@ -576,31 +627,35 @@
           document.head.appendChild(s);
         }
 
-        // v2.86-pr23h:保持详情卡展开状态 + 自动滚动到 flash banner。
+        // v2.86-pr23h:表单提交后维持详情卡展开状态 + 停留在原滚动位置。
         //
-        // 问题:表单 submit → 302 → 新页面加载,<details id="aliyun-card">
+        // 解决的问题:表单 submit → 302 → 新页面加载,<details id="aliyun-card">
         // 默认折叠、scrollY 重置为 0 → 用户感觉"页面被刷新、卡片被关闭"。
         //
-        // 解决(四件事):
-        //   1) 提交表单前:把当前 open details + scrollY + hash 写到 sessionStorage
-        //   2) 页面加载时:如果 URL 有 #xxx,自动展开对应 <details> 并滚动到它
-        //   3) 页面加载时:如果 .flash-banner(顶部)存在,平滑滚动到它
-        //   4) 页面加载时:如果 .ddns-action-flash(home 内联)存在,
-        //      只展开祖先 details + **恢复之前的 scrollY**,不滚动到 banner
-        //      (内联 flash 就在按钮下方,滚动反而打断操作)
+        // 行为约定(sessionStorage 里的记录全部**一次性消费**,读完即清):
+        //   - 有 hash            → 滚动到该锚点(原生锚点跳转本身就尊重 scroll-padding-top)
+        //   - 提交过表单 + 有滚动位置 → 恢复提交前的 scrollY(按钮都在页面深处,
+        //     提交后跳回顶部等于让用户重新找一遍)
+        //   - 其余情况(刷新 / 点导航进来)→ 停在最顶部
         //
-        // 同时:把 #aliyun-card / #cert-card / #subnet-card 三个已知 ID 加到
-        // sessionStorage,在 submit 后页面加载时自动展开。
+        // 为什么必须一次性消费:这些 key 之前**从来没被删过**。用户只要提交过一次
+        // 表单,SCROLL_KEY 就永久留在 sessionStorage 里,之后每一次加载(包括点
+        // 顶栏导航、浏览器刷新)都会命中 "savedScrollY 优先级最高" 分支,被强行
+        // 滚回那个旧位置 —— 这正是"刷新后不在顶部"的直接原因。
         function initDetailsPersistence() {
-          var KNOWN_IDS = ['aliyun-card', 'cert-card', 'subnet-card'];
           var STORAGE_KEY = 'ikev2-open-details';
           var SCROLL_KEY = 'ikev2-scroll-y';
+
+          // history.scrollRestoration 已在 <head> 里关闭(必须早于浏览器恢复时机)。
 
           // (1) 提交表单前:把当前 open details + scrollY + hash 记到 sessionStorage
           document.querySelectorAll('form').forEach(function (form) {
             if (form.__ikev2PersistInit) return;
             form.__ikev2PersistInit = true;
-            form.addEventListener('submit', function () {
+            form.addEventListener('submit', function (ev) {
+              // submit 被 preventDefault 掉 → 不会发生导航,别记位置。
+              // 否则这份记录会残留到下一次真实跳转,把用户甩到无关的旧位置。
+              if (ev.defaultPrevented) return;
               try {
                 var openIds = [];
                 document.querySelectorAll('details.settings-card[open]').forEach(function (d) {
@@ -618,108 +673,78 @@
 
           // (2)+(3) 页面加载时:hash 优先 → sessionStorage 兜底
           function restore() {
+            // 先把三个 key 一次性读出来并立刻删除 —— 必须在任何 return /
+            // 异常之前都清干净,否则残留记录会被下一次无关的加载消费掉。
+            var storedIds = null;
+            var storedHash = null;
+            var savedScrollY = null;
+            try {
+              var rawIds = sessionStorage.getItem(STORAGE_KEY);
+              if (rawIds) {
+                var parsed = JSON.parse(rawIds);
+                if (Array.isArray(parsed)) storedIds = parsed;
+              }
+              storedHash = sessionStorage.getItem(STORAGE_KEY + ':hash');
+              var rawY = sessionStorage.getItem(SCROLL_KEY);
+              if (rawY != null) {
+                var n = parseInt(rawY, 10);
+                if (!isNaN(n)) savedScrollY = n;
+              }
+            } catch (e) {}
+            // 一次性消费:读完即清。少了这三行,SCROLL_KEY 会永久驻留,
+            // 让"刷新后回到顶部"永远失效。
+            try {
+              sessionStorage.removeItem(STORAGE_KEY);
+              sessionStorage.removeItem(STORAGE_KEY + ':hash');
+              sessionStorage.removeItem(SCROLL_KEY);
+            } catch (e) {}
+
+            // hash 优先;否则用提交表单时记下的卡片 id
             var targetId = null;
             try {
               if (location.hash && location.hash.length > 1) {
                 targetId = location.hash.slice(1);
               }
-              if (!targetId) {
-                var stored = sessionStorage.getItem(STORAGE_KEY);
-                if (stored) {
-                  var ids = JSON.parse(stored);
-                  if (Array.isArray(ids)) {
-                    ids.forEach(function (id) {
-                      var el = document.getElementById(id);
-                      if (el && el.tagName === 'DETAILS') el.open = true;
-                    });
-                    // 第一个 id 作为滚动目标
-                    if (ids.length > 0) targetId = ids[0];
-                  }
-                }
-                var storedHash = sessionStorage.getItem(STORAGE_KEY + ':hash');
-                if (storedHash) {
-                  var hid = storedHash.slice(1);
-                  if (document.getElementById(hid)) targetId = hid;
-                }
-              } else {
-                // hash 直接命中 → 展开对应 details
+              if (!targetId && storedHash) {
+                var hid = storedHash.slice(1);
+                if (document.getElementById(hid)) targetId = hid;
+              }
+              if (!targetId && storedIds && storedIds.length > 0) {
+                targetId = storedIds[0];
+              }
+              // 展开提交前处于打开状态的详情卡(不用全部展开,否则页面过长)
+              if (storedIds) {
+                storedIds.forEach(function (id) {
+                  var el = document.getElementById(id);
+                  if (el && el.tagName === 'DETAILS') el.open = true;
+                });
+              }
+              if (targetId) {
                 var targetEl = document.getElementById(targetId);
                 if (targetEl && targetEl.tagName === 'DETAILS') targetEl.open = true;
               }
             } catch (e) {}
 
-            // v2.86-pr23i:flash 反馈分两类 —
-            //   - .flash-banner(顶部 banner,users/android 等页面用):
-            //     滚动到 banner(让用户看到反馈)
-            //   - .ddns-action-flash(home 页 DDNS 按钮组下方内联):
-            //     不滚动 — 内联在按钮旁,用户视线本来就在那儿,滚动反而打断操作。
-            //     恢复之前的 scrollY(sessionStorage 里存的)。
-            //
-            // 兼容 .flash-banner 是因为其他页面(users / android / user_detail)
-            // 仍用顶部 banner,逻辑不变。
-            //
-            // v2.86-pr23l:savedScrollY 优先级最高(无论有没有 flash)。
-            // 之前逻辑:有 inlineFlash 时才恢复 scrollY;无 flash 时退回到
-            // sessionStorage 里的 targetId(targetId 是上次打开的 details 卡,
-            // 滚动到 start 经常偏离用户原位置几百 px)。改成:scrollY > 0 一律恢复。
-            //
-            // v2.86-pr23l:querySelectorAll 同时匹配 .ddns-action-flash 和
-            // .aliyun-action-flash(两个卡片表单下方的内联 flash),取第一个
-            // (页面同时只会有一个,handler 用不同 slot 区分写入)。
-            var inlineFlash = document.querySelector('.ddns-action-flash, .aliyun-action-flash');
-            var topFlash = document.querySelector('.flash-banner');
-            var savedScrollY = null;
-            try {
-              var raw = sessionStorage.getItem(SCROLL_KEY);
-              if (raw != null) savedScrollY = parseInt(raw, 10);
-            } catch (e) {}
-            var scrollTarget = null;
-            if (savedScrollY != null && savedScrollY > 0) {
-              // 最高优先级:恢复用户原位置(任何情况下,只要有 saved scrollY 就恢复)
-              scrollTarget = { y: savedScrollY, kind: 'restore' };
-              if (inlineFlash) {
-                // 顺便把祖先 details 展开,否则 banner 会被折叠
-                var pd = inlineFlash.closest('details');
-                if (pd) pd.open = true;
-              }
-            } else if (topFlash) {
-              // 顶部 banner:滚动到 banner
-              var parentDetails2 = topFlash.closest('details');
-              if (parentDetails2) parentDetails2.open = true;
-              scrollTarget = topFlash;
-            } else if (targetId) {
-              // 没有 flash 也没有 saved scrollY:回到 hash/sessionStorage 指定的卡片
-              scrollTarget = document.getElementById(targetId);
-            }
+            // 滚动决策:只有"确实刚提交过表单"才恢复位置,其余一律停在顶部。
+            // savedScrollY > 0 已经保证了这一点 —— 它只在 submit 时写入,
+            // 且本次读取后就已清除。纯锚点跳转(targetId)不碰 scrollY,
+            // 交给浏览器原生行为处理。
+            var scrollY = (savedScrollY != null && savedScrollY > 0) ? savedScrollY : null;
 
-            if (scrollTarget) {
-              // 滚动到目标(在 <details> 展开后下一帧)
+            if (scrollY != null) {
+              // <details> 展开会改变文档高度,必须等布局稳定后再定位,
+              // 否则 scrollTo 用的是展开前的坐标 → 落点偏移。
               requestAnimationFrame(function () {
                 try {
-                  if (scrollTarget && scrollTarget.kind === 'restore') {
-                    // 恢复 scrollY(用户之前看的位置)
-                    window.scrollTo(0, scrollTarget.y);
-                  } else {
-                    scrollTarget.scrollIntoView({
-                      behavior: 'smooth',
-                      block: 'start',
-                    });
-                    // 顶部留点呼吸空间(56px topbar)
-                    window.scrollBy({ top: -16, behavior: 'instant' });
-                  }
+                  // 显式 instant:style.css 里 html{scroll-behavior:smooth} 会让
+                  // scrollTo 变成动画,页面加载时出现一段可见的下滑。
+                  window.scrollTo({ top: scrollY, left: 0, behavior: 'instant' });
                 } catch (e) {
-                  // 兜底:不支持 scrollIntoView options
-                  var rect = scrollTarget.getBoundingClientRect ? scrollTarget.getBoundingClientRect() : null;
-                  if (rect) window.scrollTo(0, window.scrollY + rect.top - 80);
+                  window.scrollTo(0, scrollY);
                 }
               });
             }
-
-            // 清理(只生效一次 — 下次用户主动刷新就回到默认折叠)
-            try {
-              sessionStorage.removeItem(STORAGE_KEY);
-              sessionStorage.removeItem(STORAGE_KEY + ':hash');
-            } catch (e) {}
+            // scrollY == null → 不做任何滚动,页面停在最顶部。
           }
 
           // 已知卡片 ID 直接展开(只要 hash 命中 / sessionStorage 里有)
@@ -729,6 +754,52 @@
           } else {
             restore();
           }
+        }
+
+        // initConfirmGuard —破坏性操作的二次确认(P0-2)。
+        //
+        // 为什么不用 onclick="return confirm(...)":
+        //   CSP 是 script-src 'self' 'nonce-...' —— 既无 'unsafe-inline'
+        //   也无 'unsafe-hashes',内联事件处理器会被浏览器直接拒绝
+        //   (控制台报 Refused to execute inline event handler)。
+        //   即"确认"从来没生效过:重置密码点一下就改,停用点一下就踢线。
+        //
+        // 用法(替代 onclick/onsubmit):
+        //   <button data-confirm="确认重置 bob 的密码？">重置密码</button>
+        //   <form data-confirm="确认删除？"> ... </form>
+        //
+        // 走 document 事件委托,元素动态插入/替换也能生效。
+        function initConfirmGuard() {
+          if (document.__ikev2ConfirmInit) return;
+          document.__ikev2ConfirmInit = true;
+
+          // click 阶段:拦截 submit 按钮 / type=button 的危险操作
+          document.addEventListener('click', function (ev) {
+            var el = ev.target;
+            if (!el || !el.closest) return;
+            var msg = el.closest('[data-confirm]');
+            if (!msg) return;
+            // <form data-confirm> 由 submit 阶段处理,这里只管按钮
+            if (msg.tagName === 'FORM') return;
+            var text = msg.getAttribute('data-confirm');
+            if (!text) return;
+            if (!window.confirm(text)) {
+              ev.preventDefault();
+              ev.stopPropagation();
+            }
+          }, true);
+
+          // submit 阶段:拦截 <form data-confirm="...">
+          document.addEventListener('submit', function (ev) {
+            var form = ev.target;
+            if (!form || !form.getAttribute) return;
+            var text = form.getAttribute('data-confirm');
+            if (!text) return;
+            if (!window.confirm(text)) {
+              ev.preventDefault();
+              ev.stopPropagation();
+            }
+          }, true);
         }
 
         function initAll() {
@@ -741,6 +812,7 @@
           initBtnSpinKeyframes();
           initButtonLoading();
           initDetailsPersistence();
+          initConfirmGuard();
         }
 
         // 此 <script> 在 </body> 前直接执行,DOM 已解析,querySelector 立即可用。
@@ -768,6 +840,8 @@
 
   可选参数:
     Msg        string  必填,文本内容(可以是 Go html/template 调用产生的内容,模板不会二次转义)
+    MsgHTML    string  可选,富文本内容。仅限**代码里的字面量**,禁止传变量/用户输入。
+               与 .Msg 二选一;两者同时给时 .MsgHTML 优先。
     Kind       string  success / info / warn / danger / error
     Dismissible bool   是否显示 × 关闭按钮(配 localStorage 持久化)
     DismissKey string  关闭后 localStorage key(供 initDismissable 用)
@@ -801,9 +875,14 @@
     {{/* $iconSvg 是代码常量(仅 4 个固定 SVG),safeHTML 安全。
        .Msg 绝不能走 safeHTML —— 它承载 Flash 消息与 query 参数,
        走 safeHTML 等于关闭 Go 模板的自动转义,构成反射型 XSS。
-       历史事故:2026-10-08 复核确认,?error= 与 ?flash= 均可注入。 */}}
+       历史事故:2026-10-08 复核确认,?error= 与?flash= 均可注入。
+
+       .MsgHTML 同样只能传代码里的字面量。当前 8 处调用方全部是
+       字面量 HTML 拼接(无用户输入直接进 HTML),若将来需要插入变量,
+       必须先用 {{.}} 走默认转义再拼,或在 banner 外用独立元素承载。
+       见 banner_xss_test.go 的回归断言。*/}}
     {{if $iconSvg}}<span class="banner-icon" aria-hidden="true">{{$iconSvg | safeHTML}}</span>{{end}}
-    <div class="banner-body">{{.Msg}}</div>
+    <div class="banner-body">{{if .MsgHTML}}{{.MsgHTML | safeHTML}}{{else}}{{.Msg}}{{end}}</div>
     {{/* v2.86-pr23l:× 由 .dismissable .dismiss::after 的 content 渲染,
        这里不放文字内容,避免和 pseudo 的 × 重叠(双 X 视觉 bug)。 */}}
     {{if .Dismissible}}<button type="button" class="dismiss" aria-label="关闭" title="关闭"></button>{{end}}
@@ -826,7 +905,7 @@
           <path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/>
         </svg>
       </span>
-      <span>Home</span>
+      <span>首页</span>
     </a>
     <a href="/users" data-page-key="users">
       <span class="nav-glyph" aria-hidden="true">
@@ -834,7 +913,7 @@
           <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>
         </svg>
       </span>
-      <span>Users</span>
+      <span>用户</span>
     </a>
     <a href="/audit" data-page-key="audit">
       <span class="nav-glyph" aria-hidden="true">
@@ -842,7 +921,7 @@
           <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="13" y2="17"/>
         </svg>
       </span>
-      <span>Audit</span>
+      <span>审计</span>
     </a>
     <a href="/account" data-page-key="account">
       <span class="nav-glyph" aria-hidden="true">
@@ -850,7 +929,7 @@
           <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>
         </svg>
       </span>
-      <span>Account</span>
+      <span>账号</span>
     </a>
     <a href="/admin/mobileconfig-defaults" data-page-key="admin">
       <span class="nav-glyph" aria-hidden="true">
@@ -859,7 +938,7 @@
           <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
         </svg>
       </span>
-      <span>Config</span>
+      <span>配置</span>
     </a>
   </nav>
 

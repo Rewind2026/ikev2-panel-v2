@@ -15,15 +15,21 @@
    仍走原来的 .flash-banner 路径,本模板只服务于 home。 */}}
 
 {{if .IsDefaultPassword}}
-  {{template "banner" (dict "Kind" "warn" "Msg" (printf "<strong>你仍在使用默认管理员密码</strong> — 出于安全考虑,请尽快修改。<small>详见 <a href=\"/docs/SECURITY.md\" target=\"_blank\" rel=\"noopener\">SECURITY 文档</a>。</small>") "Dismissible" true "DismissKey" "default-password")}}
+  {{template "banner" (dict "Kind" "warn" "MsgHTML" "<strong>你仍在使用默认管理员密码</strong> — 出于安全考虑，请尽快修改。<small><a href=\"/account\">前往账号设置 →</a></small>" "Dismissible" true "DismissKey" "default-password")}}
 {{end}}
 
+{{/* .DDNSLastError 来自阿里云 API 响应(外部可控),.DDNSLastTime 是时间戳。
+   两者都必须走默认转义 —— 不能拼进 MsgHTML,否则等于把外部输入 safeHTML。
+   拆成 banner + 独立 .small 段,结构等价但转义边界清晰。 */}}
 {{if and .DDNSConfigured .DDNSFailed}}
-  {{template "banner" (dict "Kind" "error" "Msg" (printf "<strong>DDNS 同步失败</strong>:%s<small>最近一次同步:%s</small>" .DDNSLastError .DDNSLastTime) "Dismissible" true "DismissKey" "ddns-failed")}}
+  {{template "banner" (dict "Kind" "error" "MsgHTML" "<strong>DDNS 同步失败</strong>" "Dismissible" true "DismissKey" "ddns-failed")}}
+  <div class="ddns-failed-detail text-muted">
+    {{.DDNSLastError}}<small>最近一次同步：{{.DDNSLastTime}}</small>
+  </div>
 {{end}}
 
 {{if not .AliyunConfigured}}
-  {{template "banner" (dict "Kind" "warn" "Msg" "<strong>未配置阿里云凭证</strong> — Let's Encrypt 签发 + DDNS 自动同步都需要 AccessKey。<a href=\"#aliyun-card\">去填写 →</a>" "Dismissible" true "DismissKey" "no-aliyun")}}
+  {{template "banner" (dict "Kind" "warn" "MsgHTML" "<strong>未配置阿里云凭证</strong> — Let's Encrypt 签发 + DDNS 自动同步都需要 AccessKey。<a href=\"#aliyun-card\">去填写 →</a>" "Dismissible" true "DismissKey" "no-aliyun")}}
 {{end}}
 
 {{/*
@@ -63,7 +69,7 @@
       <span class="step-mark">3</span>
       <span>
         放防火墙 UDP 500 / 4500
-        <small>(云服务商安全组 + 主机 firewall，详见 <a href="/docs/TROUBLESHOOTING.md" target="_blank" rel="noopener">TROUBLESHOOTING</a>)</small>
+        <small>（云服务商安全组 + 主机防火墙，两处都要放行）</small>
       </span>
     </li>
   </ol>
@@ -165,9 +171,9 @@
 
     {{/* 配置折叠区 */}}
     <div class="card-head" style="margin-top: 1.5rem; margin-bottom: 0; padding-left: 0; padding-right: 0; border: 0; background: transparent;">
-      <h2 style="font-size: 0.875rem; text-transform: uppercase; letter-spacing: 0.10em;">Config</h2>
+      <h2 style="font-size: 0.875rem; letter-spacing: 0.10em;">配置</h2>
       <div class="card-actions">
-        <a href="/admin/mobileconfig-defaults" class="btn-secondary btn-sm">Mobileconfig 默认 →</a>
+        <a href="/admin/mobileconfig-defaults" class="btn-secondary btn-sm">描述文件默认值 →</a>
       </div>
     </div>
 
@@ -257,9 +263,9 @@
     {{/* 最近审计 */}}
     {{if .RecentEvents}}
     <div class="card-head" style="margin-top: 1.5rem; margin-bottom: 0; padding-left: 0; padding-right: 0; border: 0; background: transparent;">
-      <h2 style="font-size: 0.875rem; text-transform: uppercase; letter-spacing: 0.10em;">Recent Activity</h2>
+      <h2 style="font-size: 0.875rem; letter-spacing: 0.10em;">最近活动</h2>
       <div class="card-actions">
-        <a href="/audit" class="btn-secondary btn-sm">View All →</a>
+        <a href="/audit" class="btn-secondary btn-sm">查看全部 →</a>
       </div>
     </div>
     <div class="timeline">
@@ -283,7 +289,7 @@
   <aside class="dashboard-side">
 
     <div class="card-head" style="padding-left: 0; padding-right: 0; border: 0; background: transparent;">
-      <h2 style="font-size: 0.875rem; text-transform: uppercase; letter-spacing: 0.10em;">System Status</h2>
+      <h2 style="font-size: 0.875rem; letter-spacing: 0.10em;">系统状态</h2>
     </div>
     <div class="side-stats">
       <div class="side-stat">
@@ -312,39 +318,44 @@
 
     {{/* 活跃连接 */}}
     <div class="card-head" style="padding-left: 0; padding-right: 0; border: 0; background: transparent;">
-      <h2 style="font-size: 0.875rem; text-transform: uppercase; letter-spacing: 0.10em;">Active Tunnels ({{.TotalActive}})</h2>
+      <h2 style="font-size: 0.875rem; letter-spacing: 0.10em;">活跃隧道（{{.TotalActive}}）</h2>
       <div class="card-actions">
-        <a href="/users" class="btn-secondary btn-sm">Users</a>
+        <a href="/users" class="btn-secondary btn-sm">用户管理</a>
       </div>
     </div>
     {{if .SAsUnavailable}}
-      <article><p class="text-muted">⚠️ SA 列表暂不可用 (swanctl 响应超时)，刷新重试</p></article>
+      <article><p class="text-muted">⚠️ SA 列表暂不可用（swanctl 响应超时），刷新重试</p></article>
     {{else if .ActiveSAs}}
-    <article class="card-pad" style="padding: 0; background: rgba(255,255,255,0.02); border: 1px solid var(--ikev2-bg-rule); border-radius: var(--ikev2-radius-lg);">
-      <table class="responsive-stack" style="margin: 0;">
-        <thead>
-          <tr><th>用户</th><th>远端</th><th>状态</th></tr>
-        </thead>
-        <tbody>
-        {{range .ActiveSAs}}
-          <tr>
-            <td data-label="用户">{{.RemoteID}}</td>
-            <td data-label="远端"><code>{{.RemoteAddr}}</code></td>
-            <td data-label="状态"><span class="chip ok no-dot">{{.IkeState}}</span></td>
-          </tr>
-        {{end}}
-        </tbody>
-      </table>
-    </article>
+    {{/* 侧栏只有 320px,用 <table> 会触发 Chrome sticky 表头覆盖 tbody 行的渲染 bug
+         (同 users 列表 v2.86 改用 CSS Grid 的原因)。这里用列表行 + 行内标签,
+         既避开 sticky 表头,又保留原表头的字段说明。 */}}
+    <div class="side-stats">
+      {{range .ActiveSAs}}
+      <div class="side-stat tunnel-row">
+        <div class="tunnel-row-head">
+          <span class="tunnel-user">{{if .RemoteID}}{{.RemoteID}}{{else}}未知用户{{end}}</span>
+          <span class="chip ok no-dot">{{if .IkeState}}{{.IkeState}}{{else}}UNKNOWN{{end}}</span>
+        </div>
+        <div class="tunnel-line">
+          <span class="tunnel-label">远端</span>
+          <code class="tunnel-addr">{{if .RemoteAddr}}{{.RemoteAddr}}{{else}}—{{end}}</code>
+        </div>
+        <div class="tunnel-line">
+          <span class="tunnel-label">本地</span>
+          <code class="tunnel-addr">{{if .LocalAddr}}{{.LocalAddr}}{{else}}—{{end}}</code>
+        </div>
+      </div>
+      {{end}}
+    </div>
     {{else}}
     <article>
       <div class="empty-state">
         <svg class="empty-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <path d="M5 12.55a11 11 0 0 1 14.08 0M1.42 9a16 16 0 0 1 21.16 0M8.53 16.11a6 6 0 0 1 6.95 0M12 20h.01"/>
         </svg>
-        <div class="empty-title">No Active Tunnels</div>
+        <div class="empty-title">暂无活跃隧道</div>
         <div class="empty-hint">客户端首次连接三步：扫码下载配置 → 安装描述文件 → 启用 VPN 开关</div>
-        <a href="/users" class="btn-primary" role="button">View Users</a>
+        <a href="/users" class="btn-primary" role="button">前往用户管理</a>
       </div>
     </article>
     {{end}}
@@ -387,24 +398,24 @@
       <div class="radio-group">
         <label>
           <input type="radio" name="cert_mode" value="self-signed" {{if eq .CertMode "self-signed"}}checked{{end}}>
-          <span>自签模式 <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(无需域名)</small></span>
+          <span>自签模式 <small style="color: var(--ikev2-fg-muted); font-weight: 400;">（无需域名）</small></span>
         </label>
         <label>
           <input type="radio" name="cert_mode" value="letsencrypt" {{if eq .CertMode "letsencrypt"}}checked{{end}}>
-          <span>Let's Encrypt <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(需域名 + 阿里云凭证)</small></span>
+          <span>Let's Encrypt <small style="color: var(--ikev2-fg-muted); font-weight: 400;">（需域名 + 阿里云凭证）</small></span>
         </label>
       </div>
     </div>
     <div class="form-section">
-      <label class="form-label" for="cert-domain">域名 (LE 模式必填)</label>
+      <label class="form-label" for="cert-domain">域名（LE 模式必填）</label>
       <input id="cert-domain" type="text" name="domain" placeholder="vpn.example.com" value="{{.CertDomain}}">
     </div>
     <div class="form-section">
-      <label class="form-label" for="cert-cn">Server CN <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(mobileconfig RemoteIdentifier，空 = 用域名)</small></label>
+      <label class="form-label" for="cert-cn">Server CN <small style="color: var(--ikev2-fg-muted); font-weight: 400;">（描述文件里的 RemoteIdentifier，留空 = 用域名）</small></label>
       <input id="cert-cn" type="text" name="server_cn" placeholder="留空 = 用域名" value="{{.CertServerCN}}">
     </div>
     <div class="form-section">
-      <label class="form-label" for="cert-email">ACME 注册邮箱 <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(可选)</small></label>
+      <label class="form-label" for="cert-email">ACME 注册邮箱 <small style="color: var(--ikev2-fg-muted); font-weight: 400;">（可选）</small></label>
       <input id="cert-email" type="email" name="acme_email" placeholder="admin@example.com" value="{{.CertACMEEmail}}">
     </div>
     <p class="banner-warn" style="margin-top: 1rem; font-size: 0.8125rem;">
@@ -461,10 +472,7 @@
     {{if eq .AliyunFlashKind "error"}}{{$bannerKind = "error"}}{{end}}
     {{if eq .AliyunFlashKind "success"}}{{$bannerKind = "success"}}{{end}}
     {{template "banner" (dict "Kind" $bannerKind "Msg" .AliyunFlash "Dismissible" true "DismissKey" "aliyun-flash" "ExtraClass" "aliyun-action-flash")}}
-  {{else}}
-    <!-- DEBUG: AliyunFlash is empty, AliyunFlashKind='{{.AliyunFlashKind}}' -->
   {{end}}
-  <!-- DEBUG2: out of aliyun flash if/else, AliyunFlash='{{.AliyunFlash}}' -->
 
   {{/*
     v2.86-pr23a:DNS 同步块 — 完全替代 PR20 的 family radio。
@@ -478,21 +486,21 @@
 
   <h3 style="margin: 0 0 0.5rem; font-size: 0.95rem;">DNS 同步</h3>
   <p class="text-muted" style="margin: 0 0 1rem; font-size: 0.8125rem;">
-    调用公网 IPv4 检测服务(境内节点:ip.cn / ipip.net 等 fallback) → 拿到对外公网 IP → 推送 → 阿里云 DNS 解析记录。
-    <small>v2.86-pr23l:不再使用本地网卡地址,确保 A 记录对应真实公网出口。</small>
+    调用公网 IPv4 检测服务（境内节点：ip.cn / ipip.net 等备用） → 拿到对外公网 IP → 推送 → 阿里云 DNS 解析记录。
+    <small>取的是真实公网出口地址，不使用服务器本地网卡地址，确保 A 记录指向客户端实际访问到的 IP。</small>
   </p>
 
   {{/* 当前生效的配置(只读,实时) */}}
   {{if .DDNSDomain}}
   <div class="ddns-params" style="margin: 0 0 1rem; font-size: 0.8125rem; line-height: 1.7;">
     <div><strong>同步目标：</strong><code>{{.DDNSDomain}}</code>
-      {{if .DDNSRR}}<small>(RR=<code>{{.DDNSRR}}</code>，主域=<code>{{.DDNSBaseDomain}}</code>)</small>{{end}}
+      {{if .DDNSRR}}<small>（RR=<code>{{.DDNSRR}}</code>，主域=<code>{{.DDNSBaseDomain}}</code>）</small>{{end}}
     </div>
     <div><strong>同步周期：</strong><code>{{.DDNSPeriod}}</code>
-      {{if .DDNSIface}}<small>· 监听接口:<code>{{.DDNSIface}}</code></small>{{end}}
+      {{if .DDNSIface}}<small>· 监听接口：<code>{{.DDNSIface}}</code></small>{{end}}
     </div>
-    <div><strong>IPv4 来源：</strong>公网 IP 检测 API(多家 fallback)
-      <small>(境内可达性优先,失败时自动切换)</small>
+    <div><strong>IPv4 来源：</strong>公网 IP 检测 API（多家备用）
+      <small>（境内可达性优先，失败时自动切换）</small>
     </div>
   </div>
   {{end}}
@@ -504,15 +512,15 @@
        面板现在能改,持久化到 statefile(覆盖 env 启动值)。 */}}
     <div class="form-section">
       <label class="form-label" for="ddns-domain">主域名
-        <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(裸 FQDN,如 example.com,不含 RR 前缀)</small>
+        <small style="color: var(--ikev2-fg-muted); font-weight: 400;">（裸 FQDN，如 example.com，不含 RR 前缀）</small>
       </label>
       <input id="ddns-domain" type="text" name="domain" placeholder="example.com"
              value="{{.DDNSBaseDomain}}"
              pattern="[a-zA-Z0-9.\-]{1,253}" maxlength="253" autocomplete="off">
     </div>
     <div class="form-section">
-      <label class="form-label" for="ddns-rr">主机记录 (RR)
-        <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(空或 @ = 主域本身,例如 vpn = vpn.example.com)</small>
+      <label class="form-label" for="ddns-rr">主机记录（RR）
+        <small style="color: var(--ikev2-fg-muted); font-weight: 400;">（空或 @ = 主域本身，例如 vpn = vpn.example.com）</small>
       </label>
       <input id="ddns-rr" type="text" name="rr" placeholder="vpn" value="{{.DDNSRR}}"
              pattern="[a-zA-Z0-9_\-]{0,63}" maxlength="63" autocomplete="off">
@@ -522,17 +530,17 @@
       <div style="display: flex; flex-direction: column; gap: 0.4rem; margin-top: 0.3rem;">
         <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
           <input type="checkbox" name="enable_a" value="true" {{if .DDNSEnableA}}checked{{end}}>
-          <span>A 记录 (IPv4) <small style="color: var(--ikev2-fg-muted); font-weight: 400;">— 仅 IPv4 服务器</small></span>
+          <span>A 记录（IPv4） <small style="color: var(--ikev2-fg-muted); font-weight: 400;">— 仅 IPv4 服务器</small></span>
         </label>
         <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
           <input type="checkbox" name="enable_aaaa" value="true" {{if .DDNSEnableAAAA}}checked{{end}}>
-          <span>AAAA 记录 (IPv6) <small style="color: var(--ikev2-fg-muted); font-weight: 400;">— 仅 IPv6 服务器 / 双栈 (IPv4+IPv6) 服务器</small></span>
+          <span>AAAA 记录（IPv6） <small style="color: var(--ikev2-fg-muted); font-weight: 400;">— 仅 IPv6 服务器 / 双栈（IPv4+IPv6）服务器</small></span>
         </label>
       </div>
     </div>
     <div class="form-section">
-      <label class="form-label" for="ddns-period">同步周期(秒)
-        <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(10-3600,默认 60)</small>
+      <label class="form-label" for="ddns-period">同步周期（秒）
+        <small style="color: var(--ikev2-fg-muted); font-weight: 400;">（10-3600，默认 60）</small>
       </label>
       <input id="ddns-period" type="number" name="period_seconds" min="10" max="3600"
              value="{{if .DDNSPeriodSeconds}}{{.DDNSPeriodSeconds}}{{else}}60{{end}}">
@@ -544,7 +552,7 @@
        之前统一用"未同步 等待首次 tick"误导用户以为是 bug,实际是 tick 还没跑过。 */}}
     <div class="ddns-status" style="margin: 1rem 0;">
       <div style="font-weight: 600; font-size: 0.875rem; margin-bottom: 0.5rem;">
-        当前状态:
+        当前状态：
         {{if .DDNSFailed}}
           <span class="chip danger no-dot">同步失败</span>
         {{else if and .DDNSReady .DDNSAttempted}}
@@ -631,26 +639,26 @@
         <small style="color: var(--ikev2-fg-muted); font-weight: 400; margin-left: 0.4rem;">{{.DDNSRemoteFetchedAt}} 查询</small>
       </div>
       <div style="padding: 0.55rem 0.7rem; background: rgba(0,0,0,0.25); border-radius: 4px;">
-        <div style="margin-bottom: 0.25rem;">域名:<code>{{.DDNSRemoteDomain}}</code></div>
+        <div style="margin-bottom: 0.25rem;">域名：<code>{{.DDNSRemoteDomain}}</code></div>
         {{if .DDNSEnableA}}
         <div style="margin-bottom: 0.2rem;">
-          A 记录:
+          A 记录：
           {{if .DDNSRemoteA}}
             <code>{{.DDNSRemoteA}}</code>
           {{else}}
             <span class="chip warn no-dot">无记录</span>
-            <small class="text-muted">阿里云上 <code>{{.DDNSDomain}}</code> 没有 A 记录(可点下方"在阿里云创建")</small>
+            <small class="text-muted">阿里云上 <code>{{.DDNSDomain}}</code> 没有 A 记录（可点下方「在阿里云创建」）</small>
           {{end}}
         </div>
         {{end}}
         {{if .DDNSEnableAAAA}}
         <div>
-          AAAA 记录:
+          AAAA 记录：
           {{if .DDNSRemoteAAAA}}
             <code>{{.DDNSRemoteAAAA}}</code>
           {{else}}
             <span class="chip warn no-dot">无记录</span>
-            <small class="text-muted">阿里云上 <code>{{.DDNSDomain}}</code> 没有 AAAA 记录(可点下方"在阿里云创建")</small>
+            <small class="text-muted">阿里云上 <code>{{.DDNSDomain}}</code> 没有 AAAA 记录（可点下方「在阿里云创建」）</small>
           {{end}}
         </div>
         {{end}}
@@ -662,7 +670,10 @@
 
     {{/* v2.86-pr23f:远端查不到 A/AAAA 记录 → 提供 "在阿里云创建" 按钮(独立 form)。
        用户首次配置 DDNS 时,域名下还没建记录 → 阿里云 API 不让你 Update,
-       提示用户"去阿里云控制台手动建"是曲线返工。本捷径直接走 AddDomainRecord。 */}}
+       提示用户"去阿里云控制台手动建"是曲线返工。本捷径直接走 AddDomainRecord。
+
+       v2.86:同步循环本身也会在记录缺失时自动 AddDomainRecord,所以这个按钮的
+       价值是"立刻建、不用等下个同步周期"(以及首次还没探测到 IP 时的兜底)。 */}}
     {{if and .DDNSHasDomain .DDNSHasCreds}}
       {{if and .DDNSEnableA (not .DDNSRemoteA)}}
       {{/* v2.86-pr23h:不嵌 <form>(HTML 不允许 nested form,会 implicit close 外层 form 导致下方按钮失效),
@@ -732,16 +743,16 @@
     <hr style="margin: 1.25rem 0; border: 0; border-top: 1px solid var(--ikev2-border, #2a3142);">
     <div class="banner-warn" style="margin: 0; font-size: 0.8125rem;">
       <div>
-        <strong>DDNS 自动同步未启用</strong>(跟 AccessKey 是两件独立的事)
+        <strong>DDNS 自动同步未启用</strong>（跟 AccessKey 是两件独立的事）
         <p style="margin-top: 0.4rem;">
-          AccessKey 已配好,但 DDNS 同步器要在 <code>docker-compose.yml</code> 里设:
+          AccessKey 已配好，但 DDNS 同步器要在 <code>docker-compose.yml</code> 里设：
         </p>
 <pre style="background: rgba(0,0,0,0.35); padding: 0.6rem 0.8rem; border-radius: 4px; font-size: 0.75rem; margin: 0.4rem 0; overflow-x: auto;">
 environment:
   - IKEV2_DDNS_ENABLED=true        # 启用 DDNS 同步
   - IKEV2_DDNS_DOMAIN=example.com   # 阿里云主域名</pre>
         <p style="margin-top: 0.4rem;">
-          改完 <code>docker compose up -d</code> 重启容器,这个 "DNS 同步" 块就会出现并可配置。
+          改完 <code>docker compose up -d</code> 重启容器，这个「DNS 同步」块就会出现并可配置。
         </p>
       </div>
     </div>
@@ -769,18 +780,18 @@ environment:
   <form method="POST" action="/api/subnet/save">
     <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
     <div class="form-section">
-      <label class="form-label" for="subnet-ipv4">IPv4 段 <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(/24,如 10.13.0.0/24)</small></label>
+      <label class="form-label" for="subnet-ipv4">IPv4 段 <small style="color: var(--ikev2-fg-muted); font-weight: 400;">（/24，如 10.10.0.0/24）</small></label>
       <input id="subnet-ipv4" type="text" name="ipv4_subnet" placeholder="10.10.0.0/24"
              value="{{if .SubnetIPv4}}{{.SubnetIPv4}}{{else if .SubnetCurrentIPv4}}{{.SubnetCurrentIPv4}}{{end}}"
              pattern="[0-9./]+" required>
     </div>
     <div class="form-section">
-      <label class="form-label" for="subnet-ipv6">IPv6 ULA 段 <small style="color: var(--ikev2-fg-muted); font-weight: 400;">(/64,fd00::/8,如 fd00:1::/64)</small></label>
+      <label class="form-label" for="subnet-ipv6">IPv6 ULA 段 <small style="color: var(--ikev2-fg-muted); font-weight: 400;">（/64，fd00::/8 段内，如 fd00:1::/64）</small></label>
       <input id="subnet-ipv6" type="text" name="ipv6_subnet" placeholder="fd00:1::/64"
              value="{{if .SubnetIPv6}}{{.SubnetIPv6}}{{else if .SubnetCurrentIPv6}}{{.SubnetCurrentIPv6}}{{end}}"
              pattern="[0-9a-fA-F:/]+" required>
     </div>
-    <p class="banner-warn" style="margin-top: 1rem; font-size: 0.8125rem;">⚠️ 修改后所有活跃客户端需<strong>重新拨号</strong>才能拿到新 IP 段(约 500ms 短暂中断)</p>
+    <p class="banner-warn" style="margin-top: 1rem; font-size: 0.8125rem;">⚠️ 修改后所有活跃客户端需<strong>重新拨号</strong>才能拿到新 IP 段（约 500ms 短暂中断）</p>
     <div class="settings-actions settings-actions-end">
       {{if .SubnetConfigured}}
         <button type="submit" class="btn-secondary" formaction="/api/subnet/clear">清除面板配置</button>

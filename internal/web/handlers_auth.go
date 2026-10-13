@@ -1,5 +1,5 @@
 // /login / /logout 处理器。
-// 设计见 docs/design.md §3.2 + §7.1
+// 见 docs/API.md §1
 package web
 
 import (
@@ -13,7 +13,7 @@ import (
 
 // loginPageData 登录页模板数据。
 type loginPageData struct {
-	PageMeta        // P1-B
+	PageMeta          // P1-B
 	Error      string // 用户名/密码错误时回显
 	Username   string // 表单回显（避免重复输入）
 	Host       string // v2.86-PR18:展示给用户的服务地址(host:port),帮用户确认面板实例
@@ -37,7 +37,7 @@ func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 		host = r.Host // fallback 到请求 host,admin 可看到当前访问的 url
 	}
 	s.RenderPage(w, r, http.StatusOK, "login", loginPageData{
-		PageMeta: PageMeta{Page: "login", PageKey: "login", Title: "登录"},
+		PageMeta:   PageMeta{Page: "login", PageKey: "login", Title: "登录"},
 		Host:       host,
 		Version:    s.Version,
 		SessionTTL: s.SessionTTL.String(), // "24h" 等
@@ -48,7 +48,7 @@ func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 // v2.86-PR9:失败时调用 auth.RecordLoginFail 累加 rate limit,成功清零。
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
-		http.Error(w, "bad form", http.StatusBadRequest)
+		http.Error(w, "表单解析失败", http.StatusBadRequest)
 		return
 	}
 	username := r.PostFormValue("username")
@@ -70,7 +70,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.Logger.Error("get admin", "err", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		http.Error(w, "内部错误，请查看服务日志", http.StatusInternalServerError)
 		return
 	}
 
@@ -95,13 +95,13 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	sessID, err := auth.GenerateSessionID()
 	if err != nil {
 		s.Logger.Error("generate session id", "err", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		http.Error(w, "内部错误，请查看服务日志", http.StatusInternalServerError)
 		return
 	}
 	csrfToken, err := auth.GenerateCSRFToken()
 	if err != nil {
 		s.Logger.Error("generate csrf", "err", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		http.Error(w, "内部错误，请查看服务日志", http.StatusInternalServerError)
 		return
 	}
 	now := time.Now()
@@ -114,7 +114,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.Store.CreateSession(r.Context(), sess); err != nil {
 		s.Logger.Error("create session", "err", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		http.Error(w, "内部错误，请查看服务日志", http.StatusInternalServerError)
 		return
 	}
 
@@ -144,7 +144,7 @@ func (s *Server) renderLoginError(w http.ResponseWriter, r *http.Request, userna
 		host = r.Host
 	}
 	s.RenderPage(w, r, http.StatusUnauthorized, "login", loginPageData{
-		PageMeta: PageMeta{Page: "login", PageKey: "login", Title: "登录"},
+		PageMeta:   PageMeta{Page: "login", PageKey: "login", Title: "登录"},
 		Error:      msg,
 		Username:   username,
 		Host:       host,
