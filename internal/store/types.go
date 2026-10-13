@@ -23,7 +23,7 @@ import "time"
 type User struct {
 	ID               int64
 	Username         string
-	Password         string // 明文（v2 妥协项，见 design §4.3）
+	Password         string // 明文（EAP-MSCHAPv2 取舍，见 docs/architecture.md §5.1）
 	Enabled          bool
 	Note             string
 	SpeedLimitMbps   int   // 0 = 不限速

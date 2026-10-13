@@ -281,8 +281,28 @@ func main() {
 		os.Exit(1)
 	}
 
-	// ---------- ServerCN 兜底（LE 模式用域名） ----------
-	if cfg.CertMode == "letsencrypt" && cfg.Domain != "" && cfg.ServerCN == "" {
+	// ---------- ServerCN 兜底（LE 模式用域名）----------
+	//
+	// v2.86-PR19(A11):LE 模式下 ServerCN 必须**无条件**等于 Domain。
+	//
+	// 原写法只在 cfg.ServerCN == "" 时兜底,但 cert.conf 里 server_cn 通常是空串,
+	// 而 entrypoint §-1 的覆盖赋值 `[ -n "$cn_conf" ] && IKEV2_SERVER_CN="$cn_conf"`
+	// 在空串时**不执行**,于是 IKEV2_SERVER_CN 保留 compose 里的默认值
+	// vpn.example.com → cfg.ServerCN 非空 → 兜底不触发。
+	//
+	// 实机故障(192.168.50.63, LE + iOS 17):
+	//   ServerCN = vpn.example.com  → RenderMobileconfig 写进 profile:
+	//     <key>ServerCertificateCommonName</key><string>vpn.example.com</string>
+	//   而服务端证书 CN = vpn.rewind2023.cn。
+	//   iOS 拿 ServerCertificateCommonName 去匹配证书 CN/SAN,不匹配就静默放弃,
+	//   客户端只给一句 "an unexpected error occurred",charon.log 里连 IKE_AUTH 都看不到
+	//   (卡在 peer config 匹配:"local[vpn.example.com] vs remote[rewind] no match")。
+	//
+	// 社区与 Apple 文档一致:remoteIdentifier / ServerCertificateCommonName
+	// **必须**匹配服务端证书的 CN 或 SAN,否则协商直接失败。
+	// LE 签发时证书 CN 强制等于 domain,所以这里无条件覆盖是正确的 ——
+	// LE 模式下 ServerCN 本来就没有"与 domain 不同"的合法场景。
+	if cfg.CertMode == "letsencrypt" && cfg.Domain != "" {
 		cfg.ServerCN = cfg.Domain
 	}
 
@@ -467,12 +487,14 @@ func main() {
 				}
 				return c.KeyID, c.KeySecret, true
 			},
-			Domain:         cfg.AliyunDomain,
-			RR:             cfg.AliyunRR,
-			Iface:          os.Getenv("IKEV2_OUT_IF"),
-			Period:         ddnsPeriod,
-			Throttle:       60 * time.Second,
-			StateFile:      "/etc/ikev2/ddns.conf",
+			Domain:   cfg.AliyunDomain,
+			RR:       cfg.AliyunRR,
+			Iface:    os.Getenv("IKEV2_OUT_IF"),
+			Period:   ddnsPeriod,
+			Throttle: 60 * time.Second,
+			// v2.86-pr24(B6):默认路径在 /data 命名卷内。老默认 /etc/ikev2/ddns.conf
+			// 没挂载,容器重建就丢 —— 面板上配的 DDNS 开关/RR/节流时间戳会全回默认。
+			StateFile:      ddns.DefaultStateFile,
 			LastFailedFile: "/data/le/LAST_DDNS_FAILED",
 			Logger:         logger,
 		})

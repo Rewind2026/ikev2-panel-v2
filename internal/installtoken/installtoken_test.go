@@ -1,4 +1,4 @@
-﻿package installtoken
+package installtoken
 
 import (
 	"errors"
@@ -7,10 +7,20 @@ import (
 	"time"
 )
 
+// mustIssue 是测试 helper：v2.86-PR19(B4) 后 Issue 返回 error,测试只关心成功路径。
+func mustIssue(t *testing.T, s *Store, userID int64) string {
+	t.Helper()
+	tok, err := s.Issue(userID)
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	return tok
+}
+
 // TestIssue_Consume_Basic 验证：发 token → 消费 → 拿到 userID
 func TestIssue_Consume_Basic(t *testing.T) {
 	s := New(time.Minute)
-	tok := s.Issue(42)
+	tok := mustIssue(t, s, 42)
 
 	got, err := s.Consume(tok)
 	if err != nil {
@@ -24,7 +34,7 @@ func TestIssue_Consume_Basic(t *testing.T) {
 // TestConsume_OneTime 验证：同一个 token 第二次消费返回 ErrNotFound
 func TestConsume_OneTime(t *testing.T) {
 	s := New(time.Minute)
-	tok := s.Issue(1)
+	tok := mustIssue(t, s, 1)
 
 	if _, err := s.Consume(tok); err != nil {
 		t.Fatalf("first consume: %v", err)
@@ -40,7 +50,7 @@ func TestConsume_Expired(t *testing.T) {
 	s := New(time.Minute)
 	s.now = func() time.Time { return now }
 
-	tok := s.Issue(7)
+	tok := mustIssue(t, s, 7)
 
 	// 时间快进 2 分钟，token 已过期
 	s.now = func() time.Time { return now.Add(2 * time.Minute) }
@@ -63,7 +73,7 @@ func TestToken_Uniqueness(t *testing.T) {
 	s := New(time.Minute)
 	seen := make(map[string]bool, 100)
 	for i := 0; i < 100; i++ {
-		tok := s.Issue(int64(i))
+		tok := mustIssue(t, s, int64(i))
 		if seen[tok] {
 			t.Fatalf("duplicate token at i=%d: %s", i, tok)
 		}
@@ -74,7 +84,7 @@ func TestToken_Uniqueness(t *testing.T) {
 // TestToken_Format 验证：token 是 base64url（URL safe），可直接放进 URL path
 func TestToken_Format(t *testing.T) {
 	s := New(time.Minute)
-	tok := s.Issue(1)
+	tok := mustIssue(t, s, 1)
 
 	// 32 字节 → base64url 不带 padding = 43 字符
 	if len(tok) != 43 {
@@ -95,9 +105,9 @@ func TestSweep_RemovesExpired(t *testing.T) {
 	s := New(time.Minute)
 	s.now = func() time.Time { return now }
 
-	old1 := s.Issue(1)
-	old2 := s.Issue(2)
-	fresh := s.Issue(3)
+	old1 := mustIssue(t, s, 1)
+	old2 := mustIssue(t, s, 2)
+	fresh := mustIssue(t, s, 3)
 
 	// 时间快进 2 分钟，old1/old2 过期，fresh 也过期（同一时间发放）
 	// 但 fresh 也会被 Sweep 清掉 —— 这里验证"过期的全清"
@@ -118,7 +128,7 @@ func TestSweep_RemovesExpired(t *testing.T) {
 // TestSweep_KeepsFresh 验证：Sweep 不清未过期的
 func TestSweep_KeepsFresh(t *testing.T) {
 	s := New(time.Minute)
-	tok := s.Issue(1)
+	tok := mustIssue(t, s, 1)
 
 	// 时间只过 30 秒，还在 TTL 内
 	now := time.Now()
@@ -148,7 +158,7 @@ func TestConcurrent_IssueConsume(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			tok := s.Issue(int64(i))
+			tok := mustIssue(t, s, int64(i))
 			if _, err := s.Consume(tok); err != nil {
 				t.Errorf("goroutine %d consume: %v", i, err)
 			}

@@ -91,7 +91,7 @@ func TestAudit_TimestampZero(t *testing.T) {
 	}
 }
 
-// TestAudit_DefaultActor 验证 actor 为空字符串时也写成功(not null + default '').
+// TestAudit_DefaultActor 验证 actor 为空字符串时也写成功(not null + default ”).
 func TestAudit_DefaultActor(t *testing.T) {
 	dir := t.TempDir()
 	s, err := Open(context.Background(), dir)

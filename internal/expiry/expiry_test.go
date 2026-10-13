@@ -1,4 +1,4 @@
-﻿package expiry
+package expiry
 
 import (
 	"context"

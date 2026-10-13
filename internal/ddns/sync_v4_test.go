@@ -2,6 +2,7 @@
 package ddns
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"os"
@@ -17,17 +18,17 @@ func newTestSync(t *testing.T, mods ...func(*Config)) *Sync {
 	t.Helper()
 	tmp := t.TempDir()
 	cfg := Config{
-		Enabled:             true,
-		Family:              "dual",
-		AliyunAccessKeyID:   "ak",
+		Enabled:               true,
+		Family:                "dual",
+		AliyunAccessKeyID:     "ak",
 		AliyunAccessKeySecret: "sk",
-		Domain:              "example.com",
-		RR:                  "vpn",
-		Period:              100 * time.Millisecond,
-		Throttle:            0, // 默认不节流,具体 case 自行覆盖
-		LastFailedFile:      filepath.Join(tmp, "FAILED"),
-		StateFile:           filepath.Join(tmp, "state"),
-		Logger:              slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		Domain:                "example.com",
+		RR:                    "vpn",
+		Period:                100 * time.Millisecond,
+		Throttle:              0, // 默认不节流,具体 case 自行覆盖
+		LastFailedFile:        filepath.Join(tmp, "FAILED"),
+		StateFile:             filepath.Join(tmp, "state"),
+		Logger:                slog.New(slog.NewTextHandler(os.Stderr, nil)),
 	}
 	for _, m := range mods {
 		m(&cfg)
@@ -198,7 +199,8 @@ func TestSync_MigrateLegacyFalseFile(t *testing.T) {
 // TestSync_LastSyncStructuredV4 dual 模式下 LastSync 拆分 v4/v6 字段。
 //
 // 场景:dual + v4 探测成功(凭证无效 → upsert 失败,这是预期路径) +
-//      v6 探测失败(返回 error)。
+//
+//	v6 探测失败(返回 error)。
 //
 // 验证:
 //   - V4IP 填了(探测到的 IP,即便 upsert 失败)
@@ -215,7 +217,7 @@ func TestSync_LastSyncStructuredV4(t *testing.T) {
 		return "1.2.3.4", nil
 	})
 
-	s.tick(s.snapshot())
+	s.tick(context.Background(), s.snapshot())
 
 	snap := s.LastSyncSnapshot()
 	if snap.V4IP != "1.2.3.4" {
@@ -253,7 +255,7 @@ func TestSync_ConcurrentUpsertBothCalled(t *testing.T) {
 		return "1.2.3.4", nil
 	})
 
-	s.tick(s.snapshot())
+	s.tick(context.Background(), s.snapshot())
 
 	if v6DetectCalled.Load() != 1 {
 		t.Errorf("v6 detect should be called once, got %d", v6DetectCalled.Load())
@@ -280,7 +282,7 @@ func TestSync_V4OnlyMode(t *testing.T) {
 		return "1.2.3.4", nil
 	})
 
-	s.tick(s.snapshot())
+	s.tick(context.Background(), s.snapshot())
 
 	if v6DetectCalled.Load() != 0 {
 		t.Errorf("v6 detect should NOT be called when family=v4, got %d", v6DetectCalled.Load())

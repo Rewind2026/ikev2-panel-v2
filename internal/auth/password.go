@@ -1,5 +1,5 @@
 // 管理员密码：随机生成 + bcrypt 哈希校验。
-// 设计见 docs/design.md §4.1
+// 见 docs/architecture.md §4.7
 package auth
 
 import (
@@ -29,14 +29,14 @@ const bcryptCost = 12
 //   - 看起来清楚(避免手抄出错)
 //   - 12 位 = 32^12 ≈ 1.15e18 组合,强Swan 暴力破解实际不可行
 //
-// 注意：v2 用户密码**明文存库**（design §4.3 妥协项），
+// 注意：用户密码**明文存库**（EAP-MSCHAPv2 取舍），见 docs/architecture.md §4.7。
 // 所以这里的密码是"VPN 用户的 EAP 密码"，不是管理员密码。
 func GeneratePassword(length int) (string, error) {
 	if length < 6 || length > 64 {
 		return "", fmt.Errorf("password length must be in [6, 64], got %d", length)
 	}
 	const alphabet = "abcdefghijkmnpqrstuvwxyz23456789" // 24 字母 + 8 数字 = 32 字符
-	const n = byte(len(alphabet))                      // n = 32
+	const n = byte(len(alphabet))                       // n = 32
 
 	// rejection sampling: 只接受 < n 的字节,避免 mod 偏。
 	// n=32 能整除 256,所以 `b < n` 等价于取字节低 5 bit 后判 < 32,

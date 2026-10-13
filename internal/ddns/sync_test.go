@@ -1,14 +1,15 @@
 // DDNS 同步器单元测试(v2-82)。
 //
 // 测重点(测试不实际调阿里云 API):
-//   1. 开关关闭时,任何 tick 都不调 detectV6 也不调 alidns
-//   2. 凭证缺失时,enabled=true 也静默 skip
-//   3. 节流:连续两次 tick(在 Throttle 窗口内),第二次跳过
-//   4. state file 读写
-//   5. SetEnabled 切换后 IsEnabled 跟着变
+//  1. 开关关闭时,任何 tick 都不调 detectV6 也不调 alidns
+//  2. 凭证缺失时,enabled=true 也静默 skip
+//  3. 节流:连续两次 tick(在 Throttle 窗口内),第二次跳过
+//  4. state file 读写
+//  5. SetEnabled 切换后 IsEnabled 跟着变
 package ddns
 
 import (
+	"context"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -29,21 +30,21 @@ func TestSync_DisabledSkipsAllLogic(t *testing.T) {
 
 	tmp := t.TempDir()
 	s := NewSync(Config{
-		Enabled:             false,
-		AliyunAccessKeyID:   "ak",
+		Enabled:               false,
+		AliyunAccessKeyID:     "ak",
 		AliyunAccessKeySecret: "sk",
-		Domain:              "example.com",
-		RR:                  "vpn",
-		Period:              100 * time.Millisecond,
-		Throttle:            0, // 不节流
-		LastFailedFile:      filepath.Join(tmp, "FAILED"),
-		StateFile:           filepath.Join(tmp, "state"),
-		Logger:              slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		Domain:                "example.com",
+		RR:                    "vpn",
+		Period:                100 * time.Millisecond,
+		Throttle:              0, // 不节流
+		LastFailedFile:        filepath.Join(tmp, "FAILED"),
+		StateFile:             filepath.Join(tmp, "state"),
+		Logger:                slog.New(slog.NewTextHandler(os.Stderr, nil)),
 	})
 	s.SetDetectV6(mockDetect)
 
 	// 模拟一次 tick
-	s.tick(s.snapshot())
+	s.tick(context.Background(), s.snapshot())
 
 	if detectCalled.Load() != 0 {
 		t.Errorf("detectV6 should NOT be called when enabled=false, got %d calls", detectCalled.Load())
@@ -63,18 +64,18 @@ func TestSync_MissingCredentials(t *testing.T) {
 
 	tmp := t.TempDir()
 	s := NewSync(Config{
-		Enabled:             true,
-		AliyunAccessKeyID:   "", // ← 空
+		Enabled:               true,
+		AliyunAccessKeyID:     "", // ← 空
 		AliyunAccessKeySecret: "",
-		Domain:              "example.com",
-		RR:                  "vpn",
-		LastFailedFile:      filepath.Join(tmp, "FAILED"),
-		StateFile:           filepath.Join(tmp, "state"),
-		Logger:              slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		Domain:                "example.com",
+		RR:                    "vpn",
+		LastFailedFile:        filepath.Join(tmp, "FAILED"),
+		StateFile:             filepath.Join(tmp, "state"),
+		Logger:                slog.New(slog.NewTextHandler(os.Stderr, nil)),
 	})
 	s.SetDetectV6(mockDetect)
 
-	s.tick(s.snapshot())
+	s.tick(context.Background(), s.snapshot())
 
 	if detectCalled.Load() != 0 {
 		t.Errorf("detectV6 should NOT be called when credentials missing, got %d calls", detectCalled.Load())
@@ -94,25 +95,25 @@ func TestSync_Throttle(t *testing.T) {
 
 	tmp := t.TempDir()
 	s := NewSync(Config{
-		Enabled:             true,
-		AliyunAccessKeyID:   "ak",
+		Enabled:               true,
+		AliyunAccessKeyID:     "ak",
 		AliyunAccessKeySecret: "sk",
-		Domain:              "example.com",
-		RR:                  "vpn",
-		Throttle:            10 * time.Second, // ← 长节流
-		LastFailedFile:      filepath.Join(tmp, "FAILED"),
-		StateFile:           filepath.Join(tmp, "state"),
-		Logger:              slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		Domain:                "example.com",
+		RR:                    "vpn",
+		Throttle:              10 * time.Second, // ← 长节流
+		LastFailedFile:        filepath.Join(tmp, "FAILED"),
+		StateFile:             filepath.Join(tmp, "state"),
+		Logger:                slog.New(slog.NewTextHandler(os.Stderr, nil)),
 	})
 	s.SetDetectV6(mockDetect)
 
 	// 第一次:会探测(虽然会因为无法解析真实 API 而走 recordFailure 路径,
 	// 但节流窗口外,先看探测次数)
-	s.tick(s.snapshot())
+	s.tick(context.Background(), s.snapshot())
 	first := detectCalled.Load()
 
 	// 第二次:节流窗口内,不应该探测
-	s.tick(s.snapshot())
+	s.tick(context.Background(), s.snapshot())
 	second := detectCalled.Load()
 
 	if first != 1 {
@@ -175,9 +176,9 @@ func TestSync_StateFile_Roundtrip(t *testing.T) {
 func TestSync_SetEnabled(t *testing.T) {
 	tmp := t.TempDir()
 	s := NewSync(Config{
-		Enabled:  false,
+		Enabled:   false,
 		StateFile: filepath.Join(tmp, "state"),
-		Logger:   slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		Logger:    slog.New(slog.NewTextHandler(os.Stderr, nil)),
 	})
 	if s.IsEnabled() {
 		t.Error("initial enabled should be false")
@@ -214,8 +215,10 @@ func TestSync_Defaults(t *testing.T) {
 	if s.cfg.LastFailedFile != "/data/le/LAST_DDNS_FAILED" {
 		t.Errorf("default LastFailedFile = %q", s.cfg.LastFailedFile)
 	}
-	if s.cfg.StateFile != "/etc/ikev2/ddns.conf" {
-		t.Errorf("default StateFile = %q", s.cfg.StateFile)
+	// v2.86-pr24(B6):默认路径从容器可写层挪进 /data 命名卷。
+	// /etc/ikev2 没挂载,写在那边的东西 docker compose down 就没了。
+	if s.cfg.StateFile != DefaultStateFile {
+		t.Errorf("default StateFile = %q, want %q", s.cfg.StateFile, DefaultStateFile)
 	}
 	if s.cfg.RR != "@" {
 		t.Errorf("default RR = %q, want @", s.cfg.RR)

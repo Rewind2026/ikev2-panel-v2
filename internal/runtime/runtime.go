@@ -37,8 +37,8 @@ type Runtime struct {
 // Merge 合并 env 配置和 panelstate 文件,返回最终 Runtime。
 //
 // 合并规则(高 → 低优先级):
-//   1. panelstate 文件(/data/panel-state/cert.conf + aliyun.creds)
-//   2. env(IKEV2_*)
+//  1. panelstate 文件(/data/panel-state/cert.conf + aliyun.creds)
+//  2. env(IKEV2_*)
 //
 // 跟 v2 之前 config.Load() 的合并策略保持完全一致(审查报告要求不改外部行为)。
 // 唯一区别:现在 panelstate 读盘只发生一次,不在 config.Load 内部重复实例化。

@@ -1,6 +1,6 @@
 // DDNS 同步后台 goroutine(v2-82 新增,v2-84 改造 family-aware)。
 //
-// 背景(设计见 docs/design.md §19):
+// 背景(见 docs/architecture.md §1):
 //   - 用户 VPS 的公网 IPv4 / IPv6 是动态分配的(SLAAC / PPPoE 重拨)
 //   - 域名 vpn.example.com 的 A / AAAA 记录如果不跟着变,客户端就连不上
 //   - 证书本身跟 IP 无关(SAN 只放域名,DNS-01 签发),所以不需要重新签
@@ -18,7 +18,7 @@
 //   - IKEV2_DDNS_ENABLED=true   启用(运行时可由面板 UI 关)
 //   - IKEV2_DDNS_ENABLED=false  禁用
 //   - IKEV2_DDNS_FAMILY=v4|v6|dual 同步哪些 family(默认 dual)
-//   - 状态文件 /etc/ikev2/ddns.conf 记录运行时开关(优先级高于 env,INI-style)
+//   - 状态文件 DefaultStateFile(/data/panel-state/ddns-runtime.conf)记录运行时开关(优先级高于 env,INI-style)
 //
 // 节流:per-type(独立 A / AAAA 节流窗口),60 秒内最多同步一次/类型
 //
@@ -88,7 +88,7 @@ type Config struct {
 	Throttle time.Duration
 	// LastFailedFile 失败标志文件路径(/data/le/LAST_DDNS_FAILED)
 	LastFailedFile string
-	// StateFile 运行时开关文件(/etc/ikev2/ddns.conf,不存在时回退到 env)
+	// StateFile 运行时开关文件(默认 DefaultStateFile,不存在时回退到 env)
 	// v2-84:INI-style key=value,自动迁移 v2-83 裸 true/false
 	StateFile string
 	// Logger
@@ -193,7 +193,7 @@ func NewSync(cfg Config) *Sync {
 		cfg.LastFailedFile = "/data/le/LAST_DDNS_FAILED"
 	}
 	if cfg.StateFile == "" {
-		cfg.StateFile = "/etc/ikev2/ddns.conf"
+		cfg.StateFile = DefaultStateFile
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
@@ -227,11 +227,15 @@ func NewSync(cfg Config) *Sync {
 		triggerCh: make(chan struct{}, 1),
 	}
 
-	// v2-84 状态文件读取(兼容 v2-83 老格式 + INI 自动迁移)
+	// v2.84 状态文件读取(兼容 v2-83 老格式 + INI 自动迁移)
 	//
 	// 优先级:状态文件(若存在) > env 启动值
 	// 注意:状态文件不存在时回退到 env cfg.Enabled,不能简单覆盖为 false。
 	defaultFamily := cfg.Family
+	// v2.86-pr24(B6):老部署的状态文件在容器可写层(/etc/ikev2/ddns.conf),
+	// 容器重建就没了。先搬进卷内的新路径,再读 —— 否则升级后读的是空路径,
+	// 用户配的 DDNS 开关 / RR / 节流时间戳全回默认。
+	migrateLegacyStateFile(s.cfg.StateFile, legacyStateFile, s.cfg.Logger)
 	migrateStateFileIfNeeded(s.cfg.StateFile, defaultFamily, s.cfg.Logger)
 	if _, err := os.Stat(s.cfg.StateFile); err == nil {
 		if rec, readErr := parseStateFile(s.cfg.StateFile, defaultFamily); readErr == nil {
@@ -442,7 +446,7 @@ func (s *Sync) FetchRemote(ctx context.Context) (RemoteSnapshot, error) {
 
 	// A 记录查询(只查用户启用的 family;没启用的 record_type 不查)
 	if s.EnableA() {
-		rec, err := client.FindRecord(domain, rr, dns.RecordTypeA)
+		rec, err := client.FindRecord(ctx, domain, rr, dns.RecordTypeA)
 		if err != nil {
 			snap.Error = fmt.Sprintf("A 查询失败: %v", err)
 		} else if rec != nil {
@@ -451,7 +455,7 @@ func (s *Sync) FetchRemote(ctx context.Context) (RemoteSnapshot, error) {
 	}
 
 	if s.EnableAAAA() {
-		rec, err := client.FindRecord(domain, rr, dns.RecordTypeAAAA)
+		rec, err := client.FindRecord(ctx, domain, rr, dns.RecordTypeAAAA)
 		if err != nil {
 			prev := snap.Error
 			if prev != "" {
@@ -566,7 +570,7 @@ func (s *Sync) SetConfig(rr string, enableA, enableAAAA bool, periodSeconds int,
 	rec := s.snapshotStateRecord()
 	s.mu.Unlock()
 
-	// 持久化到 /etc/ikev2/ddns.conf(INI-style,跟 SetEnabled/SetFamily 走同 path)
+	// 持久化到 cfg.StateFile(INI-style,跟 SetEnabled/SetFamily 走同 path)
 	if err := writeStateFile(s.cfg.StateFile, rec); err != nil {
 		return fmt.Errorf("write state file: %w", err)
 	}
@@ -663,7 +667,7 @@ func (s *Sync) snapshot() Config {
 //
 // 行为:
 //  1. 立即跑一次(确保状态正确)
-//  2. 每 Period 跑一次
+//  2. 每 Period 跑一次(周期每轮重读,面板改完下一轮生效,无需重启)
 //  3. 探测到 IP 变 → 节流判断 → 调 alidns → 重试 3 次 → 写 LastSync
 //
 // 并发约定:每轮循环开始时取一次配置快照,本轮 tick 全程只用该快照,
@@ -691,16 +695,19 @@ func (s *Sync) Run(ctx context.Context) error {
 
 	// 启动时立即跑一次(如果 enabled)
 	if cfg.Enabled {
-		s.tick(cfg)
+		s.tick(ctx, cfg)
 	}
 
 	period := cfg.Period
 	if period <= 0 {
-		// 防御:非正周期会让 time.NewTicker panic。
+		// 防御:非正周期会让 time.NewTimer(0) 立即响 → 热循环打爆 CPU。
 		period = defaultPeriod
 	}
-	ticker := time.NewTicker(period)
-	defer ticker.Stop()
+	// 用一次性 Timer 而非 Ticker:Ticker 的周期在 NewTicker 时就固定死了,
+	// 面板改 Period 只改内存、循环还按老周期 fire,必须重启容器才生效。
+	// 每轮跑完重新 arm 一次并重读周期 → 面板改完下一轮即生效。
+	timer := time.NewTimer(period)
+	defer timer.Stop()
 
 	for {
 		select {
@@ -712,15 +719,28 @@ func (s *Sync) Run(ctx context.Context) error {
 			return nil
 		case <-s.triggerCh:
 			// v2.86-pr23a:面板 "手动同步一次" 按钮触发的立即 tick。
-			// 不等 ticker 周期,直接跑(节流照常生效,刚同步过就跳过)。
-			s.tick(s.snapshot())
-		case <-ticker.C:
-			s.tick(s.snapshot())
+			// 不等周期,直接跑(节流照常生效,刚同步过就跳过)。
+			//
+			// 这里**刻意不 Reset timer**:手动同步不能推迟计划同步,
+			// 否则用户狂点"手动同步"会把定时同步一直往后推,DDNS 永远不同步。
+			s.tick(ctx, s.snapshot())
+		case <-timer.C:
+			s.tick(ctx, s.snapshot())
+			// 重读周期再 arm:面板在本轮 tick 期间改的 Period 从下一轮生效。
+			next := s.snapshot().Period
+			if next <= 0 {
+				// 非正周期(理论上 SetConfig 已 clamp)→ 沿用上一个有效周期,
+				// 既不停摆也不 Reset(0) 打满 CPU。
+				next = period
+			} else {
+				period = next
+			}
+			timer.Reset(next)
 		}
 	}
 }
 
-// Stop 通知 Run 退出(下一轮 ticker 时退出)。
+// Stop 通知 Run 退出(下一轮周期到点时退出)。
 //
 // v2.85-PR6 (Q1-02):用 sync.Once 代替 select default,语义更干净。
 //   - 多次调用 Stop() 不 panic
@@ -761,7 +781,7 @@ func (s *Sync) setLastSyncAndPersist(cfg Config, rt string, t time.Time) {
 // 并发约定(v2.86-pr23x 修复 data race):
 // cfg 由调用方(Run)从 snapshot() 取得,本函数全程只用这份值类型副本,
 // 不触碰 s.cfg。面板热改配置(SetConfig 等)因此不会与本轮同步产生 race。
-func (s *Sync) tick(cfg Config) {
+func (s *Sync) tick(ctx context.Context, cfg Config) {
 	if !cfg.Enabled {
 		return
 	}
@@ -855,7 +875,7 @@ func (s *Sync) tick(cfg Config) {
 		s.setLastSyncAndPersist(cfg, rt, now)
 
 		// upsert(FindRecord → 比对 → UpdateRecordValue retry)
-		oldIP, upsertErr := s.upsertRecord(cfg, client, rt, ip)
+		oldIP, upsertErr := s.upsertRecord(ctx, cfg, client, rt, ip)
 		results <- result{recordType: rt, oldIP: oldIP, newIP: ip, err: upsertErr}
 	}
 
@@ -886,13 +906,17 @@ func (s *Sync) tick(cfg Config) {
 	anyAttempted := false
 	for r := range results {
 		anyAttempted = true
+		// err==nil 即本轮成功。upsertRecord 没有"静默跳过"分支:记录不存在时
+		// 它会自己 AddDomainRecord 建好(成功),创建失败则如实返回 error。
+		// 早先只看 newIP(恒为探测到的公网 IP,永远非空)会把"没有记录"报成成功,
+		// UI 显示同步成功但域名永远解析不了。
 		switch r.recordType {
 		case dns.RecordTypeAAAA:
 			ls.V6IP = r.newIP
 			ls.V6Attempted = true
 			if r.err != nil {
 				ls.V6Error = r.err.Error()
-			} else if r.newIP != "" {
+			} else {
 				anySuccess = true
 			}
 		case dns.RecordTypeA:
@@ -900,12 +924,10 @@ func (s *Sync) tick(cfg Config) {
 			ls.V4Attempted = true
 			if r.err != nil {
 				ls.V4Error = r.err.Error()
-			} else if r.newIP != "" {
+			} else {
 				anySuccess = true
 			}
 		}
-		// 节流 skip(r.err==nil 但 newIP 非空 且 oldIP 为空):不算成功也不算失败
-		// 等下次 tick 再试
 	}
 	// v2.86-pr23g:Attempted 字段 — 区分"tick 跑过"和"tick 早 return / 全 throttle 跳过"。
 	// 只有 runV6/runV4 至少一个为 true 且产生 results 时 Attempted=true。
@@ -951,33 +973,60 @@ func (s *Sync) detectFamily(cfg Config, recordType string, detector func(string)
 	return ip, nil
 }
 
-// upsertRecord 单条记录的查-比-更流程,retry 3 次指数退避。
+// maxUpdateAttempts UpdateDomainRecord 的最大尝试次数。
+const maxUpdateAttempts = 3
+
+// upsertRecord 单条记录的查-比-更/建流程,retry maxUpdateAttempts 次指数退避。
 //
 // 返回 (oldIP, error):
-//   - oldIP:阿里云当前记录值(IP 没变时 = currentIP)
-//   - error:retry 3 次都失败 / 阿里云 RAM 权限错误(立即失败不重试)
+//   - oldIP:阿里云当前记录值(IP 没变时 = currentIP)。刚创建时也返回 currentIP。
+//   - error:重试耗尽 / 阿里云 RAM 权限错误(立即失败不重试) / 记录已不存在(终态)
 //
-// 行为约定(评审 K3 / A 修正):
-//   - FindRecord 返回 nil → 用户没建记录 → WARN 日志,return ("", nil),不算失败
-//   - FindRecord 返回多条 → WARN 日志,return ("", nil),不算失败(避免覆盖别处)
+// 行为约定:
+//   - FindRecord 返回 nil(记录不存在) → AddDomainRecord 自动创建,返回 (currentIP, nil)
+//   - FindRecord 返回多条 → error(避免覆盖别处)
+//   - DomainRecordNotFound → 记录已删,终态,立即返回 error 不 retry
 //   - UpdateRecordValue 返回 RAM 权限错误 → 立即停止 retry,return error
+//   - ctx 取消 → 立即中止(含退避期间),return error
 //   - 其他错误 → retry 1s/4s/9s
-func (s *Sync) upsertRecord(cfg Config, client *dns.AliyunClient, recordType, currentIP string) (string, error) {
+//
+// 没有"静默跳过"分支:err==nil 时 oldIP 必非空,调用方可以直接把
+// err==nil 当作"本轮成功",不需要再靠 oldIP=="" 反推是否被跳过。
+func (s *Sync) upsertRecord(ctx context.Context, cfg Config, client *dns.AliyunClient, recordType, currentIP string) (string, error) {
 	// 1. 查现有记录
-	rec, err := client.FindRecord(cfg.Domain, cfg.RR, recordType)
+	rec, err := client.FindRecord(ctx, cfg.Domain, cfg.RR, recordType)
 	if err != nil {
+		// 记录在查询和更新之间被删(域名被转移 / 记录被手动删除)是终态事实:
+		// retry 三次不可能让它回来,白等 1s+4s+9s。直接短路,把处置建议写进错误。
+		if dns.Classify(err) == dns.ClassNotFound {
+			return "", fmt.Errorf("dns record disappeared (DomainRecordNotFound) for %s %s.%s: record no longer exists, recreate it in the aliyun console: %w",
+				recordType, cfg.RR, cfg.Domain, err)
+		}
 		return "", fmt.Errorf("find %s record: %w", recordType, err)
 	}
 	if rec == nil {
-		// 0 条:用户没建记录 — 不自动建,只打日志(避免误操作)
-		cfg.Logger.Warn("ddns: no existing record, skipping update",
+		// 0 条:记录不存在 → 自动创建。
+		//
+		// 参照 ddns-updater(qdm12)的 aliyun / cloudflare provider:两者都在
+		// FindRecord 查不到记录时直接 AddDomainRecord 补建,而不是让用户去控制台手建。
+		// 理由同样成立:RR / 域名 / 凭证都已在面板填好 = 意图已声明;
+		// 且记录被误删后需要自愈,否则域名解析一直断在旧 IP 上。
+		//
+		// TTL 传 0 → AddDomainRecord 用 600s 默认值(与面板"在阿里云创建"按钮一致)。
+		cfg.Logger.Info("ddns: no existing record, creating it",
 			"domain", cfg.Domain, "rr", cfg.RR,
-			"record_type", recordType,
-			"hint", "create the record manually in aliyun console first")
-		return "", nil
+			"record_type", recordType, "value", currentIP)
+		if _, err := client.AddDomainRecord(ctx, cfg.Domain, cfg.RR, recordType, currentIP, 0); err != nil {
+			// 创建失败必须如实报错(典型触发:RAM 没勾 alidns:AddDomainRecord)。
+			// 退化成 WARN 会回到 A13 的静默空转 —— 面板既不报成功也不报失败。
+			return "", fmt.Errorf("create %s record %s.%s via AddDomainRecord: %w",
+				recordType, cfg.RR, cfg.Domain, err)
+		}
+		// 返回 currentIP 作"旧值":调用方据此判定本轮成功但 IP 未变化 ——
+		// 新建不是"IP 变了",不该在日志/UI 里报成 changed。
+		return currentIP, nil
 	}
-	// 多条:FindRecord 内部已返回 error(switch default 分支)
-	// 但根据评审 K3 改 WARN-skip 后,这里其实走不到。保留防御性检查。
+	// 多条:FindRecord 内部已返回 error(switch default 分支)。保留防御性检查。
 	_ = rec
 
 	// 2. 比对 IP
@@ -991,10 +1040,10 @@ func (s *Sync) upsertRecord(cfg Config, client *dns.AliyunClient, recordType, cu
 		"old", rec.Value, "new", currentIP,
 		"record_id", rec.RecordID)
 
-	// 3. retry 3 次(指数退避)
+	// 3. retry maxUpdateAttempts 次(指数退避)
 	var lastErr error
-	for attempt := 1; attempt <= 3; attempt++ {
-		err := client.UpdateRecordValue(rec.RecordID, cfg.RR, recordType, currentIP, rec.TTL)
+	for attempt := 1; attempt <= maxUpdateAttempts; attempt++ {
+		err := client.UpdateRecordValue(ctx, rec.RecordID, cfg.RR, recordType, currentIP, rec.TTL)
 		if err == nil {
 			cfg.Logger.Info("ddns: record updated successfully",
 				"record_type", recordType,
@@ -1003,7 +1052,7 @@ func (s *Sync) upsertRecord(cfg Config, client *dns.AliyunClient, recordType, cu
 			return rec.Value, nil
 		}
 		// v2.85-PR5 (Q3-01):用 dns.Classify 替代原 strings.Contains 模糊匹配。
-		// - AuthError / RAMError → 立即失败(凭证错/权限错,retry 没用)
+		// - AuthError / RAMError / NotFound → 立即失败(凭证错/权限错/记录已删,retry 没用)
 		// - ThrottlingError / TransientError / Unknown → 继续 retry
 		class := dns.Classify(err)
 		if class == dns.ClassAuth {
@@ -1018,6 +1067,12 @@ func (s *Sync) upsertRecord(cfg Config, client *dns.AliyunClient, recordType, cu
 				"hint", "add alidns:DescribeDomainRecords + alidns:UpdateDomainRecord permissions to your RAM user")
 			return rec.Value, fmt.Errorf("aliyun RAM error for %s update: %w", recordType, err)
 		}
+		if class == dns.ClassNotFound {
+			cfg.Logger.Error("ddns: record disappeared mid-update, NOT retrying",
+				"record_type", recordType, "record_id", rec.RecordID, "err", err,
+				"hint", "the record was deleted or the domain moved; recreate it in the aliyun console")
+			return rec.Value, fmt.Errorf("dns record disappeared (DomainRecordNotFound) for %s: %w", recordType, err)
+		}
 		lastErr = err
 		cfg.Logger.Warn("ddns: update failed, retrying",
 			"record_type", recordType,
@@ -1027,9 +1082,18 @@ func (s *Sync) upsertRecord(cfg Config, client *dns.AliyunClient, recordType, cu
 		// 1s, 4s, 9s + 随机 0-20%,避免全球 v2.85 用户在同一秒 retry
 		backoff := time.Duration(attempt*attempt) * time.Second
 		jitter := time.Duration(rand.Int63n(int64(backoff) / 5)) // 0-20%
-		time.Sleep(backoff + jitter)
+
+		// 退避必须可中断:time.Sleep 不看 ctx,失败后要干等满 1s/4s/9s
+		// 才有机会退出,DDNS 停机(rootCtx cancel)被睡眠拖住。
+		// 三个分支并行:ctx 先到就立刻返回,否则睡满退避时长。
+		select {
+		case <-ctx.Done():
+			return rec.Value, fmt.Errorf("update aborted during backoff (ctx done, %d attempts done): %w",
+				attempt, ctx.Err())
+		case <-time.After(backoff + jitter):
+		}
 	}
-	return rec.Value, fmt.Errorf("update after 3 retries: %w", lastErr)
+	return rec.Value, fmt.Errorf("update after %d retries: %w", maxUpdateAttempts, lastErr)
 }
 
 // recordResult v2-84:统一记录整轮结果,替代 v2-83 的 recordSuccess / recordFailure。

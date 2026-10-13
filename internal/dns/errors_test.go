@@ -1,11 +1,11 @@
 // v2.85-PR5 测试覆盖:
-//   1. SHA256 签名(防 SHA1 回归)
-//   2. Classify() 每种错误码分类(表驱动,18 个 case)
-//   3. Classify() 对非 AliyunError → Unknown
-//   4. Classify() 穿透 fmt.Errorf("%w") wrap
-//   5. AliyunError.Error() 字符串格式
-//   6. IsRetryable / IsFatal 行为
-//   7. ErrorClass.String() 输出
+//  1. SHA256 签名(防 SHA1 回归)
+//  2. Classify() 每种错误码分类(表驱动,18 个 case)
+//  3. Classify() 对非 AliyunError → Unknown
+//  4. Classify() 穿透 fmt.Errorf("%w") wrap
+//  5. AliyunError.Error() 字符串格式
+//  6. IsRetryable / IsFatal 行为
+//  7. ErrorClass.String() 输出
 package dns
 
 import (
@@ -123,7 +123,8 @@ func TestClassify_AllCases(t *testing.T) {
 		// Transient
 		{"InternalError", ClassTransient},
 		{"ServiceUnavailable", ClassTransient},
-		{"DomainRecordNotFound", ClassTransient},
+		// NotFound:记录已删 —— 终态,不 retry(见 errorclass_test.go)
+		{"DomainRecordNotFound", ClassNotFound},
 		// Unknown
 		{"SomeRandomError", ClassUnknown},
 		{"", ClassUnknown},
@@ -221,7 +222,8 @@ func TestAliyunError_IsRetryable_IsFatal(t *testing.T) {
 		{"Throttling.Api", true, false},
 		{"InternalError", true, false},
 		{"ServiceUnavailable", true, false},
-		{"DomainRecordNotFound", true, false},
+		// 记录已不存在是终态:retry 无意义(要人工重建),不再归 Transient。
+		{"DomainRecordNotFound", false, true},
 		{"SomeRandom", true, false}, // Unknown → retryable
 	}
 	for _, tt := range tests {
@@ -247,6 +249,7 @@ func TestErrorClass_String(t *testing.T) {
 		{ClassRAM, "RAMError"},
 		{ClassThrottling, "ThrottlingError"},
 		{ClassTransient, "TransientError"},
+		{ClassNotFound, "NotFoundError"},
 		{ClassUnknown, "UnknownError"},
 		{ErrorClass(99), "UnknownError"}, // 越界 → UnknownError
 	}

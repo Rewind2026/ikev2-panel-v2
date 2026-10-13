@@ -1,5 +1,5 @@
-﻿// admins 表 CRUD
-// 设计见 docs/design.md §6.3
+// admins 表 CRUD
+// 见 docs/architecture.md §5
 //
 // v2 全表只能 id=1 一条记录（schema CHECK (id = 1)）。
 package store
@@ -69,8 +69,9 @@ func (s *Store) UpdateAdminPassword(ctx context.Context, username, newPasswordHa
 // EnsureDefaultAdmin 如果没有管理员，创建一个默认账号（密码 hash 由 caller 传入）。
 // 用于首次启动：caller 随机生成密码 → bcrypt → 调这个方法 → 把明文密码 print 给管理员。
 // 返回值：
-//   created=true  → 新建成功
-//   created=false → 已存在，未做任何事
+//
+//	created=true  → 新建成功
+//	created=false → 已存在，未做任何事
 func (s *Store) EnsureDefaultAdmin(ctx context.Context, username, passwordHash string) (created bool, err error) {
 	existing, err := s.GetDefaultAdmin(ctx)
 	if err != nil && !errors.Is(err, ErrNotFound) {

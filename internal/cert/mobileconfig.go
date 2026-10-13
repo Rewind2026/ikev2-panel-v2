@@ -1,5 +1,5 @@
 // iOS/macOS .mobileconfig 渲染。
-// 设计见 docs/design.md §10.1
+// 见 docs/architecture.md §12.5
 //
 // 模板字段含义见 Apple/strongSwan 官方文档：
 //   - https://docs.strongswan.org/docs/latest/interop/appleIkev2Profile.html
@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net"
 	"strings"
 	"text/template"
 	"time"
@@ -24,11 +25,11 @@ import (
 type OnDemandProfile string
 
 const (
-	OnDemandAlwaysConnect        OnDemandProfile = "always"             // 默认:任何网络都连
-	OnDemandHomeWiFiDisconnect   OnDemandProfile = "home_wifi_disconnect" // 指定 SSID 断开,其它连
-	OnDemandCellularOnly         OnDemandProfile = "cellular_only"      // 蜂窝连,Wi-Fi 不连
-	OnDemandCaptiveProbe         OnDemandProfile = "captive_probe"      // 能访问 captive.apple.com 不连,否则连
-	OnDemandManual               OnDemandProfile = "manual"             // 关闭 OnDemand
+	OnDemandAlwaysConnect      OnDemandProfile = "always"               // 默认:任何网络都连
+	OnDemandHomeWiFiDisconnect OnDemandProfile = "home_wifi_disconnect" // 指定 SSID 断开,其它连
+	OnDemandCellularOnly       OnDemandProfile = "cellular_only"        // 蜂窝连,Wi-Fi 不连
+	OnDemandCaptiveProbe       OnDemandProfile = "captive_probe"        // 能访问 captive.apple.com 不连,否则连
+	OnDemandManual             OnDemandProfile = "manual"               // 关闭 OnDemand
 )
 
 // ValidOnDemandProfiles 所有合法的 preset 名。
@@ -55,26 +56,26 @@ var ValidOnDemandProfiles = []OnDemandProfile{
 //
 // v2.86-PR12.22 audit(对照 developer.apple.com/documentation/devicemanagement/vpn/ikev2-data.dictionary):
 //   - DisconnectOnSleep     ⚠️ Apple 文档未列,API 层 (NEVPNProtocol.disconnectOnSleep) 有,
-//                          iOS 实际接受(mobileconfig key),保留。
+//     iOS 实际接受(mobileconfig key),保留。
 //   - NATKeepaliveEnabled   ❌ Apple 文档用 NATKeepAliveOffloadEnable(大写 A),
-//                          plist key 大小写敏感 → 改用正确名称。
-//                          Go 字段仍叫 NATKeepaliveEnabled(我们的内部名),仅渲染层改字面量。
+//     plist key 大小写敏感 → 改用正确名称。
+//     Go 字段仍叫 NATKeepaliveEnabled(我们的内部名),仅渲染层改字面量。
 //   - NATKeepaliveInterval  ✅ Apple 文档列(NATKeepAliveInterval),min 20s,默认 20s(Wi-Fi)/110s(蜂窝)。
-//                          我们的 hardcoded 60s 是经验值,合法。
+//     我们的 hardcoded 60s 是经验值,合法。
 //   - AuthPasswordRetries   ❌ Apple 文档完全找不到。GitHub 搜不到任何 mobileconfig 用法示例。
-//                          可能是 iOS private key,可能是杜撰。**已移除**,避免误导用户。
+//     可能是 iOS private key,可能是杜撰。**已移除**,避免误导用户。
 type MobileConfigOpts struct {
 	UserDefinedName       *string         `json:"user_defined_name,omitempty"`        // 连接显示名;nil = "IKEv2 VPN"
-	DisconnectOnSleep     *bool           `json:"disconnect_on_sleep,omitempty"`     // true = 锁屏断 VPN;nil = false(保活)
-	NATKeepaliveEnabled   *bool           `json:"nat_keepalive_enabled,omitempty"`   // 渲染层输出 NATKeepAliveOffloadEnable(Apple 正确命名)
-	NATKeepaliveInterval  *int            `json:"nat_keepalive_interval,omitempty"`  // 秒;nil = 60,范围 20-600
-	OnDemandEnabled       *bool           `json:"on_demand_enabled,omitempty"`       // nil = true
-	OnDemandProfile       OnDemandProfile `json:"on_demand_profile,omitempty"`       // preset 名;空 = "always"
-	OnDemandSSID          string          `json:"ondemand_ssid,omitempty"`           // home_wifi_disconnect 模式用
-	IncludeAllNetworks    *bool           `json:"include_all_networks,omitempty"`    // nil = true(全局路由)
-	ExcludeLocalNetworks  *bool           `json:"exclude_local_networks,omitempty"`  // nil = true(保留局域网)
-	DNSServers            []string        `json:"dns_servers,omitempty"`             // nil/空 = 默认 1.1.1.1/8.8.8.8/...
-	DeadPeerDetectionRate string          `json:"dead_peer_detection_rate,omitempty"`// None/Low/Medium/High;空 = "Medium"
+	DisconnectOnSleep     *bool           `json:"disconnect_on_sleep,omitempty"`      // true = 锁屏断 VPN;nil = false(保活)
+	NATKeepaliveEnabled   *bool           `json:"nat_keepalive_enabled,omitempty"`    // 渲染层输出 NATKeepAliveOffloadEnable(Apple 正确命名)
+	NATKeepaliveInterval  *int            `json:"nat_keepalive_interval,omitempty"`   // 秒;nil = 60,范围 20-600
+	OnDemandEnabled       *bool           `json:"on_demand_enabled,omitempty"`        // nil = true
+	OnDemandProfile       OnDemandProfile `json:"on_demand_profile,omitempty"`        // preset 名;空 = "always"
+	OnDemandSSID          string          `json:"ondemand_ssid,omitempty"`            // home_wifi_disconnect 模式用
+	IncludeAllNetworks    *bool           `json:"include_all_networks,omitempty"`     // nil = true(全局路由)
+	ExcludeLocalNetworks  *bool           `json:"exclude_local_networks,omitempty"`   // nil = true(保留局域网)
+	DNSServers            []string        `json:"dns_servers,omitempty"`              // nil/空 = 默认 1.1.1.1/8.8.8.8/...
+	DeadPeerDetectionRate string          `json:"dead_peer_detection_rate,omitempty"` // None/Low/Medium/High;空 = "Medium"
 }
 
 // BaseMobileConfigDefaults 返回 cert builtin 出厂值(写死的常量,不可改)。
@@ -91,7 +92,7 @@ func BaseMobileConfigDefaults() MobileConfigOpts {
 	exclude := true
 	onDemand := true
 	return MobileConfigOpts{
-		UserDefinedName:      nil,                       // 由 Render 处 fallback "IKEv2 VPN"
+		UserDefinedName:      nil, // 由 Render 处 fallback "IKEv2 VPN"
 		DisconnectOnSleep:    &sleepFalse,
 		NATKeepaliveEnabled:  &keep,
 		NATKeepaliveInterval: intPtr(60),
@@ -206,7 +207,7 @@ func EffectiveMobileConfigOpts(admin, overlay *MobileConfigOpts) MobileConfigOpt
 }
 
 // intPtr 辅助构造。
-func intPtr(i int) *int { return &i }
+func intPtr(i int) *int    { return &i }
 func boolPtr(b bool) *bool { return &b }
 
 // DefaultMobileConfigOpts 向后兼容别名:等价 BaseMobileConfigDefaults。
@@ -260,6 +261,17 @@ func (o *MobileConfigOpts) Validate() error {
 	if o.OnDemandProfile == OnDemandHomeWiFiDisconnect && o.OnDemandSSID == "" {
 		return fmt.Errorf("on_demand_profile=%q 时必须填 ondemand_ssid(家里 Wi-Fi 的 SSID)",
 			OnDemandHomeWiFiDisconnect)
+	}
+	// v2.86-PR19(A13):交叉校验 —— manual 语义上就是"关掉 On-Demand"。
+	// 两者各自都合法,但组合在一起语义矛盾,且历史上真的产出过非法 plist
+	// (renderOnDemandRules 对 manual 返回空串 → OnDemandRules 无值 →
+	//  iOS 拒装)。渲染层已加 <array/> 兜底,这里再从源头拦住。
+	//
+	// 注意只在本字段**被显式设置**时才判 —— OnDemandProfile=="" 表示
+	// "用全局默认",默认是 always,不需要拦。
+	if o.OnDemandProfile == OnDemandManual && o.OnDemandEnabled != nil && *o.OnDemandEnabled {
+		return fmt.Errorf("on_demand_profile=%q 表示完全手动,不能同时把 on_demand_enabled 设为是;"+
+			"请把 on_demand_enabled 设为否,或改选其它 profile", OnDemandManual)
 	}
 	if o.OnDemandSSID != "" {
 		if len(o.OnDemandSSID) > 32 {
@@ -349,63 +361,56 @@ func DecodeMobileConfigOpts(s string) (*MobileConfigOpts, error) {
 	return &o, nil
 }
 
-// isValidIP 简单 IPv4/IPv6 校验。
+// isValidIP IPv4/IPv6 校验。
 //
-// 完整 IPv6 校验太复杂,这里走 net.ParseIP;net 是 stdlib 不引第三方。
+// v2.86-PR19(A13):原来这里是手写的字符级校验,注释声称"走 net.ParseIP"但
+// 根本没调用,属于注释与实现脱节。实际漏掉的校验:
+//
+//   - IPv4 分支只检查"4 段 + 全数字",**不检查每段 0–255**
+//     → 300.300.300.300 / 999.999.999.999 全部通过
+//   - IPv6 分支只检查"含: 且 :数量 ≥2 + 字符集"
+//     → "::" / "::::" / "deadbeef::" 全部通过
+//
+// 这些值会被原样写进 `<key>DNS</key><dict>`,iOS 可能整份拒装
+// (与 docs/CHANGELOG.md pr12.23 同类事故),或 DNS 静默失效。
+//
+// 直接用 net.ParseIP:stdlib、零依赖、语义权威。它顺带处理了 IPv4 的
+// 前导零(Go 1.17+ 拒绝 "010.1.1.1" 这类八进制歧义写法),这正是手写校验
+// 会误放行的另一类输入。
 func isValidIP(s string) bool {
 	if s == "" {
 		return false
 	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c == '.' || c == ':' || (c >= '0' && c <= '9') ||
-			(c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') {
-			continue
-		}
-		return false
-	}
-	// 含 ":" 才认为是 IPv6
-	if strings.Contains(s, ":") {
-		return strings.Count(s, ":") >= 2
-	}
-	// IPv4:4 段数字
-	parts := strings.Split(s, ".")
-	if len(parts) != 4 {
-		return false
-	}
-	for _, p := range parts {
-		if p == "" {
-			return false
-		}
-		for _, c := range p {
-			if c < '0' || c > '9' {
-				return false
-			}
-		}
-	}
-	return true
+	return net.ParseIP(s) != nil
 }
 
 // mobileconfigTmpl 模板。
 //
 // 关键决策（跟 Apple/strongSwan 官方 EAP 模板对齐）：
+//
 //   - AuthenticationMethod = Certificate：server 用证书做身份
+//
 //   - ExtendedAuthEnabled = 1：客户端走 EAP
+//
 //   - AuthName + AuthPassword 内置在 profile 里：iOS 装了 profile 就记下凭证，
 //     **不弹密码框**（这是解决 v2-74 弹密码框 + silently drop 的关键）
+//
 //   - AuthPasswordRetries **v2.86-PR12.22 audit 移除**:Apple developer 文档完全找不到这字段,
 //     GitHub 搜不到 mobileconfig 用法。可能是 iOS private key / 杜撰。iOS 看到不认识的 key
 //     会 silently ignore,所以保留无害,但误导用户以为能改 → 移除。
+//
 //   - ServerCertificateCommonName = ServerCN：iOS 用这个值校验 server cert 的 SAN/CN，
 //     加上后严格校验链路；LE 模式也保留（Apple 把这个当作 hint，不强制）
+//
 //   - IKESecurityAssociationParameters / ChildSecurityAssociationParameters：
 //     **strongSwan 官方文档注释**:
 //     "Because only one proposal is sent (even if nothing is configured here)
-//      it must match the server configuration"
+//     it must match the server configuration"
 //     不配的话 iOS 用 3DES fallback（NEVPNIKEv2EncryptionAlgorithm3DES）,
 //     如果 server 端没 3DES proposal 就会协商失败。我们指定 AES-256-GCM + SHA2-256 + DH 31
 //     (curve25519),与 swanctl-ipv6-only.conf 第一提案对齐。
 //     字段取值见 developer.apple.com/documentation/networkextension/nevpnikev2encryptionalgorithm
+//
 //   - v2-78：加 DNS 推送（4 = IPv4 DNS, 6 = IPv6 DNS），
 //     iOS 拨号后用这里指定的 DNS 而不是拨号前的 WiFi/蜂窝 DNS。
 //     不推 DNS 时 iOS 把所有 UDP 53 按 0.0.0.0/0 强制路由进 ESP 隧道，
@@ -418,7 +423,7 @@ func isValidIP(s string) bool {
 //     iOS 17/18 静默忽略整个节点 → DNS 实际从未生效。
 //     改成 Apple 规范形态:iOS 13- 用 `<key>DNS</key><array>...</array>`,
 //     iOS 14+ 用 `<key>DNS</key><dict><key>ServerAddresses</key><array>...</array>
-//                              <key>DNSProtocol</key><string>Cleartext</string></dict>`
+//     <key>DNSProtocol</key><string>Cleartext</string></dict>`
 //     (后者强制要求 DNSProtocol,否则判定"无 DNS"配置)。
 //     见 developer.apple.com/documentation/devicemanagement/vpn/dns-data.dictionary 。
 //     此处选 iOS 14+ dict 形态:v2.86 目标用户绝大多数 iOS 14+,iOS 13- 占比 <1%。
@@ -426,49 +431,79 @@ func isValidIP(s string) bool {
 //
 //   - v2-80:加 DisconnectOnSleep/DisconnectOnIdle/NATKeepalive/OnDemand 4 项"省电+不断线"配置。
 //     调研来源:
-//       - Apple 官方 IKEv2 设备管理设置
-//           https://support.apple.com/zh-cn/guide/deployment/dep4ce9487d/web
-//       - Apple DTS Engineer Quinn (Apple Developer Forum, 2018):
-//           DisconnectOnSleep=false 避免 iOS 主动断 VPN
-//       - strongSwan 官方 OnDemand 模板:
-//           https://docs.strongswan.org/docs/latest/interop/appleIkev2Profile.html
+//
+//   - Apple 官方 IKEv2 设备管理设置
+//     https://support.apple.com/zh-cn/guide/deployment/dep4ce9487d/web
+//
+//   - Apple DTS Engineer Quinn (Apple Developer Forum, 2018):
+//     DisconnectOnSleep=false 避免 iOS 主动断 VPN
+//
+//   - strongSwan 官方 OnDemand 模板:
+//     https://docs.strongswan.org/docs/latest/interop/appleIkev2Profile.html
 //     字段取值见
-//       https://developer.apple.com/documentation/networkextension/nevpnprotocolikev2
-//       https://developer.apple.com/documentation/networkextension/nevpnprotocolondemandrules
+//     https://developer.apple.com/documentation/networkextension/nevpnprotocolikev2
+//     https://developer.apple.com/documentation/networkextension/nevpnprotocolondemandrules
 //
 //     4 项作用:
-//       - DisconnectOnSleep=false  iOS 锁屏不会主动断 VPN(设备睡期间 ESP SA 保活)
-//       - DisconnectOnIdle=0       闲置不主动断(Apple Deployment Guide "Never disconnect")
-//       - NATKeepAliveOffloadEnable=true + NATKeepAliveInterval=60
-//         iOS 在锁屏后将 NAT keepalive 交给硬件网卡发送,防止运营商 NAT 映射过期被踢
-//         (v2.86-PR12.22 audit 改用 Apple 文档的准确命名:大写 A)
-//       - OnDemandEnabled=1 + Action=Connect
-//         Wi-Fi ↔ Cellular 切换时自动重连(防止 MOBIKE 切换期间意外掉)
+//
+//   - DisconnectOnSleep=false  iOS 锁屏不会主动断 VPN(设备睡期间 ESP SA 保活)
+//
+//   - DisconnectOnIdle=0       闲置不主动断(Apple Deployment Guide "Never disconnect")
+//
+//   - NATKeepAliveOffloadEnable=true + NATKeepAliveInterval=60
+//     iOS 在锁屏后将 NAT keepalive 交给硬件网卡发送,防止运营商 NAT 映射过期被踢
+//     (v2.86-PR12.22 audit 改用 Apple 文档的准确命名:大写 A)
+//
+//   - OnDemandEnabled=1 + Action=Connect
+//     Wi-Fi ↔ Cellular 切换时自动重连(防止 MOBIKE 切换期间意外掉)
 //
 //   - v2.86-PR12.13:加 IncludeAllNetworks=true + ExcludeLocalNetworks=true。
 //     背景:iOS 17+ 默认对 ESP tunnel 做 split-tunnel by IPv6,跟 IPv6-only VPN 服务器
 //     不一定兼容(我们 server 端 local_ts = 0.0.0.0/0, ::/0,需要 client 把所有流量
-//     都打进隧道)。IncludeAllNetworks=true 让所有流量走 VPN,ExcludeLocalNetworks=true
-//     保留局域网访问(如 192.168.x.x 路由器管理页面)。来源:
-//       - developer.apple.com/documentation/networkextension/nevpnprotocolikev2
+//     都打进隧道)。IncludeAllNetworks=true 让所有流量走 VPN。来源:
+//
+//   - developer.apple.com/documentation/networkextension/nevpnprotocolikev2
+//
+//     v2.86-PR19(A13)修正本段语义(之前写反了):
+//
+//     **IncludeAllNetworks=true 会让 ExcludeLocalNetworks 失效。**
+//     Apple 对 IncludeAllNetworks 的定义是"VPN 接管**所有**网络流量,
+//     包括本地子网" —— 它不是一个"是否路由到隧道"的开关,而是
+//     "是否连本地子网也一起吞掉"的开关。两者同时为 true 时,
+//     ExcludeLocalNetworks 被 Include 的语义覆盖,写 true 或 false 结果
+//     完全一样,是一行死配置。
+//
+//     之前这段注释和 UI 文案都写"ExcludeLocalNetworks=true 保留局域网访问",
+//     这与 Apple 文档相反,会让用户误以为打印机 / NAS / HomeKit /
+//     路由器管理页还能访问 —— 实际上开着 VPN 时这些全部不可达。
+//
+//     要真正做到"全局走 VPN + 保留局域网",Apple 语义下应该是:
+//     IncludeAllNetworks=false + ExcludeLocalNetworks=true
+//     但这会变成 split-tunnel,与服务端 local_ts = 0.0.0.0/0, ::/0
+//     的全量隧道设计冲突,所以我们保留 IncludeAllNetworks=true,
+//     并把 ExcludeLocalNetworks 的 UI 文案改成如实描述。
 //
 //     与 MOBIKE 的关系:
-//       - DisableMOBIKE=0 (上方配置)= MOBIKE 启用 (iOS 默认就是 0)
-//       - MOBIKE (RFC 4555) 是 IKEv2 切换 IP 的"省电+不重连"关键:
-//         Wi-Fi → Cellular 切换时,client 发起 UPDATE_SA_ADDRESS 复用现有 IKE SA,
-//         ESP SA **不重协商**(省掉 1 次 DH 交换 + 1 次 ESP rekey),
-//         iOS 26 PQC fallback 进一步允许 server 不支持 PQC 时降级到 ECDH,
-//         共同实现"不重连且省电"
-//       - strongSwan 默认 mobike=yes,这里写 DisableMOBIKE=0 是显式声明 (iOS DTS Quinn 2019)
-//       - 注意:README line 351 建议"不要开 mobike"是针对 libipsec + 高吞吐场景的
-//         **特定**优化,**日常家用场景必须开**,否则 iOS 切网就掉 VPN
+//
+//   - DisableMOBIKE=0 (上方配置)= MOBIKE 启用 (iOS 默认就是 0)
+//
+//   - MOBIKE (RFC 4555) 是 IKEv2 切换 IP 的"省电+不重连"关键:
+//     Wi-Fi → Cellular 切换时,client 发起 UPDATE_SA_ADDRESS 复用现有 IKE SA,
+//     ESP SA **不重协商**(省掉 1 次 DH 交换 + 1 次 ESP rekey),
+//     iOS 26 PQC fallback 进一步允许 server 不支持 PQC 时降级到 ECDH,
+//     共同实现"不重连且省电"
+//
+//   - strongSwan 默认 mobike=yes,这里写 DisableMOBIKE=0 是显式声明 (iOS DTS Quinn 2019)
+//
+//   - 注意:README line 351 建议"不要开 mobike"是针对 libipsec + 高吞吐场景的
+//     **特定**优化,**日常家用场景必须开**,否则 iOS 切网就掉 VPN
 //     注:Always On VPN 仅 supervised(MDM)设备可用,普通描述文件仅能存在上述 4 项。
 //
 //   - v2.86-PR12.21:模板里 4 处 hardcoded 字段改成动态渲染:
-//       1. UserDefinedName (默认 "IKEv2 VPN")
-//       2. DisconnectOnSleep / NATKeepaliveInterval / NATKeepaliveEnabled
-//       3. OnDemandEnabled + OnDemandRules(5 个 preset)
-//       4. IncludeAllNetworks / ExcludeLocalNetworks / DNS.ServerAddresses
+//     1. UserDefinedName (默认 "IKEv2 VPN")
+//     2. DisconnectOnSleep / NATKeepaliveInterval / NATKeepaliveEnabled
+//     3. OnDemandEnabled + OnDemandRules(5 个 preset)
+//     4. IncludeAllNetworks / ExcludeLocalNetworks / DNS.ServerAddresses
 //     全部从 {{.Opts}} 取值;不依赖环境变量,每用户独立。
 const mobileconfigTmpl = `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>PayloadContent</key><array>
 {{- if .IncludeCA}}<dict><key>PayloadType</key><string>com.apple.security.root</string><key>PayloadVersion</key><integer>1</integer><key>PayloadCertificateFileName</key><string>ca.cert.pem</string><key>PayloadContent</key><data>{{ .CACertBase64 }}</data></dict>
@@ -479,27 +514,27 @@ const mobileconfigTmpl = `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist 
 
 // mobileconfigParams 模板参数。
 type mobileconfigParams struct {
-	IncludeCA            bool
-	CACertBase64         string
-	Username             string
-	AuthPassword         string // 用户密码（v2-76+ EAP-MSCHAPv2 模式，从 user 对象取）
-	ServerAddress        string
-	ServerID             string
-	PayloadUUID          string
-	ProfileUUID          string
-	PanelVersion         string // 镜像版本号（如 v2-76），写进描述方便用户辨识装的是哪一版
-	BuildTimestamp       string // 描述文件生成时间（UTC RFC3339），设置 → VPN 与设备管理 → 描述文件里能看见
+	IncludeCA      bool
+	CACertBase64   string
+	Username       string
+	AuthPassword   string // 用户密码（v2-76+ EAP-MSCHAPv2 模式，从 user 对象取）
+	ServerAddress  string
+	ServerID       string
+	PayloadUUID    string
+	ProfileUUID    string
+	PanelVersion   string // 镜像版本号（如 v2-76），写进描述方便用户辨识装的是哪一版
+	BuildTimestamp string // 描述文件生成时间（UTC RFC3339），设置 → VPN 与设备管理 → 描述文件里能看见
 
 	// v2.86-PR12.21:用户可调字段,由 opts 解析
-	UserDefinedName      string
-	DisconnectOnSleep    bool
-	NATKeepaliveEnabled  bool
-	NATKeepaliveInterval int
-	OnDemandEnabled      bool
-	OnDemandRules        safeHTML // 整段 <array>...</array>(已转义,告诉 template 不要二次 escape)
-	IncludeAllNetworks   bool
-	ExcludeLocalNetworks bool
-	DNSServers           []string
+	UserDefinedName       string
+	DisconnectOnSleep     bool
+	NATKeepaliveEnabled   bool
+	NATKeepaliveInterval  int
+	OnDemandEnabled       bool
+	OnDemandRules         safeHTML // 整段 <array>...</array>(已转义,告诉 template 不要二次 escape)
+	IncludeAllNetworks    bool
+	ExcludeLocalNetworks  bool
+	DNSServers            []string
 	DeadPeerDetectionRate string
 }
 
@@ -530,8 +565,8 @@ func (s safeHTML) String() string { return string(s) }
 //   - opts             v2.86-PR12.22:已合并的 mobileconfig 选项(handler 端负责合并)。
 //     nil = 用 BaseMobileConfigDefaults()。
 //     handler 调用链:panelstate.MobileConfigDefaults → cert.MobileConfigOpts (admin)
-//                  → cert.EffectiveMobileConfigOpts(admin, user overlay)
-//                  → RenderMobileconfig(..., merged)
+//     → cert.EffectiveMobileConfigOpts(admin, user overlay)
+//     → RenderMobileconfig(..., merged)
 //
 // mobileconfig 的 PayloadDescription 里会写当前 PanelVersion + 生成时间，
 // 方便用户在 iOS 设置 → VPN 与设备管理 → 描述文件详情 里看清自己装的是哪一版。
@@ -545,27 +580,27 @@ func RenderMobileconfig(username, password, serverAddr, serverID string, caCertP
 	effective := EffectiveMobileConfigOpts(nil, opts)
 
 	params := mobileconfigParams{
-		PanelVersion:   PanelVersion,
-		Username:       username,
-		AuthPassword:   password,
-		ServerAddress:  serverAddr,
-		ServerID:       serverID,
-		PayloadUUID:    generateUUID(),
-		ProfileUUID:    generateUUID(),
+		PanelVersion:  PanelVersion,
+		Username:      username,
+		AuthPassword:  password,
+		ServerAddress: serverAddr,
+		ServerID:      serverID,
+		PayloadUUID:   generateUUID(),
+		ProfileUUID:   generateUUID(),
 		// v2.85-PR3:用 tzName 渲染 BuildTimestamp,跟面板时间一致。
 		// LoadLocation 失败 fallback UTC,跟 config / handler 端策略一致。
 		BuildTimestamp: nowInTZ(tzName),
 
 		// v2.86-PR12.21:可调字段
-		UserDefinedName:      effectiveUserDefinedName(effective.UserDefinedName),
-		DisconnectOnSleep:    boolDeref(effective.DisconnectOnSleep),
-		NATKeepaliveEnabled:  boolDeref(effective.NATKeepaliveEnabled),
-		NATKeepaliveInterval: intDeref(effective.NATKeepaliveInterval, 60),
-		OnDemandEnabled:      boolDeref(effective.OnDemandEnabled),
-		OnDemandRules:        renderOnDemandRules(effective),
-		IncludeAllNetworks:   boolDeref(effective.IncludeAllNetworks),
-		ExcludeLocalNetworks: boolDeref(effective.ExcludeLocalNetworks),
-		DNSServers:           effective.DNSServers,
+		UserDefinedName:       effectiveUserDefinedName(effective.UserDefinedName),
+		DisconnectOnSleep:     boolDeref(effective.DisconnectOnSleep),
+		NATKeepaliveEnabled:   boolDeref(effective.NATKeepaliveEnabled),
+		NATKeepaliveInterval:  intDeref(effective.NATKeepaliveInterval, 60),
+		OnDemandEnabled:       boolDeref(effective.OnDemandEnabled),
+		OnDemandRules:         renderOnDemandRules(effective),
+		IncludeAllNetworks:    boolDeref(effective.IncludeAllNetworks),
+		ExcludeLocalNetworks:  boolDeref(effective.ExcludeLocalNetworks),
+		DNSServers:            effective.DNSServers,
 		DeadPeerDetectionRate: effective.DeadPeerDetectionRate,
 	}
 	if len(params.DNSServers) == 0 {
@@ -642,10 +677,37 @@ func renderOnDemandRules(o MobileConfigOpts) safeHTML {
 		// (连着就保持连,断着就保持断),更安全。
 		return safeHTML(`<array><dict><key>InterfaceTypeMatch</key><string>Cellular</string><key>Action</key><string>Connect</string></dict><dict><key>InterfaceTypeMatch</key><string>WiFi</string><key>Action</key><string>Disconnect</string></dict><dict><key>Action</key><string>Ignore</string></dict></array>`)
 	case OnDemandCaptiveProbe:
-		return safeHTML(`<array><dict><key>Action</key><string>EvaluateConnection</string><key>ActionParameters</key><array><dict><key>Domains</key><array><string>apple.com</string></array><key>DomainAction</key><string>NeverConnect</string><key>RequiredURLStringProbe</key><string>https://captive.apple.com/hotspot-detect.html</string></dict><dict><key>Domains</key><array><string></string></array><key>DomainAction</key><string>ConnectIfNeeded</string><key>RequiredURLStringProbe</key><string>https://captive.apple.com/hotspot-detect.html</string></dict></array></dict><dict><key>Action</key><string>Connect</string></dict></array>`)
+		// v2.86-PR19(A13):第二个 ActionParameters 的 Domains 原来渲染成
+		// `<array><string></string></array>`(空字符串)。Apple 文档要求
+		// Domains 是**非空域名列表**,空值会让这条规则无效甚至被 iOS 判为
+		// 坏 profile。这里给通配符 `*`(Apple 明确支持 "*" 表示所有域名)。
+		//
+		// 语义:第一条 —— captive.apple.com 可达(NeverConnect)说明当前是
+		// 酒店/机场 Wi-Fi,不连 VPN;其余情况(ConnectIfNeeded + *)连。
+		return safeHTML(`<array><dict><key>Action</key><string>EvaluateConnection</string><key>ActionParameters</key><array><dict><key>Domains</key><array><string>apple.com</string></array><key>DomainAction</key><string>NeverConnect</string><key>RequiredURLStringProbe</key><string>https://captive.apple.com/hotspot-detect.html</string></dict><dict><key>Domains</key><array><string>*</string></array><key>DomainAction</key><string>ConnectIfNeeded</string><key>RequiredURLStringProbe</key><string>https://captive.apple.com/hotspot-detect.html</string></dict></array></dict><dict><key>Action</key><string>Connect</string></dict></array>`)
 	case OnDemandManual:
-		// OnDemandEnabled=false 时整段 <array> 不输出;这里返回空字符串
-		return safeHTML(``)
+		// v2.86-PR19(A13):原来返回空字符串 —— 那是**非法 plist**。
+		//
+		// 模板是:
+		//   {{ if .OnDemandEnabled }}<key>OnDemandEnabled</key><integer>1</integer>
+		//   <key>OnDemandRules</key>{{ .OnDemandRules }}{{ else }}...
+		// 当 OnDemandEnabled=true 且 profile=manual 时,渲染结果是:
+		//   <key>OnDemandRules</key><key>DNS</key>...
+		// OnDemandRules 这个 key 后面**没有任何值**,plist 结构非法,
+		// iOS 直接拒绝安装(报"描述文件无效")。
+		//
+		// 触发路径很现实:UI 的 on_demand_enabled 默认是"用全局默认"(=true),
+		// 用户只在 on_demand_profile 下拉里选了"完全手动",保存时 Validate
+		// 不拦(两者各自合法),渲染即产出坏 profile。
+		// 原有测试恰好绕开了这个组合(mobileconfig_opts_test.go 里显式传了
+		// OnDemandEnabled=false)。
+		//
+		// 修复:返回**最小合法的空规则数组** `<array/>`。
+		// Apple 文档:OnDemandRules 是 OnDemandEnabled=1 时必填的数组,
+		// 空数组语义是"有 OnDemand 但没有规则",不会触发上面的结构错误。
+		// 配合 Validate() 里的交叉规则(manual ⇒ OnDemandEnabled=false),
+		// 用户通常根本到不了这个分支,这里是渲染层的最后一道防线。
+		return safeHTML(`<array/>`)
 	default:
 		// 防御性:Validate 已挡掉,这里再 fallback 到 always
 		return safeHTML(`<array><dict><key>Action</key><string>Connect</string></dict></array>`)
@@ -677,7 +739,8 @@ func xmlEscape(s string) string {
 //   - Sprint 2: 续签 atomic + acme.sh pinned commit + cron 随机化 / filelog 脱敏 +
 //     logrotate / DDNS jitter retry
 //   - Sprint 3: VICI SA lifecycle 审计
-// 详见 docs/release-notes-v2.86.md。
+//
+// 详见 docs/CHANGELOG.md（v2.86）。
 const PanelVersion = "v2.86"
 
 // generateUUID RFC 4122 v4 随机 UUID。

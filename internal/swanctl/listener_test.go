@@ -15,7 +15,9 @@ import (
 // helper:构造一个 vici.Event 带指定字段
 //
 // v2.86-PR12.18: 真实 payload 结构是 nested —
-//   top-level: { "up": "yes", "ikev2-rw": *vici.Message{uniqueid:..., remote-host:...} }
+//
+//	top-level: { "up": "yes", "ikev2-rw": *vici.Message{uniqueid:..., remote-host:...} }
+//
 // 之前 PR15 假设 flat (顶层 unique/remote) 是错的,本 helper 现在构造 nested.
 func newEvent(name string, kv map[string]any) vici.Event {
 	msg := vici.NewMessage()

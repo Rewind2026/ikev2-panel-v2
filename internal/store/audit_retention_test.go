@@ -11,7 +11,9 @@ import (
 // TestAudit_RetentionLikeScript 验证 audit_log retention 脚本的核心 SQL 正确。
 //
 // Phase 5 A 的 audit-retention.sh 跑:
-//   DELETE FROM audit_log WHERE timestamp < ${CUTOFF_TS} * 1000000000;
+//
+//	DELETE FROM audit_log WHERE timestamp < ${CUTOFF_TS} * 1000000000;
+//
 // 这里复现 + 验证时间边界。
 func TestAudit_RetentionLikeScript(t *testing.T) {
 	dir := t.TempDir()

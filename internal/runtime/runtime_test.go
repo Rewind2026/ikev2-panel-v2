@@ -1,10 +1,10 @@
 // v2.86-PR13.3:runtime.Merge 的 subnet 合并测试。
 //
 // 覆盖:
-//   1. panelstate subnet.conf 存在 → 优先于 env
-//   2. panelstate 不存在 → 用 env 值(可能为空)
-//   3. panelstate 文件存在但 v6 为空 → v4 用 panelstate,v6 保留 env
-//   4. panelstate 文件损坏 → WARN + fallback env,Source 标 env-default
+//  1. panelstate subnet.conf 存在 → 优先于 env
+//  2. panelstate 不存在 → 用 env 值(可能为空)
+//  3. panelstate 文件存在但 v6 为空 → v4 用 panelstate,v6 保留 env
+//  4. panelstate 文件损坏 → WARN + fallback env,Source 标 env-default
 package runtime
 
 import (

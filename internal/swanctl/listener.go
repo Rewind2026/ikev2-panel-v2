@@ -15,7 +15,7 @@
 //
 // v2.86-PR15 砍掉的过度开发:
 //   - ❌ 提前 1h expire 提醒(charon 不暴露 IKE_SA_EXPIRED 事件,只有 5 个 streaming:
-//       list-sa / list-policy / list-conn / list-cert / ike-updown)
+//     list-sa / list-policy / list-conn / list-cert / ike-updown)
 //   - ❌ SSE / WebSocket 推到 UI(Web 推送重写 UI 工作量大,用户感知小)
 //   - ❌ child-updown(只审计 IKE SA 生命周期,简化)
 //
@@ -61,7 +61,8 @@ type SALifecycleEvent struct {
 // handler 由 caller(main.go 注入)负责写 audit log。
 //
 // 原因:写 audit 需要 store.Store,listener 不依赖 web 包;
-//     handler 注入让测试可以注入 mock,不需要真 DB。
+//
+//	handler 注入让测试可以注入 mock,不需要真 DB。
 type SALifecycleHandler func(SALifecycleEvent)
 
 // LifecycleListener 订阅 charon VICI 事件流。
@@ -158,16 +159,17 @@ func (l *LifecycleListener) runOnce(ctx context.Context) error {
 // → unique=0 remote="" 写到 audit_log,完全没用。
 //
 // 实测 payload(2026-09-19 50.63,strongSwan 6.0.1):
-//   up = "yes"
-//   ikev2-rw = {
-//     uniqueid = 1
-//     state = ESTABLISHED
-//     local-host = 2408:822e:...:b567
-//     remote-host = 2408:832e:881:6460:...
-//     remote-id = rewind           ← EAP 用户名
-//     remote-vips = 10.10.0.1      ← 虚拟 IP
-//     ...
-//   }
+//
+//	up = "yes"
+//	ikev2-rw = {
+//	  uniqueid = 1
+//	  state = ESTABLISHED
+//	  local-host = 2408:822e:...:b567
+//	  remote-host = 2408:832e:881:6460:...
+//	  remote-id = rewind           ← EAP 用户名
+//	  remote-vips = 10.10.0.1      ← 虚拟 IP
+//	  ...
+//	}
 func (l *LifecycleListener) handleEvent(ev vici.Event) {
 	if ev.Message == nil {
 		return

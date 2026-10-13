@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 # up.sh - 一键启动容器(host 网络唯一模式)
 #
-# 设计见 docs/design.md §10.2
-#
 # 为什么需要这个脚本:
 #   - 自动 ./logs bind mount 目录准备(避免 docker compose up 因目录不存在失败)
 #   - docker compose up -d 的薄封装,加 stderr 染色 + 错误处理

@@ -1,7 +1,7 @@
 # docker-compose.yml
-# 设计见 docs/design.md §10.2
+# 运行期配置的唯一权威。设计说明见 docs/architecture.md §11。
 #
-# 关键决策（M8 commit 24，2026-09-16 + v2.86-PR14 收敛）：
+# 关键决策（v2.86-PR14 收敛）：
 #   网络模式：唯一支持 host 网络。理由——
 #     1. 必须监听公网 IPv6 地址,docker 默认 bridge 给的是 fd00::/8 ULA,公网不可达。
 #     2. 必须能直绑宿主网卡 → UDP 500/4500 不需要端口映射(NAT-T 兼容性最好)。
@@ -65,11 +65,29 @@ services:
     cap_drop:
       - ALL
     cap_add:
-      - NET_ADMIN           # iptables MASQUERADE、ip link、sysctl forwarding 自愈
+      - NET_ADMIN           # iptables/nftables MASQUERADE、ip link、tc 限速（不含 forwarding 自愈，见下）
       - NET_RAW             # tc qdisc/class/filter
       - NET_BIND_SERVICE    # 监听 500/4500 privileged 端口
       - CHOWN               # entrypoint.sh 改 /etc/swanctl 权限
       - DAC_OVERRIDE        # entrypoint.sh 读 /proc/sys/net
+      # v2.86-PR19(A10):FOWNER —— entrypoint.sh 要 chmod /data 下的文件
+      # (acme.sh account.conf 600、LE 证书 644/600、cron 文件 644)。
+      #
+      # 实机踩坑(192.168.50.63,2026-10-12):数据卷 /data 里的文件属主是
+      # 10001(面板进程 uid,历史版本或手动导入证书时写进去的),而容器进程是
+      # root(uid 0)。POSIX 规定 chmod **别人拥有的文件** 需要 CAP_FOWNER ——
+      # uid 0 默认有,但这里 cap_drop: ALL 把它一起丢了,于是:
+      #     chmod: changing permissions of '/data/acme-sh/account.conf':
+      #     Operation not permitted
+      # entrypoint.sh 是 `set -euo pipefail`,这一行失败 → 整个启动流程
+      # exit 1 → restart: unless-stopped 无限重启 → 面板完全起不来。
+      #
+      # DAC_OVERRIDE 只能绕过 **读写执行** 权限检查,管不到 chmod/chown
+      # 这类"修改元数据"的操作,所以补 DAC_OVERRIDE 不够,必须补 FOWNER。
+      #
+      # 安全性:容器里只有 entrypoint.sh(固定脚本)和 acme.sh/cron 会 chmod
+      # 自己管理的文件,不构成提权面。
+      - FOWNER
 
     devices:
       - /dev/net/tun        # kernel-libipsec 必须的 TUN 设备
@@ -90,18 +108,35 @@ services:
 
     # 关键：VPN 服务器需要 IP forwarding。
     #
-    # Docker host network mode 下默认会强制把 IPv6 forwarding 重置为 0
-    # （docker 已知的安全策略），理论上需要 sysctls: 让 docker daemon
-    # 在创建容器前打开宿主内核的 forwarding。
+    # ⚠️ v2.86-PR19(A16) 实测修正（192.168.50.63,2026-10-13）：
+    #   下面这段注释描述的机制**从来没生效过**。容器内 /proc/sys 是 ro 挂载：
+    #     $ grep ' /proc/sys ' /proc/mounts
+    #     proc /proc/sys proc ro,nosuid,nodev,noexec,relatime 0 0
+    #   → entrypoint 里的 `echo 1 > /proc/sys/net/...` 必然失败，
+    #     NET_ADMIN 也救不了（ro 是挂载属性，不是 capability）。
+    #   → IPv4 之所以一路绿灯，只是因为宿主本来就开着 ip_forward=1，
+    #     enable_forwarding 走的是开头"已开直接返回"分支，从没写过。
     #
-    # v2-79.2 变更：host 网络 + user namespace 模式下 docker daemon 拒绝
-    # 写 sysctl（net.ipv4.ip_forward not allowed in host network namespace）。
-    # entrypoint.sh §3 会自愈：容器内 echo 1 > /proc/sys/net/ipv6/conf/all/forwarding
-    # （NET_ADMIN cap 已足够，v2.86-PR11 不再需要 privileged: true）。
-    # 所以这里不再写 sysctls，让 entrypoint 处理。
+    # 所以 forwarding 现在必须**由宿主负责**，两种方式任选：
+    #   1. 立即生效（重启宿主后失效）：
+    #        sudo sysctl -w net.ipv4.ip_forward=1
+    #        sudo sysctl -w net.ipv6.conf.all.forwarding=1
+    #   2. 持久化（推荐，systemd-sysctl.service 会加载）：
+    #        echo 'net.ipv4.ip_forward = 1'       | sudo tee /etc/sysctl.d/99-ikev2.conf
+    #        echo 'net.ipv6.conf.all.forwarding = 1' | sudo tee -a /etc/sysctl.d/99-ikev2.conf
+    #
+    # entrypoint §3 的行为：
+    #   - IPv4 = 0 → FATAL exit 11（没有转发则所有客户端都出不了网）
+    #   - IPv6 = 0 → WARN + 给出宿主侧命令（客户端会 IPv4 回退，属降级不属故障）
+    #
+    # compose 里的 sysctls: 块不能加 —— host 网络模式下 runc 会以
+    # `not allowed in host network namespace` 拒绝（v2-79.2 已实测）。
 
-    # v2.86-PR11:删除 privileged: true。NET_ADMIN 已足够做 forwarding 自愈 + tc 限速。
+    # v2.86-PR11:删除 privileged: true。NET_ADMIN 已足够做 tc 限速等操作。
     # 容器逃逸风险从"root on host"降到"普通进程"(仍需 0day 才逃逸)。
+    #
+    # v2.86-PR19(A16)：NET_ADMIN 不再被描述为"足够做 forwarding 自愈"——
+    # 在 /proc/sys 为 ro 的前提下它不够，forwarding 改由宿主保证。
 
     # v2.86-PR12.8:不再开 read_only rootfs。理由:
     #   - acme.sh 运行时写 /opt/acme.sh (account.conf + ca/ + 域名证书目录)
@@ -145,7 +180,11 @@ services:
       #   - acme-sh/       acme.sh working dir (ca/ + account.json + 域名证书目录)
       #   dnsapi/deploy/notify 是 acme.sh 二进制的伴生文件,在镜像 /opt/acme.sh/
       #   (Dockerfile 里 cp -a 进去的),不随容器重启丢失——跟 /data 无关。
-      - ikev2-panel-v2_ikev2-data:/data   # 持久化:DB + 证书 + LE 证书 + acme.sh account
+      # v2.86-PR19(A10):改用**长语法** + 显式 name 锁死卷名。
+      # 见文件末尾 volumes 段的完整说明。
+      - type: volume
+        source: ikev2-data
+        target: /data
 
       # v2.86-PR13.4:日志 bind 到宿主机 ./logs,重启不丢 + 可直接 tail -f 排查。
       # docker daemon 层另加 logging: json-file 轮转做双保险(见下方 logging 段)。
@@ -243,8 +282,23 @@ volumes:
   #     volume,老数据留在老 volume 里不丢(没被 mount → 不会被容器清空),
   #     需要 `docker volume rename old new` 后再 `up -d` 才能复用。
   #
-  # volume 名规则:`{project_dir_name}_ikev2-data`。项目目录名稳定为
-  # `ikev2-panel-v2` 时,volume 名恒为 `ikev2-panel-v2_ikev2-data`,
-  # 老用户数据可继续复用。
-  ikev2-panel-v2_ikev2-data:
+  # v2.86-PR19(A10):上面的 PR17 方案仍有洞——短名 `ikev2-data` 会被 compose
+  # 解析成 `{project_dir_name}_ikev2-data`(project 取自**目录名**)。
+  # 用户把目录从 ikev2-panel-v2 改名成 vpn(很常见的做法)→ compose 去找
+  # `vpn_ikev2-data` → 不存在 → **自动建一个空卷** → panel.db + panel-state/
+  # + LE 证书 + acme.sh account.json 全丢,且容器照常启动、面板可访问,
+  # 没有任何报错。这是**静默数据丢失**,最难排查的一类故障。
+  #
+  # 实机验证(192.168.50.63,2026-10-12):目录名 ikev2-panel-v2、volume key 写成
+  # `ikev2-panel-v2_ikev2-data` 时,compose 解析出的是
+  # `ikev2-panel-v2_ikev2-panel-v2_ikev2-data`(前缀重复),
+  # 与已有的真实数据卷 `ikev2-panel-data` **完全对不上** → up -d 静默建空卷,
+  # 57KB 的 panel.db / LE 证书 / panel-state 全部"消失",面板却显示正常。
+  #
+  # 修复:**显式 name**,卷名恒为 `ikev2-panel-data`,与目录名彻底解耦。
+  #   - fresh deploy:compose 自动建,零额外步骤
+  #   - 改目录名 / 多份 clone 共存:都指向同一个卷,不会分裂
+  #   - 老用户迁移:docker volume rename ikev2-panel-v2_ikev2-data ikev2-panel-data
+  ikev2-data:
+    name: ikev2-panel-data
     # 无需 external;docker compose 自动建。

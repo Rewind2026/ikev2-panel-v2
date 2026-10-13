@@ -1,16 +1,17 @@
 // PanelState:客户端虚拟 IP 段(IPv4 pool + IPv6 ULA pool)运行时持久化(v2.86-PR13.2 新增)。
 //
 // 背景:
-//   v2-79 之前 VPN 客户端 IP 段硬编码在 swanctl.conf 模板里(10.10.0.0/24 + fd00:1::/64),
-//   改段需要 docker compose down + 改 env + up,体验糟糕。
-//   v2-79 改成 entrypoint 自动探测(LAN 不冲突) + 环境变量覆盖,但仍然需要重启容器。
-//   v2.86-PR13.2 把这段搬到 panelstate,Go 进程读出来→直接 sed /etc/swanctl/swanctl.conf
-//   → swanctl --load-all,**运行期热生效**,客户端重新拨号拿到新 IP。
+//
+//	v2-79 之前 VPN 客户端 IP 段硬编码在 swanctl.conf 模板里(10.10.0.0/24 + fd00:1::/64),
+//	改段需要 docker compose down + 改 env + up,体验糟糕。
+//	v2-79 改成 entrypoint 自动探测(LAN 不冲突) + 环境变量覆盖,但仍然需要重启容器。
+//	v2.86-PR13.2 把这段搬到 panelstate,Go 进程读出来→直接 sed /etc/swanctl/swanctl.conf
+//	→ swanctl --load-all,**运行期热生效**,客户端重新拨号拿到新 IP。
 //
 // 优先级链(高 → 低):
-//   1. /data/panel-state/subnet.conf (面板 UI / API 填的,运行时改,立即生效)
-//   2. IKEV2_VPN_SUBNET / IKEV2_VPN_SUBNET_V6 env(老用户兼容,启动期生效)
-//   3. entrypoint §0.6 自动探测(没填没传时)
+//  1. /data/panel-state/subnet.conf (面板 UI / API 填的,运行时改,立即生效)
+//  2. IKEV2_VPN_SUBNET / IKEV2_VPN_SUBNET_V6 env(老用户兼容,启动期生效)
+//  3. entrypoint §0.6 自动探测(没填没传时)
 //
 // 文件格式(JSON,跟 aliyun.creds / cert.conf 同风格):
 //
@@ -28,7 +29,7 @@
 //   - aliyun.creds 是"凭证",需要 mask + audit
 //   - subnet.conf 是"配置",**不需要 audit + mask**(IP 段不是凭证)
 //
-// 设计见 docs/design.md §19.6(v2-83 panelstate 基础)+ v2.86-PR13.2 扩展。
+// 见 docs/architecture.md §1（internal/panelstate）。
 package panelstate
 
 import (

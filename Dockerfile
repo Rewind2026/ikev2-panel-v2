@@ -1,5 +1,5 @@
 # 多 stage build：自编译 strongSwan 6.0.1 + Go 二进制 + 精简 runtime
-# 设计见 docs/design.md §8.1 + §1.5（kernel-libipsec）
+# 设计说明见 docs/architecture.md §11（部署）与 §12（实现细节）
 #
 # 关键决策（M8 commit 22，2026-09-16 在 192.168.50.176 实机验证）：
 #   - 自编译 strongSwan，启用 --enable-kernel-libipsec：用户在容器化 VPS 上也能用 ESP
@@ -88,6 +88,20 @@ RUN ./configure \
         --enable-vici \
         --enable-swanctl \
         --enable-eap-mschapv2 \
+        # v2.86-PR19(A11):eap-identity 是 EAP 认证链路的**必需**插件,不是可选。
+        #
+        # 实机故障(192.168.50.63,2026-10-12):镜像只 enable 了 eap-mschapv2,
+        # libstrongswan-eap-identity.so 没编出来。iOS 连上后在 IKE_AUTH 反复打:
+        #     EAP-Identity request configured, but not supported
+        #     initiating EAP_MSCHAPV2 method (id 0xB8)
+        #     ... authentication of '...' (myself) with RSA signature successful
+        # 然后 half open IKE_SA 超时销毁,客户端报 "user authentication failed"。
+        #
+        # strongSwan 官方 wiki 明确:EAP 认证时服务端要发 EAP-Identity 请求向客户端
+        # 要用户名,这一步由 eap-identity 插件实现。插件缺失 → charon 直接说
+        # "not supported" → 认证无法开始。
+        # 参考 https://wiki.strongswan.org/issues/2423 / https://wiki.strongswan.org/issues/3318
+        --enable-eap-identity \
         --enable-openssl \
         --enable-sha2 \
         --enable-hmac \
@@ -127,6 +141,11 @@ COPY . ./
 
 # CGO_ENABLED=0：纯静态 Go 二进制（不需要 glibc 兼容层）
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /tmp/ikev2-panel ./cmd/ikev2-panel
+
+# dnsq：排查工具，直连阿里云 DNS API 查记录。
+#   为什么必须进镜像：dig 查不到记录推不出"记录不存在"（本地递归 DNS 可能只是坏了），
+#   排障必须用权威 API。见 docs/README.md「排查方法论」。
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /tmp/dnsq ./cmd/dnsq
 
 # ============================================================================
 # Stage 3b: runner-test  跑 go test -race / go vet(CI 用,生产镜像不含)
@@ -221,7 +240,7 @@ COPY --from=strongswan-builder /tmp/strongswan-install/etc      /etc
 RUN set -eux; \
     cd /etc/strongswan.d/charon; \
     for plugin in random socket-default vici kernel-netlink kernel-libipsec \
-                 openssl resolve stroke updown drbg eap-mschapv2 counters; do \
+                 openssl resolve stroke updown drbg eap-mschapv2 eap-identity counters; do \
         conf="$plugin.conf"; \
         if [ -f "$conf" ] && [ ! -s "$conf" ]; then \
             printf '%s {\n    load = yes\n}\n' "$plugin" > "$conf"; \
@@ -235,6 +254,7 @@ RUN set -eux; \
 
 # 从 go-builder 复制 Go 二进制
 COPY --from=go-builder /tmp/ikev2-panel /usr/local/bin/ikev2-panel
+COPY --from=go-builder /tmp/dnsq         /usr/local/bin/dnsq
 
 # 业务脚本与默认配置
 COPY scripts/entrypoint.sh                    /usr/local/bin/entrypoint.sh
@@ -314,7 +334,7 @@ RUN mkdir -p /etc/swanctl/conf.d \
 #   - 改 clone 整个 repo + checkout pinned commit
 #   - 校验 tarball 的 SHA256(从 GitHub release 下载的 SHA256SUMS)
 #   - 实际做法:用 git 自身的 SHA256 校验(每个 commit 的 tree hash 自带)
-# 设计见 docs/design.md §1.4.1
+# 设计说明见 docs/architecture.md §4.6（cert 包）
 # ----------------------------------------------------------------------------
 ARG ACMESH_COMMIT=181425b3c8373ca23c0664948b97edf5ed84e9c5
 ARG ACMESH_TARBALL_SHA256=d68b4e1c4c4b9e1e5e1e5e1e5e1e5e1e5e1e5e1e5e1e5e1e5e1e5e1e5e1e5e1e5

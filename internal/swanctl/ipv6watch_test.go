@@ -1,4 +1,4 @@
-﻿// swanctl IPv6 watch-dog 测试。
+// swanctl IPv6 watch-dog 测试。
 package swanctl
 
 import (

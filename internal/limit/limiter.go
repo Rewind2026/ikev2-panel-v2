@@ -1,5 +1,5 @@
 // 限速文件写入器（Go 端管理文件，updown 脚本读取）。
-// 设计见 docs/design.md §9.2.1 + architecture §3.8
+// 见 docs/architecture.md §12.6
 //
 // v2.85-PR7:新增 BuildTcCommands 纯函数,根据 IP 协议族生成 tc 命令序列。
 // v2 默认 IKEV2_IPV6_ONLY=true,IPv6 用户之前因 tc u32 只识别 IPv4 而被静默绕过限速,
@@ -77,8 +77,9 @@ func (f Family) Valid() bool {
 }
 
 // TcCommand 是单条 tc 子命令 + 参数。
-//  Op   = "qdisc" | "class" | "filter"
-//  Args = 子命令后的参数列表（不含 "tc" 和 Op 本身）
+//
+//	Op   = "qdisc" | "class" | "filter"
+//	Args = 子命令后的参数列表（不含 "tc" 和 Op 本身）
 type TcCommand struct {
 	Op   string
 	Args []string
@@ -102,12 +103,13 @@ func (c TcCommand) Line() string {
 //   - family 无效或 verb 不是 up/down → 返回空切片（不 panic）。
 //
 // 参数:
-//   family : "ipv4" | "ipv6" | "dual"
-//   verb   : "up" | "down"
-//   outIf  : 出接口，如 "eth0"
-//   classID: 1-9099(由 updown 脚本持久化到 /var/lib/ikev2-panel/classids/<user>)
-//   srcVIP : 客户端虚拟 IP(v4: "10.13.0.5";v6: "fd00:1::5")
-//   dstVIP : 服务器 VPN 内网 IP(可选,down 时不需要;预留供将来 ingress 限速用)
+//
+//	family : "ipv4" | "ipv6" | "dual"
+//	verb   : "up" | "down"
+//	outIf  : 出接口，如 "eth0"
+//	classID: 1-9099(由 updown 脚本持久化到 /var/lib/ikev2-panel/classids/<user>)
+//	srcVIP : 客户端虚拟 IP(v4: "10.13.0.5";v6: "fd00:1::5")
+//	dstVIP : 服务器 VPN 内网 IP(可选,down 时不需要;预留供将来 ingress 限速用)
 func BuildTcCommands(family Family, verb, outIf string, classID int, srcVIP, dstVIP string) []TcCommand {
 	if !family.Valid() {
 		return nil

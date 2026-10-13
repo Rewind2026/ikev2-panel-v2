@@ -1,16 +1,17 @@
 // Package panelstate:DDNS 同步配置运行时持久化(v2.86-pr23a 新增)。
 //
 // 背景:
-//   v2-82 ~ v2-84 DDNS 配置(主域 / RR / family / period)全部从 env 启动时读,
-//   运行时只能改 family + enabled。改主域 / RR / 周期都要 docker compose down
-//   + 改 env + up,体验糟糕。v2.86-pr23a 把 RR / EnableA / EnableAAAA / Period
-//   搬到 panelstate(运行时面板可改,内存立即生效);主域名 Domain 仍然走 env
-//   (向后兼容,entrypoint / acme.sh 都依赖它)。
+//
+//	v2-82 ~ v2-84 DDNS 配置(主域 / RR / family / period)全部从 env 启动时读,
+//	运行时只能改 family + enabled。改主域 / RR / 周期都要 docker compose down
+//	+ 改 env + up,体验糟糕。v2.86-pr23a 把 RR / EnableA / EnableAAAA / Period
+//	搬到 panelstate(运行时面板可改,内存立即生效);主域名 Domain 仍然走 env
+//	(向后兼容,entrypoint / acme.sh 都依赖它)。
 //
 // 优先级链(高 → 低):
-//   1. /data/panel-state/ddns.conf  (面板 UI / API 填的,运行时改,立即生效)
-//   2. env 启动值(cfg.AliyunRR / IKEV2_DDNS_FAMILY / IKEV2_DDNS_PERIOD)
-//   3. 代码默认值(RR="@" / family="dual" / period=60s)
+//  1. /data/panel-state/ddns.conf  (面板 UI / API 填的,运行时改,立即生效)
+//  2. env 启动值(cfg.AliyunRR / IKEV2_DDNS_FAMILY / IKEV2_DDNS_PERIOD)
+//  3. 代码默认值(RR="@" / family="dual" / period=60s)
 //
 // 文件格式(JSON,跟 cert.conf / subnet.conf 同风格):
 //
@@ -30,7 +31,7 @@
 //   - aliyun.creds 是凭证,需要 mask + audit
 //   - ddns.conf 是配置,**不需要 audit + mask**
 //
-// 设计见 docs/design.md §19 + v2.86-pr23a 设计文档。
+// 见 docs/architecture.md §1。
 package panelstate
 
 import (
@@ -59,7 +60,7 @@ import (
 // 主域名 Domain **不存**这里 — 仍然走 env IKEV2_DDNS_DOMAIN(向后兼容,
 // entrypoint / acme.sh 都依赖 env,搬动成本大且容易出 bug)。
 type DDNSConfig struct {
-	RR            string `json:"rr,omitempty"`              // 默认 "vpn";空 / "@" = 主域本身
+	RR            string `json:"rr,omitempty"`             // 默认 "vpn";空 / "@" = 主域本身
 	EnableA       bool   `json:"enable_a"`                 // 默认 true
 	EnableAAAA    bool   `json:"enable_aaaa"`              // 默认 true
 	PeriodSeconds int    `json:"period_seconds,omitempty"` // 默认 60;范围 10-3600

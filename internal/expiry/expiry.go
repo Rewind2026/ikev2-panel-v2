@@ -1,5 +1,5 @@
-﻿// 过期账户自动清理 goroutine：每 60 秒扫过期用户 → terminate + 禁用。
-// 设计见 docs/design.md §3.7 + §5.9
+// 过期账户自动清理 goroutine：每 60 秒扫过期用户 → terminate + 禁用。
+// 见 docs/architecture.md §12.3
 package expiry
 
 import (

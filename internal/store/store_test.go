@@ -1,4 +1,4 @@
-﻿// 集成测试：用 in-memory SQLite（tempfile）跑全量 CRUD。
+// 集成测试：用 in-memory SQLite（tempfile）跑全量 CRUD。
 // 覆盖：users / sessions / admins 三表的增删查改 + 唯一约束冲突。
 package store
 

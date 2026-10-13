@@ -1,5 +1,5 @@
 // SA terminate：通过 VICI list-sas 找 unique id，再 VICI terminate 终止。
-// 设计见 docs/design.md §3.7
+// 见 docs/architecture.md §12.3
 //
 // VICI 协议重要发现（M8 实机测试）：
 //   - `terminate-IKE` / `terminate-all` 是 swanctl CLI 风格命名，**不在 VICI 协议层**
@@ -7,8 +7,8 @@
 //   - `ike-id` 是 IKE_SA 的唯一数字 ID，不是 EAP username
 //
 // 因此本实现走两步：
-//   1. list-sas streaming，找到 remote-id 匹配 username 的 IKE_SA，记下 uniqueid
-//   2. terminate(ike-id=<uniqueid>, force=yes) 强制终止
+//  1. list-sas streaming，找到 remote-id 匹配 username 的 IKE_SA，记下 uniqueid
+//  2. terminate(ike-id=<uniqueid>, force=yes) 强制终止
 //
 // 失败不致命：用户可能本来就没连接。
 package swanctl
@@ -109,7 +109,17 @@ func (m *Manager) findSAUniqueIDs(ctx context.Context, sess *vici.Session, usern
 		if ctx.Err() != nil {
 			return uids, ctx.Err()
 		}
-		uidStr := getString(m, "uniqueid")
+		// v2.86-PR19(B2):strongSwan 6.x list-sas streaming 顶层 key 是
+		// connection-name,val 才是嵌套的 SA Message(含 uniqueid/remote-id)。
+		// parser.go 路径已修,本路径漏改 —— 之前 uniqueid 永远为空,
+		// Terminate 恒"假成功",跟 parser 注释里说的"漏改存活两个版本"是同一个根因。
+		//
+		// unwrapSA 也兼容老格式(顶层本身就是 SA 字段时原样返回),无需分支判断。
+		inner := unwrapSA(m)
+		if inner == nil {
+			continue
+		}
+		uidStr := getString(inner, "uniqueid")
 		if uidStr == "" {
 			continue
 		}
@@ -118,7 +128,7 @@ func (m *Manager) findSAUniqueIDs(ctx context.Context, sess *vici.Session, usern
 			continue
 		}
 		// remote-id 形如 "2 alice" 或 "2 CN=alice"（charon 6.x 是 "type id"）
-		remoteID := getString(m, "remote-id")
+		remoteID := getString(inner, "remote-id")
 		if matchUsername(remoteID, username) {
 			uids = append(uids, uid)
 		}

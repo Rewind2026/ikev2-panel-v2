@@ -44,6 +44,11 @@ const (
 	ClassThrottling
 	// ClassTransient 临时错误(InternalError / 临时网络)— retry。
 	ClassTransient
+	// ClassNotFound 资源已不存在(如记录被删)— 立即失败,不 retry。
+	//
+	// 单列一类而不是塞进 Transient:"记录已经不存在"是终态事实,
+	// retry 三次(1s→4s→9s,约 14s)不可能让它回来,只是白等。
+	ClassNotFound
 )
 
 // String 用于日志输出。
@@ -57,6 +62,8 @@ func (c ErrorClass) String() string {
 		return "ThrottlingError"
 	case ClassTransient:
 		return "TransientError"
+	case ClassNotFound:
+		return "NotFoundError"
 	default:
 		return "UnknownError"
 	}
@@ -81,7 +88,7 @@ func (e *AliyunError) Error() string {
 
 // IsRetryable 是否可以重试(给 retry 循环用)。
 //
-// Auth / RAM → false(fail-fast)
+// Auth / RAM / NotFound → false(fail-fast)
 // Throttling / Transient / Unknown → true(retry)
 func (e *AliyunError) IsRetryable() bool {
 	c := Classify(e)
@@ -90,24 +97,25 @@ func (e *AliyunError) IsRetryable() bool {
 
 // IsFatal 是否立即失败(给 retry 循环用)。
 //
-// Auth / RAM → true(fail-fast)
+// Auth / RAM / NotFound → true(fail-fast)
 // 其他 → false
 func (e *AliyunError) IsFatal() bool {
 	c := Classify(e)
-	return c == ClassAuth || c == ClassRAM
+	return c == ClassAuth || c == ClassRAM || c == ClassNotFound
 }
 
 // Classify 把任意 error 分类为 ErrorClass enum。
 //
 // 规则(基于阿里云 OpenAPI v3 全局错误码 https://next.api.aliyun.com/global-error-code +
 //
-//	alidns 公共错误码 https://help.aliyun.com/zh/dns/api-alidns-2015-01-09-errorcodes):
-//   - AuthError:    InvalidAccessKeyId*, IncompleteSignature, SignatureDoesNotMatch,
-//                   Forbidden.AccessKeyDisabled, SignatureNonceUsed
-//   - RAMError:     Forbidden.RAM, DomainRecordNotBelongToRAM, NoPermission, AccessDenied
-//   - Throttling:   Throttling*, Throttling.User, Throttling.Api
-//   - Transient:    InternalError, ServiceUnavailable, DomainRecordNotFound
-//   - Unknown:      其他(保守 retry)
+//		alidns 公共错误码 https://help.aliyun.com/zh/dns/api-alidns-2015-01-09-errorcodes):
+//	  - AuthError:    InvalidAccessKeyId*, IncompleteSignature, SignatureDoesNotMatch,
+//	                  Forbidden.AccessKeyDisabled, SignatureNonceUsed
+//	  - RAMError:     Forbidden.RAM, DomainRecordNotBelongToRAM, NoPermission, AccessDenied
+//	  - Throttling:   Throttling*, Throttling.User, Throttling.Api
+//	  - NotFound:     DomainRecordNotFound(记录已不存在 — 终态,不 retry)
+//	  - Transient:    InternalError, ServiceUnavailable
+//	  - Unknown:      其他(保守 retry)
 //
 // 非 AliyunError(error wrap 链里没有 AliyunError)→ ClassUnknown(由 caller 决定)。
 func Classify(err error) ErrorClass {
@@ -129,8 +137,11 @@ func Classify(err error) ErrorClass {
 	// Throttling
 	case "Throttling", "Throttling.User", "Throttling.Api":
 		return ClassThrottling
+	// NotFound:记录已被删。retry 无意义(要人工重建记录)。
+	case "DomainRecordNotFound":
+		return ClassNotFound
 	// Transient
-	case "InternalError", "ServiceUnavailable", "DomainRecordNotFound":
+	case "InternalError", "ServiceUnavailable":
 		return ClassTransient
 	default:
 		// 子串匹配兜底(防御未枚举 Code)

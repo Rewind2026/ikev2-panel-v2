@@ -1,6 +1,6 @@
 #!/bin/bash
 # acme.sh --reloadcmd hook：续签成功后被调，让 charon + 面板 HTTPS 重新加载证书。
-# 设计见 docs/design.md §1.4.1 + §19.7 (v2-83) + v2.86-PR12
+# 设计说明见 docs/architecture.md §4.6
 #
 # 设计意图：
 #   - charon 默认不会自动重新读取证书，需要显式调 swanctl --load-creds

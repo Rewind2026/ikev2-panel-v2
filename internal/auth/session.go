@@ -1,4 +1,4 @@
-﻿// Session 工具：cookie 名常量 + CSRF token 校验。
+// Session 工具：cookie 名常量 + CSRF token 校验。
 package auth
 
 import (

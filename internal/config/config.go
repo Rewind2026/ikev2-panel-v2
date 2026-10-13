@@ -1,5 +1,5 @@
 // 环境变量 + 默认值。
-// 设计见 docs/design.md §5.1
+// 见 docs/architecture.md §6.1
 //
 // v2.86-PR13.0 重构:本包只负责 env 解析,**不再 import panelstate**。
 // panelstate + env 合并逻辑移到 internal/runtime(由 runtime.Merge 完成)。
@@ -9,6 +9,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -37,8 +38,8 @@ type Config struct {
 	ACMEWebroot string // HTTP-01 webroot，默认 /var/www/acme
 
 	// DDNS (v2-82 新增,v2-84 family-aware)
-	DDNSEnabled           bool   // 总开关 (env IKEV2_DDNS_ENABLED,默认 false)
-	DDNSFamily            string // v2-84:同步哪些 family — v4 / v6 / dual(默认 dual)
+	DDNSEnabled bool   // 总开关 (env IKEV2_DDNS_ENABLED,默认 false)
+	DDNSFamily  string // v2-84:同步哪些 family — v4 / v6 / dual(默认 dual)
 	// v2.86-pr23l:DDNSProbeTarget 已废弃。IPv4 公网地址由 internal/publicip
 	// 多家 API fallback 探测,不再依赖 net.Dial + target。
 	AliyunAccessKeyID     string // 阿里云 RAM AccessKey ID(env,见 v2-83)
@@ -98,12 +99,12 @@ func Load() (*Config, error) {
 		CookieSecure:           getbool("IKEV2_COOKIE_SECURE", true),
 
 		// DDNS (v2-82 + v2-83 凭证统一 + v2-84 family)
-		DDNSEnabled:           getbool("IKEV2_DDNS_ENABLED", false),
-		DDNSFamily:            parseFamily(getenv("IKEV2_DDNS_FAMILY", "dual")),
+		DDNSEnabled: getbool("IKEV2_DDNS_ENABLED", false),
+		DDNSFamily:  parseFamily(getenv("IKEV2_DDNS_FAMILY", "dual")),
 		// v2.86-pr23l:DDNSProbeTarget 字段废弃,不再读 IKEV2_DDNS_PROBE_TARGET。
 		// 老 env 仍会被读但忽略(下游 Config.DetectTarget 也已废弃)。
-		AliyunDomain:          getenv("ALIYUN_DOMAIN", ""),
-		AliyunRR:              getenv("ALIYUN_RR", "vpn"),
+		AliyunDomain: getenv("ALIYUN_DOMAIN", ""),
+		AliyunRR:     getenv("ALIYUN_RR", "vpn"),
 
 		// v2.85-PR3:显示时区。LoadLocation 失败时 fallback UTC + stderr WARN
 		DisplayTimezone: loadDisplayTimezone(),
@@ -124,10 +125,50 @@ func Load() (*Config, error) {
 	c.IPv6Subnet = getenv("IKEV2_VPN_SUBNET_V6", "")
 	c.SubnetConfigSource = "env-default"
 
+	// v2.86-pr24(P2-9):非 loopback 监听时提示一次公网暴露面。**只提示,不 refuse。**
+	//
+	// 为什么不能 refuse:本项目用 network_mode: host,容器与宿主共享网络命名空间,
+	// 没有 docker 端口映射这一层。绑 127.0.0.1 绑的是宿主自己的 loopback ——
+	// 容器内通、宿主上通,但其他机器一律连不上,而靠管理 IP 直连面板正是常规访问方式。
+	// 拦下来等于"装完就失联"(v2.86-PR19 就踩过这个坑,已回退)。
+	//
+	// 措辞只讲"谁能访问到",不把 LAN 可访问本身说成风险。
+	if !listenIsLoopback(c.ListenAddr) {
+		fmt.Fprintf(os.Stderr,
+			"WARN: IKEV2_LISTEN_ADDR=%s binds a non-loopback address — the panel is reachable from "+
+				"every host that can route to it. Keep the upstream firewall/ACL limited to your "+
+				"management network, or set 127.0.0.1:8443 to bind loopback only.\n",
+			c.ListenAddr)
+	}
+
 	if err := c.validate(); err != nil {
 		return nil, err
 	}
 	return c, nil
+}
+
+// listenIsLoopback 判断监听地址是否只绑 loopback(v2.86-pr24 P2-9)。
+//
+// 判定规则(与 docs/P2 回归矩阵一致):
+//   - IPv4 127.0.0.0/8、IPv6 ::1 → true
+//   - "localhost" → true
+//   - 通配(0.0.0.0 / ::)、内网 IP → false
+//   - 其它 hostname → **false**:刻意不解析。解析会把"域名恰好指向 127.0.0.1"
+//     判成 loopback,而 DNS 是部署者能改的东西 —— 判定不该依赖一次 DNS 查询。
+//   - 畸形输入(空串 / 缺端口)→ false:交给后续 validate 报错,这里不猜。
+func listenIsLoopback(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback()
 }
 
 // loadAliyunCredsFromEnv 从 env 读阿里云凭证(env 4 级优先级,跟 v2 一致)。

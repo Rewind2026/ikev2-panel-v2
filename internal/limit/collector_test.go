@@ -161,9 +161,9 @@ func TestCollectorMultiChildSameUser(t *testing.T) {
 
 // mockSwanctl implements SwanctlManager + 可动态改 SA 列表。
 type mockSwanctl struct {
-	mu    sync.Mutex
+	mu     sync.Mutex
 	saList []swanctl.SA
-	calls int
+	calls  int
 }
 
 func (m *mockSwanctl) ListSAs(_ context.Context) ([]swanctl.SA, error) {

@@ -41,13 +41,13 @@ import (
 	"path/filepath"
 )
 
-// AtomicWriteFile 把 data 原子写入 path(write tmp + rename)。
+// AtomicWriteFile 把 data 原子写入 path(write 唯一 tmp + rename)。
 //
 // 步骤:
 //  1. 确保父目录存在(0o755)
-//  2. 写到 path.tmp(perm)
+//  2. CreateTemp 建唯一 tmp(perm)
 //  3. fsync tmp(让数据真正落盘再 rename)
-//  4. os.Rename(path.tmp, path)(原子替换)
+//  4. os.Rename(tmp, path)(原子替换)
 //  5. 失败时清理 tmp
 func AtomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	dir := filepath.Dir(path)
@@ -55,20 +55,35 @@ func AtomicWriteFile(path string, data []byte, perm os.FileMode) error {
 		return fmt.Errorf("mkdir %s: %w", dir, err)
 	}
 
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	// tmp 名必须唯一(v2.86-pr24 B16)。
+	//
+	// 老实现用固定的 path+".tmp",同一 path 并发写会互相踩:一个 goroutine
+	// rename 走之后,另一个的 rename 拿到 ENOENT 直接失败;更糟的是两个写者
+	// 交错地 truncate + write,最终内容是"A 的头 + B 的尾"—— 而 rename 的原子性
+	// 保证的是"整份替换",保证不了"写自己那份数据"。后者才是真正的数据损坏。
+	//
+	// 崩溃残留也被顺带解决:固定名的 tmp 会被下一次的 O_TRUNC 当成有效数据源复用,
+	// CreateTemp 的随机名则每次都是全新文件。
+	f, err := os.CreateTemp(dir, filepath.Base(path)+".tmp.*")
 	if err != nil {
-		return fmt.Errorf("open tmp %s: %w", tmp, err)
+		return fmt.Errorf("create tmp in %s: %w", dir, err)
 	}
+	tmp := f.Name()
 
-	// cleanup 闭包:write 或 rename 失败时清理 tmp
-	tmpRemoved := false
+	// cleanup 闭包:失败时清掉自己的 tmp(成功路径下已被 rename 走,Remove 会失败,
+	// 无害)。只删自己那个随机名,不会误删别人的中间文件。
+	done := false
 	defer func() {
-		if !tmpRemoved {
+		if !done {
 			_ = os.Remove(tmp)
 		}
 	}()
 
+	// CreateTemp 一律 0600,调用方要的 perm 必须显式 chmod。
+	if err := f.Chmod(perm); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("chmod tmp %s: %w", tmp, err)
+	}
 	if _, err := f.Write(data); err != nil {
 		_ = f.Close()
 		return fmt.Errorf("write tmp %s: %w", tmp, err)
@@ -85,6 +100,6 @@ func AtomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	if err := os.Rename(tmp, path); err != nil {
 		return fmt.Errorf("rename %s -> %s: %w", tmp, path, err)
 	}
-	tmpRemoved = true
+	done = true
 	return nil
 }

@@ -10,9 +10,9 @@
 //   - 与 swanctl.conf 里的 local_addrs 比对，变了就 sed 替换 + swanctl --load-all
 //
 // 副作用：
-//   - swanctl --load-all 会中断活跃 SA ~500ms（charon 6.0.1 实现限制）
-//   - 单用户场景可接受，100+ 用户场景需要按 conn 卸载/重载（VICI 协议层能力不足，
-//     留作 future work）。
+//   - swanctl --load-all 会中断活跃 SA ~500ms（charon 重载的固有行为）
+//   - 单用户场景可接受；本项目只有一条连接，按 conn 细粒度重载无收益
+//     （见 loader.go 的 "P1-8 已撤销"）。
 package swanctl
 
 import (
@@ -49,9 +49,9 @@ type IPv6WatchConfig struct {
 // RunIPv6Watch 启动 IPv6 watch-dog，阻塞到 ctx.Done。
 //
 // 行为：
-//   1. 立即跑一次（启动时若 swanctl.conf 里的 v6 跟实际不符也立刻修正）
-//   2. 每 Period 跑一次
-//   3. 检测到变化：sed 替换 swanctl.conf + swanctl --load-all
+//  1. 立即跑一次（启动时若 swanctl.conf 里的 v6 跟实际不符也立刻修正）
+//  2. 每 Period 跑一次
+//  3. 检测到变化：sed 替换 swanctl.conf + swanctl --load-all
 func RunIPv6Watch(ctx context.Context, cfg IPv6WatchConfig) error {
 	if cfg.ConfPath == "" {
 		cfg.ConfPath = "/etc/swanctl/swanctl.conf"
@@ -159,8 +159,9 @@ func DetectGlobalV6(iface string) (string, error) {
 // 实现：扫 /proc/net/if_inet6，简单稳定，不依赖 netlink。
 //
 // /proc/net/if_inet6 格式（每行）：
-//   addr (32hex) ifindex (dec) prefix(hex) scope(hex) flags(hex) devname
-//   例子：2408832E08A510007EB4F9A371 4D8D 80 00 01 0C ens18
+//
+//	addr (32hex) ifindex (dec) prefix(hex) scope(hex) flags(hex) devname
+//	例子：2408832E08A510007EB4F9A371 4D8D 80 00 01 0C ens18
 func detectGlobalV6(iface string) (string, error) {
 	f, err := os.Open("/proc/net/if_inet6")
 	if err != nil {

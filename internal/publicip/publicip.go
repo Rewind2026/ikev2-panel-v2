@@ -5,10 +5,10 @@
 //   - 问题是:UDP dial 只是让内核选路由,**不实际发包**,LocalAddr 永远等于
 //     "本机出口网卡 IP",而不是真正从公网视角看到的 IP
 //   - 影响场景:
-//       1) 容器/bridge 网络 — LocalAddr 是容器内部 IP(不是宿主机公网 IP)
-//       2) CGNAT — ISP 分配的私网 100.64/10,LocalAddr 是这个私网 IP,不是公网
-//       3) VPS 多网卡 — 内核可能选了不对外的接口(比如 docker0)
-//       4) 拨号 PPPoE / IPsec tunnel 内 IP — 内核路由表都选错
+//     1) 容器/bridge 网络 — LocalAddr 是容器内部 IP(不是宿主机公网 IP)
+//     2) CGNAT — ISP 分配的私网 100.64/10,LocalAddr 是这个私网 IP,不是公网
+//     3) VPS 多网卡 — 内核可能选了不对外的接口(比如 docker0)
+//     4) 拨号 PPPoE / IPsec tunnel 内 IP — 内核路由表都选错
 //   - 这些场景下 DDNS 推上去的 IP 是错的,A 记录解析后客户端连不上
 //
 // 设计:
@@ -62,11 +62,11 @@ type Endpoint struct {
 // New 构造默认 Probe,境内 / 国际节点 fallback 链。
 //
 // 候选清单(按优先级):
-//  1) https://ip.cn — 境内,响应快
-//  2) https://myip.ipip.net — 境内,纯文本格式
-//  3) https://api.ipify.org — 国际,纯文本 IP
-//  4) https://ifconfig.me/ip — 国际,纯文本
-//  5) https://ipv4.icanhazip.com — 国际,纯文本
+//  1. https://ip.cn — 境内,响应快
+//  2. https://myip.ipip.net — 境内,纯文本格式
+//  3. https://api.ipify.org — 国际,纯文本 IP
+//  4. https://ifconfig.me/ip — 国际,纯文本
+//  5. https://ipv4.icanhazip.com — 国际,纯文本
 //
 // 用户可在 Endpoints 字段追加自定义节点(测试用 / 私有部署)。
 func New() *Probe {

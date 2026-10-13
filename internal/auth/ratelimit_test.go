@@ -1,14 +1,14 @@
 // v2.86-PR9:登录 rate limit 单元测试。
 //
 // 覆盖场景:
-//   1. 5 次失败触发锁定
-//   2. 锁定期间 CheckLogin 返回 false
-//   3. 锁定过期后 CheckLogin 返回 true
-//   4. 登录成功清零计数
-//   5. 全局 POST 限速
-//   6. 持久化往返
-//   7. X-Forwarded-For / X-Real-IP / RemoteAddr 三种 IP 来源
-//      (v2.86-PR15:必须 IKEV2_TRUSTED_PROXY=true 才信任 XFF;默认走 RemoteAddr)
+//  1. 5 次失败触发锁定
+//  2. 锁定期间 CheckLogin 返回 false
+//  3. 锁定过期后 CheckLogin 返回 true
+//  4. 登录成功清零计数
+//  5. 全局 POST 限速
+//  6. 持久化往返
+//  7. X-Forwarded-For / X-Real-IP / RemoteAddr 三种 IP 来源
+//     (v2.86-PR15:必须 IKEV2_TRUSTED_PROXY=true 才信任 XFF;默认走 RemoteAddr)
 package auth
 
 import (

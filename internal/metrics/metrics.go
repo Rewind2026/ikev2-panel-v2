@@ -4,12 +4,13 @@
 // 写 Prometheus exposition format 文本。
 //
 // 暴露的 metric:
-//   vpn_active_sas              gauge   当前 ESTABLISHED SA 数
-//   ddns_last_sync_unixtime{family} gauge 上次同步 unix 时间,per family
-//   le_cert_expiry_unixtime     gauge   LE 证书过期 unix 时间(0 = 自签)
-//   panel_login_attempts_total{result} counter 登录尝试 success/fail
-//   http_requests_total{method,path,status} counter
-//   http_request_duration_seconds{method,path} histogram(简化版:5 桶 + +Inf)
+//
+//	vpn_active_sas              gauge   当前 ESTABLISHED SA 数
+//	ddns_last_sync_unixtime{family} gauge 上次同步 unix 时间,per family
+//	le_cert_expiry_unixtime     gauge   LE 证书过期 unix 时间(0 = 自签)
+//	panel_login_attempts_total{result} counter 登录尝试 success/fail
+//	http_requests_total{method,path,status} counter
+//	http_request_duration_seconds{method,path} histogram(简化版:5 桶 + +Inf)
 //
 // Prometheus text 格式见 https://prometheus.io/docs/instrumenting/exposition_formats/
 package metrics
@@ -58,6 +59,23 @@ type httpDurKey struct {
 	Path   string
 }
 
+// maxLabelSeries 单个 metric 的 label 组合数上限（含 overflow 桶本身）。
+//
+// 为什么要上限：httpRequests / httpDuration 由请求方可无限撑大 ——
+// GET /install/{token} 是公开无鉴权路由（web/server.go），token 是 base64url(32B)=43 字符，
+// 任何人都能造出无限多个新 path。若 map 无界增长 = 无认证内存耗尽 DoS。
+//
+// 超限后的新组合全部归并到 overflowPath 桶，计数不丢，只是不再按 path 细分。
+// 已有组合继续精确累加（容量兜底不应该损失已有数据的精度）。
+const maxLabelSeries = 4096
+
+// overflowPath 超限组合归并到的 path label。
+const overflowPath = "{overflow}"
+
+// 超限阈值：overflow 桶本身也要占一个名额，所以真实组合只放 maxLabelSeries-1 个，
+// 保证 map 的 len 严格 ≤ maxLabelSeries。
+const overflowThreshold = maxLabelSeries - 1
+
 // histogram 5 桶 + +Inf(Prometheus 标准近似)。
 //
 // 桶边界(s):0.005, 0.01, 0.05, 0.1, 0.5, +Inf
@@ -77,8 +95,12 @@ func New() *Registry {
 
 // IncHTTPRequest 计一次 HTTP 请求,带 method/path/status。
 func (r *Registry) IncHTTPRequest(method, path string, status int) {
+	key := httpReqKey{method, path, status}
 	r.mu.Lock()
-	r.httpRequests[httpReqKey{method, path, status}]++
+	if _, ok := r.httpRequests[key]; !ok && len(r.httpRequests) >= overflowThreshold {
+		key.Path = overflowPath
+	}
+	r.httpRequests[key]++
 	r.mu.Unlock()
 }
 
@@ -92,8 +114,15 @@ func (r *Registry) ObserveHTTPDuration(method, path string, dur time.Duration) {
 	r.mu.Lock()
 	h, ok := r.httpDuration[key]
 	if !ok {
-		h = &histogram{}
-		r.httpDuration[key] = h
+		if len(r.httpDuration) >= overflowThreshold {
+			key.Path = overflowPath
+			// overflow 桶可能已被别的 method 占过,取回已有的继续累加。
+			h, ok = r.httpDuration[key]
+		}
+		if !ok {
+			h = &histogram{}
+			r.httpDuration[key] = h
+		}
 	}
 	seconds := dur.Seconds()
 	for i, b := range histogramBuckets {
@@ -134,9 +163,10 @@ var histogramBuckets = []float64{0.005, 0.01, 0.05, 0.1, 0.5}
 // Emit 写 Prometheus exposition format 到 w。
 //
 // 格式:
-//   # HELP <name> <help>
-//   # TYPE <name> <type>
-//   <name>{labels} <value>
+//
+//	# HELP <name> <help>
+//	# TYPE <name> <type>
+//	<name>{labels} <value>
 func (r *Registry) Emit(w io.Writer) error {
 	// 1) gauges
 	if err := writeGauge(w, "vpn_active_sas", "Number of currently ESTABLISHED IKEv2 SAs.", "",

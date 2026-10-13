@@ -117,16 +117,16 @@ func TestMobileConfigOpts_EncodeDecode(t *testing.T) {
 	})
 	t.Run("non-zero roundtrip", func(t *testing.T) {
 		in := MobileConfigOpts{
-			UserDefinedName:     strPtr("Home"),
-			DisconnectOnSleep:   boolPtr(true),
-			NATKeepaliveEnabled: boolPtr(false),
-			NATKeepaliveInterval: intPtr(120),
-			OnDemandEnabled:     boolPtr(true),
-			OnDemandProfile:     OnDemandHomeWiFiDisconnect,
-			OnDemandSSID:        "Home-5G",
-			IncludeAllNetworks:  boolPtr(true),
-			ExcludeLocalNetworks: boolPtr(false),
-			DNSServers:          []string{"1.1.1.1", "8.8.8.8"},
+			UserDefinedName:       strPtr("Home"),
+			DisconnectOnSleep:     boolPtr(true),
+			NATKeepaliveEnabled:   boolPtr(false),
+			NATKeepaliveInterval:  intPtr(120),
+			OnDemandEnabled:       boolPtr(true),
+			OnDemandProfile:       OnDemandHomeWiFiDisconnect,
+			OnDemandSSID:          "Home-5G",
+			IncludeAllNetworks:    boolPtr(true),
+			ExcludeLocalNetworks:  boolPtr(false),
+			DNSServers:            []string{"1.1.1.1", "8.8.8.8"},
 			DeadPeerDetectionRate: "Low",
 		}
 		encoded, err := EncodeMobileConfigOpts(&in)
@@ -283,15 +283,15 @@ func TestRenderMobileconfig_AcceptsOverlay(t *testing.T) {
 
 	// 关键断言:overlay 里的字段必须反映到 XML
 	checks := map[string]string{
-		"UserDefinedName":       "My Custom VPN",
-		"NATKeepaliveInterval":  `<key>NATKeepAliveInterval</key><integer>120</integer>`,
-		"DisconnectOnSleep=true": `<key>DisconnectOnSleep</key><true/>`,
+		"UserDefinedName":           "My Custom VPN",
+		"NATKeepaliveInterval":      `<key>NATKeepAliveInterval</key><integer>120</integer>`,
+		"DisconnectOnSleep=true":    `<key>DisconnectOnSleep</key><true/>`,
 		"NATKeepaliveEnabled=false": `<key>NATKeepAliveOffloadEnable</key><false/>`,
-		"OnDemandRules with SSID": `<key>SSIDMatch</key><array><string>Home-5G</string>`,
-		"IncludeAllNetworks=false": `<key>IncludeAllNetworks</key><false/>`,
-		"DNS 9.9.9.11":         `<string>9.9.9.11</string>`,
-		"DNS 149.112.112.11":   `<string>149.112.112.11</string>`,
-		"DPD Low":               `<key>DeadPeerDetectionRate</key><string>Low</string>`,
+		"OnDemandRules with SSID":   `<key>SSIDMatch</key><array><string>Home-5G</string>`,
+		"IncludeAllNetworks=false":  `<key>IncludeAllNetworks</key><false/>`,
+		"DNS 9.9.9.11":              `<string>9.9.9.11</string>`,
+		"DNS 149.112.112.11":        `<string>149.112.112.11</string>`,
+		"DPD Low":                   `<key>DeadPeerDetectionRate</key><string>Low</string>`,
 	}
 	for name, sub := range checks {
 		if !strings.Contains(s, sub) {

@@ -1,20 +1,21 @@
 // PanelState:管理员全局 mobileconfig 默认值(v2.86-PR12.22 新增)。
 //
 // 背景:
-//   v2.86-PR12.21 把 mobileconfig 的可调字段抽到 store.User.MobileConfigOpts
-//   (每用户 overlay),但 baseline(无人覆盖时)还是写死在 cert.DefaultMobileConfigOpts()
-//   —— 管理员没法批量改默认值(例如把全公司员工的 NAT keepalive 调成 120s,
-//   现在只能逐个 user 改 N 次)。
+//
+//	v2.86-PR12.21 把 mobileconfig 的可调字段抽到 store.User.MobileConfigOpts
+//	(每用户 overlay),但 baseline(无人覆盖时)还是写死在 cert.DefaultMobileConfigOpts()
+//	—— 管理员没法批量改默认值(例如把全公司员工的 NAT keepalive 调成 120s,
+//	现在只能逐个 user 改 N 次)。
 //
 // 本文件提供 admin 级别的"全局默认模板",让管理员:
-//   1. 在面板后台集中改一组 baseline
-//   2. 用户没设 overlay 时,用这组 baseline 渲染 mobileconfig
-//   3. 用户设了 overlay 时,字段级覆盖 baseline(overlay > baseline > builtin)
+//  1. 在面板后台集中改一组 baseline
+//  2. 用户没设 overlay 时,用这组 baseline 渲染 mobileconfig
+//  3. 用户设了 overlay 时,字段级覆盖 baseline(overlay > baseline > builtin)
 //
 // 优先级链(高 → 低):
-//   1. store.User.MobileConfigOpts  (per-user overlay,PR12.21)
-//   2. panelstate.MobileConfigDefaults (admin global baseline,本 PR)
-//   3. cert.BaseMobileConfigDefaults() (builtin 出厂值,不可改)
+//  1. store.User.MobileConfigOpts  (per-user overlay,PR12.21)
+//  2. panelstate.MobileConfigDefaults (admin global baseline,本 PR)
+//  3. cert.BaseMobileConfigDefaults() (builtin 出厂值,不可改)
 //
 // 跟 cert.conf (PR12.5) 的对比:
 //   - cert.conf 是**启动时一次配置**(模式/域名/CN),改了需重启容器
@@ -24,7 +25,7 @@
 //     改 admin defaults 只是改 cert.RenderMobileconfig 内部读到的常量表,
 //     没有任何 I/O / 进程级副作用,纯 CPU 操作。
 //
-// 设计见 docs/design.md §19.6(v2-83)+ v2.86-PR12.22 mobileconfig admin defaults。
+// 见 docs/architecture.md §1（internal/panelstate）。
 package panelstate
 
 import (
@@ -148,6 +149,33 @@ func (d *MobileConfigDefaults) Validate() error {
 		DNSServers:            d.DNSServers,
 		DeadPeerDetectionRate: d.DeadPeerDetectionRate,
 	}
+
+	// v2.86-PR19(A13):home_wifi_disconnect 的 SSID 必填规则不能作用于 admin 层。
+	//
+	// 原来直接 return tmp.Validate(),而 cert.Validate() 里有:
+	//   if OnDemandProfile == home_wifi_disconnect && OnDemandSSID == "" → error
+	// 但本 struct **刻意没有 OnDemandSSID 字段**(SSID 是 per-network 的,
+	// 见结构体注释),所以 tmp.OnDemandSSID 恒为 ""。
+	// 结果:管理员在全局默认里选"家里 Wi-Fi 断开 VPN"→ 保存 100% 失败,
+	// 只能看到一条"on_demand_profile=... 必须填 ondemand_ssid"的错误 banner,
+	// 而 admin 表单里根本没有 SSID 输入框 —— 死选项。
+	//
+	// 修法:给个占位 SSID 骗过这条校验。真正生效时 renderOnDemandRules 会在
+	// per-user 层拿到用户填的 SSID;某用户没填的话,per-user 层的
+	// cert.MobileConfigOpts.Validate 会拦下。
+	//
+	// 同理,cert.Validate() 里 A13 新增的"manual ⇒ OnDemandEnabled 必须为 false"
+	// 交叉规则在 admin 层也一刀切豁免 —— admin 选 manual + on_demand_enabled=1
+	// 是合法意图(全局关掉按需),cert 层那条规则针对的是 per-user overlay。
+	if d.OnDemandProfile == string(cert.OnDemandHomeWiFiDisconnect) {
+		// 占位串 ≤32 字节,别触发 SSID 长度校验
+		tmp.OnDemandSSID = "admin-layer-placeholder"
+	}
+	if d.OnDemandProfile == string(cert.OnDemandManual) {
+		// 交叉规则豁免:强制 tmp.OnDemandEnabled 为 nil 让校验跳过
+		tmp.OnDemandEnabled = nil
+	}
+
 	return tmp.Validate()
 }
 

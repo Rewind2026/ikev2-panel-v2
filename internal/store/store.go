@@ -1,5 +1,5 @@
 // SQLite 打开 + 迁移
-// 设计见 docs/design.md §6
+// 见 docs/architecture.md §5
 package store
 
 import (
@@ -78,7 +78,7 @@ func (s *Store) Close() error {
 	return s.DB.Close()
 }
 
-// migrate 跑迁移。v2 只有一个 001_init（design §6 完整 schema）。
+// migrate 跑迁移。完整 schema 见 docs/architecture.md §5.1。
 // 未来 schema 变更加 002_xxx、003_xxx 即可。
 func (s *Store) migrate(ctx context.Context) error {
 	stmts := []string{

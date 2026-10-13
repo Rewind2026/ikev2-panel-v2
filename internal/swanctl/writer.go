@@ -1,5 +1,5 @@
 // swanctl 子配置写入与删除。
-// 设计见 docs/design.md §9.2
+// 见 docs/architecture.md §12.1
 //
 // Manager / New / WithConfDir / WithSkipVici 定义在 loader.go（同 package）。
 // 这里只放文件 CRUD 方法。
@@ -63,7 +63,7 @@ func (m *Manager) ReadCurrentPoolsFromFile() (ipv4, ipv6 string) {
 
 // WriteUserConf 写一个用户的子配置文件（secrets 块）。
 //
-// 关键设计（design §9.2）：
+// 关键设计见 docs/architecture.md §12.1：
 //   - 每用户独立 .conf 文件
 //   - 删除用户 = 删除文件 + VICI load-all，比修改大文件更安全
 //   - 文件权限 0600（charon 读取时要求）
@@ -193,14 +193,21 @@ func UpdatePools(confContent []byte, ipv4, ipv6 string) ([]byte, error) {
 //
 //   - 整体持 reloadMu(避免跟 WriteUserConfAndReload / RemoveUserConfAndReload 并发)
 //   - 写 tmp + rename 原子替换 swanctl.conf
-//   - 立即 ReloadAll 让 charon 拿到新 pool 段
+//   - 立即重载让 charon 拿到新 pool 段
 //
-// 副作用:
-//   - charon 会卸载当前活跃 SA(swanctl --load-all 的固有行为,~500ms 中断)
-//   - 客户端需要重新拨号才能拿到新 IP 段
+// 重载命令是 `swanctl --load-all`:改的是 pool 段,而官方定义的 --load-all =
+// --load-conns + --load-creds + --load-authorities + --load-pools,只有它含 --load-pools。
+// 用 --load-conns 替代会漏掉 pool 本身,改动可能不生效。
 //
-// 错误:文件不存在/没找到 pool 段/write tmp 失败/Rename 失败/ReloadAll 失败 →
-//   返回 error,**但已写入的文件保留**(避免回滚复杂),调用方决定是否回滚。
+// **不要**改成按连接名细粒度重载(见下方 P1-8 说明):本项目只有 ikev2-rw 一条连接,
+// 细粒度重载零收益,而 CLI 根本没有 --load-conn(单数)这个子命令。
+//
+// 副作用:charon 会卸载活跃 SA(swanctl 重载的固有行为),客户端需重新拨号拿新 IP 段。
+//
+// 错误:文件不存在/没找到 pool 段/write tmp 失败/Rename 失败/reload 失败 →
+//
+//	返回 error。reload 失败时会**原子回滚** swanctl.conf;回滚也失败则明确告知
+//	"磁盘是新值而 charon 用的是旧值,需要人工介入"。
 //
 // dev 模式(/etc/swanctl/swanctl.conf 不存在)→ 静默返回 nil。
 // 原因:dev server 没有 charon / swanctl.conf,UpdatePools 没有写入目标。
@@ -256,9 +263,57 @@ func (m *Manager) UpdatePoolsAndReload(ctx context.Context, ipv4, ipv6 string) e
 		return fmt.Errorf("rename tmp -> %s: %w", confPath, err)
 	}
 
-	// 4. reload(走 reloadMu 内版本,reloadAllLocked 在 loader.go)
+	// 4. reload(走 reloadMu 内版本)
 	if err := m.reloadAllLocked(ctx); err != nil {
-		return fmt.Errorf("swanctl reload: %w", err)
+		// reload 失败 → 磁盘必须回到改之前的内容。
+		//
+		// 不回滚的实际后果:面板显示"改 IP 段失败",运维以为没生效就改回去,
+		// 但 swanctl.conf 里躺着一个从未生效过的 pool 段。等哪天 swanctl 因为别的原因
+		// 重载了配置,这个用户没确认过的 IP 段就突然生效了。
+		if rbErr := restoreFile(confPath, orig); rbErr != nil {
+			return fmt.Errorf("swanctl reload 失败,且回滚 swanctl.conf 也失败 —— 磁盘上是**新值**"+
+				"而 charon 用的是旧值,需要人工介入: reload err=%w; rollback err=%w", err, rbErr)
+		}
+		return fmt.Errorf("swanctl reload 失败,swanctl.conf 已回滚: %w", err)
+	}
+	return nil
+}
+
+// restoreFile 把 path 的内容原子地换回 content(v2.86-pr24:UpdatePoolsAndReload 回滚)。
+//
+// 走 tmp + rename 而不是 os.WriteFile:直接截断重写会让读方(charon)有拿到
+// 半截文件"的窗口,那比重载失败本身更糟 —— 配置语法错误会让 charon 起不来。
+//
+// 每一步失败都点名是哪一步(create / write / chmod / close / rename),
+// 这条错误会被包进 UpdatePoolsAndReload 的返回值,是运维判断"要不要手工介入"
+// 的唯一线索;笼统的"回滚失败"会让人以为是 reload 的问题。
+func restoreFile(path string, content []byte) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".swanctl.conf.rollback.*.tmp")
+	if err != nil {
+		return fmt.Errorf("rollback tmp create in %s: %w", dir, err)
+	}
+	tmpName := tmp.Name()
+	defer func() {
+		// 出错时清 tmp(成功路径下 tmp 已被 rename,Stat 会失败,自然跳过)
+		if _, statErr := os.Stat(tmpName); statErr == nil {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if _, err := tmp.Write(content); err != nil {
+		tmp.Close()
+		return fmt.Errorf("rollback tmp write: %w", err)
+	}
+	// 0644:charon 要读这个文件
+	if err := tmp.Chmod(0o644); err != nil {
+		tmp.Close()
+		return fmt.Errorf("rollback tmp chmod: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("rollback tmp close: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("rollback tmp rename -> %s: %w", path, err)
 	}
 	return nil
 }

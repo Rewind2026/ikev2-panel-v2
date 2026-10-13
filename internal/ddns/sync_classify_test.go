@@ -10,6 +10,7 @@
 package ddns
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -28,8 +29,8 @@ import (
 // mockAliyunResp 构造阿里云错误响应的 JSON body。
 func mockAliyunResp(code, message string) string {
 	b, _ := json.Marshal(map[string]string{
-		"Code":    code,
-		"Message": message,
+		"Code":      code,
+		"Message":   message,
 		"RequestId": "test-request-id",
 	})
 	return string(b)
@@ -105,17 +106,17 @@ func newSyncWithMockClient(t *testing.T, srv *alidnsMockServer) (*Sync, *dns.Ali
 	t.Helper()
 	tmp := t.TempDir()
 	cfg := Config{
-		Enabled:              true,
-		Family:               "v4",
-		AliyunAccessKeyID:    "ak",
+		Enabled:               true,
+		Family:                "v4",
+		AliyunAccessKeyID:     "ak",
 		AliyunAccessKeySecret: "sk",
-		Domain:               "example.com",
-		RR:                   "vpn",
-		Period:               100 * time.Millisecond,
-		Throttle:             0,
-		LastFailedFile:       filepath.Join(tmp, "FAILED"),
-		StateFile:            filepath.Join(tmp, "state"),
-		Logger:               slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
+		Domain:                "example.com",
+		RR:                    "vpn",
+		Period:                100 * time.Millisecond,
+		Throttle:              0,
+		LastFailedFile:        filepath.Join(tmp, "FAILED"),
+		StateFile:             filepath.Join(tmp, "state"),
+		Logger:                slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
 	}
 	s := NewSync(cfg)
 
@@ -153,7 +154,7 @@ func TestUpsertRecord_AuthError_NotRetrying(t *testing.T) {
 	srv := newAlidnsMockForUpdate(rec, authErr)
 	s, c := newSyncWithMockClient(t, srv)
 
-	oldIP, err := s.upsertRecord(s.snapshot(), c, dns.RecordTypeA, "2.2.2.2")
+	oldIP, err := s.upsertRecord(context.Background(), s.snapshot(), c, dns.RecordTypeA, "2.2.2.2")
 
 	if err == nil {
 		t.Fatal("expected error for AuthError, got nil")
@@ -186,7 +187,7 @@ func TestUpsertRecord_RAMError_NotRetrying(t *testing.T) {
 	srv := newAlidnsMockForUpdate(rec, ramErr)
 	s, c := newSyncWithMockClient(t, srv)
 
-	_, err := s.upsertRecord(s.snapshot(), c, dns.RecordTypeA, "3.3.3.3")
+	_, err := s.upsertRecord(context.Background(), s.snapshot(), c, dns.RecordTypeA, "3.3.3.3")
 
 	if err == nil {
 		t.Fatal("expected error for RAMError, got nil")
@@ -217,7 +218,7 @@ func TestUpsertRecord_Throttling_Retries3Times(t *testing.T) {
 	s, c := newSyncWithMockClient(t, srv)
 
 	start := time.Now()
-	_, err := s.upsertRecord(s.snapshot(), c, dns.RecordTypeA, "4.4.4.4")
+	_, err := s.upsertRecord(context.Background(), s.snapshot(), c, dns.RecordTypeA, "4.4.4.4")
 	elapsed := time.Since(start)
 
 	// Throttling 走完 3 次 retry:每次 sleep 1s/4s/9s,合计 ~14s
@@ -246,7 +247,7 @@ func TestUpsertRecord_Success(t *testing.T) {
 	srv := newAlidnsMockForUpdate(rec, nil)
 	s, c := newSyncWithMockClient(t, srv)
 
-	oldIP, err := s.upsertRecord(s.snapshot(), c, dns.RecordTypeA, "5.5.5.5")
+	oldIP, err := s.upsertRecord(context.Background(), s.snapshot(), c, dns.RecordTypeA, "5.5.5.5")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

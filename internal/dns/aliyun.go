@@ -15,6 +15,7 @@
 package dns
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -132,7 +133,7 @@ type Record struct {
 //   - 找到多条 → 返回 nil, fmt.Errorf("multiple %s records found")
 //   - API 错误 → 返回 nil, err
 //   - recordType 非法 → 返回 nil, error(不调 API)
-func (c *AliyunClient) FindRecord(domainName, rr, recordType string) (*Record, error) {
+func (c *AliyunClient) FindRecord(ctx context.Context, domainName, rr, recordType string) (*Record, error) {
 	if !validRecordType(recordType) {
 		return nil, fmt.Errorf("invalid recordType %q (supported: %s, %s)",
 			recordType, RecordTypeA, RecordTypeAAAA)
@@ -148,7 +149,7 @@ func (c *AliyunClient) FindRecord(domainName, rr, recordType string) (*Record, e
 			Record []Record `json:"Record"`
 		} `json:"DomainRecords"`
 	}
-	if err := c.call("DescribeDomainRecords", params, &resp); err != nil {
+	if err := c.call(ctx, "DescribeDomainRecords", params, &resp); err != nil {
 		return nil, fmt.Errorf("DescribeDomainRecords: %w", err)
 	}
 
@@ -173,7 +174,7 @@ func (c *AliyunClient) FindRecord(domainName, rr, recordType string) (*Record, e
 //
 // v2-84 改造:recordType 参数化(支持 A / AAAA)。
 // 白名单校验在内部完成,非法值直接 return error 不调 API。
-func (c *AliyunClient) UpdateRecordValue(recordID, rr, recordType, value string, ttl int) error {
+func (c *AliyunClient) UpdateRecordValue(ctx context.Context, recordID, rr, recordType, value string, ttl int) error {
 	if !validRecordType(recordType) {
 		return fmt.Errorf("invalid recordType %q (supported: %s, %s)",
 			recordType, RecordTypeA, RecordTypeAAAA)
@@ -191,7 +192,7 @@ func (c *AliyunClient) UpdateRecordValue(recordID, rr, recordType, value string,
 	var resp struct {
 		RecordID string `json:"RecordId"`
 	}
-	if err := c.call("UpdateDomainRecord", params, &resp); err != nil {
+	if err := c.call(ctx, "UpdateDomainRecord", params, &resp); err != nil {
 		return fmt.Errorf("UpdateDomainRecord: %w", err)
 	}
 	return nil
@@ -199,8 +200,9 @@ func (c *AliyunClient) UpdateRecordValue(recordID, rr, recordType, value string,
 
 // AddDomainRecord v2.86-pr23f:在阿里云 DNS 上创建一条新解析记录。
 //
-// 用途:用户首次配置 DDNS,域名下还没有对应记录时,让面板一键创建
-// (而不是只 WARN 让用户去阿里云控制台手动建 — 那是曲线返工的流程)。
+// 用途:两条调用方 —— ① ddns 同步循环在记录不存在时自动补建;
+// ② 面板 DDNS 卡的「在阿里云创建」按钮(v2.86-pr23f)。
+// 两者都不把用户推去阿里云控制台手动建 —— 那是曲线返工的流程。
 //
 // 参数:
 //   - domainName:主域名(如 "example.com")
@@ -210,7 +212,7 @@ func (c *AliyunClient) UpdateRecordValue(recordID, rr, recordType, value string,
 //   - ttl:缓存秒数(<=0 → 默认 600)
 //
 // 返回:新建记录的 RecordId。
-func (c *AliyunClient) AddDomainRecord(domainName, rr, recordType, value string, ttl int) (string, error) {
+func (c *AliyunClient) AddDomainRecord(ctx context.Context, domainName, rr, recordType, value string, ttl int) (string, error) {
 	if !validRecordType(recordType) {
 		return "", fmt.Errorf("invalid recordType %q (supported: %s, %s)",
 			recordType, RecordTypeA, RecordTypeAAAA)
@@ -228,7 +230,7 @@ func (c *AliyunClient) AddDomainRecord(domainName, rr, recordType, value string,
 	var resp struct {
 		RecordID string `json:"RecordId"`
 	}
-	if err := c.call("AddDomainRecord", params, &resp); err != nil {
+	if err := c.call(ctx, "AddDomainRecord", params, &resp); err != nil {
 		return "", fmt.Errorf("AddDomainRecord: %w", err)
 	}
 	if resp.RecordID == "" {
@@ -237,8 +239,12 @@ func (c *AliyunClient) AddDomainRecord(domainName, rr, recordType, value string,
 	return resp.RecordID, nil
 }
 
+// maxResponseBytes 响应体上限。alidns 正常响应只有几 KB,
+// 但对端不可信 —— 无上限的 io.ReadAll 等于把内存交给对方。
+const maxResponseBytes = 1 << 20 // 1 MB
+
 // call 通用 alidns API 调用,负责签名 + HTTP POST。
-func (c *AliyunClient) call(action string, params url.Values, result interface{}) error {
+func (c *AliyunClient) call(ctx context.Context, action string, params url.Values, result interface{}) error {
 	// 公共参数(签名 v3 必需)
 	params.Set("AccessKeyId", c.AccessKeyID)
 	params.Set("Action", action)
@@ -254,16 +260,31 @@ func (c *AliyunClient) call(action string, params url.Values, result interface{}
 	signature := c.signRequest(params)
 	params.Set("Signature", signature)
 
-	// POST form-encoded
-	resp, err := c.HTTPClient.PostForm(GetAlidnsEndpoint(), params)
+	// POST form-encoded。用 NewRequestWithContext 而非 PostForm:
+	// PostForm 只能用 Background ctx,DDNS tick 被取消时在途请求要等满 10s 超时。
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, GetAlidnsEndpoint(), strings.NewReader(params.Encode()))
+	if err != nil {
+		return fmt.Errorf("build request %s: %w", action, err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("POST %s: %w", GetAlidnsEndpoint(), err)
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	// 限长读:超限直接判错,不把整个 body 读进内存。
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
 		return fmt.Errorf("read response: %w", err)
+	}
+	if len(body) > maxResponseBytes {
+		return &AliyunError{
+			HTTPStatus: resp.StatusCode,
+			Code:       "ResponseTooLarge",
+			Message:    fmt.Sprintf("%s 响应超过 %d 字节上限,已丢弃", action, maxResponseBytes),
+		}
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -311,11 +332,11 @@ func (c *AliyunClient) call(action string, params url.Values, result interface{}
 // signRequest 计算阿里云 API v3 签名。
 //
 // 签名算法:
-//   1. 排序所有参数(除 Signature 外)
-//   2. 拼 "key1=value1&key2=value2..."
-//   3. 加前后缀: "GET&%2F&<urlencoded-canonical-string>"
-//   4. 用 AccessKeySecret + "&" HMAC-SHA256
-//   5. base64 编码
+//  1. 排序所有参数(除 Signature 外)
+//  2. 拼 "key1=value1&key2=value2..."
+//  3. 加前后缀: "GET&%2F&<urlencoded-canonical-string>"
+//  4. 用 AccessKeySecret + "&" HMAC-SHA256
+//  5. base64 编码
 //
 // 文档: https://help.aliyun.com/zh/sdk/developer-reference/v3-request-structure-and-signature
 func (c *AliyunClient) signRequest(params url.Values) string {

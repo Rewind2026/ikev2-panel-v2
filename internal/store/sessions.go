@@ -1,5 +1,5 @@
-﻿// sessions 表 CRUD
-// 设计见 docs/design.md §6.2
+// sessions 表 CRUD
+// 见 docs/architecture.md §5
 package store
 
 import (

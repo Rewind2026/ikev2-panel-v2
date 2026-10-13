@@ -1,5 +1,5 @@
-﻿// Let's Encrypt 集成（acme.sh）。
-// 设计见 docs/design.md §1.4.1
+// Let's Encrypt 集成（acme.sh）。
+// 见 docs/architecture.md §12.2
 //
 // 工具选型：acme.sh（纯 shell + curl，容器内轻量；certbot 需要 Python 太重）
 // 流程：
@@ -24,7 +24,7 @@ type LERenewStatus struct {
 	LastRenewFailed bool      // 是否最近一次续签失败
 	LastChecked     time.Time // 检查时间
 	CertExpires     time.Time // 当前证书过期时间
-	DaysLeft        int        // 距过期天数
+	DaysLeft        int       // 距过期天数
 }
 
 // CheckLERenewStatus 读取 LE 模式续签状态。
@@ -32,7 +32,7 @@ type LERenewStatus struct {
 //   - LAST_RENEW_FAILED 文件：续签脚本失败时会 touch 此文件
 //   - 当前证书：/etc/swanctl/x509/$DOMAIN.pem
 //
-// 设计见 design §1.4.1 + architecture §3.10
+// 设计见 docs/architecture.md §3.10 与 §4.6
 func CheckLERenewStatus(certPath string) LERenewStatus {
 	st := LERenewStatus{LastChecked: time.Now()}
 

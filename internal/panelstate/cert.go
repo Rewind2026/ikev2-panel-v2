@@ -1,14 +1,15 @@
 // PanelState:证书配置运行时持久化(v2.86-PR12.5 新增)。
 //
 // 背景:
-//   v2-79 设计里,CertMode / Domain / ServerCN / ACMEEmail 都只能从 env 读,
-//   用户要切换 self-signed <-> letsencrypt 必须 docker compose down + 改 env + up,
-//   体验糟糕。v2.86-PR12.5 把这些字段搬到面板运行时配置,
-//   写 /data/panel-state/cert.conf,Go + entrypoint 都从这里读。
+//
+//	v2-79 设计里,CertMode / Domain / ServerCN / ACMEEmail 都只能从 env 读,
+//	用户要切换 self-signed <-> letsencrypt 必须 docker compose down + 改 env + up,
+//	体验糟糕。v2.86-PR12.5 把这些字段搬到面板运行时配置,
+//	写 /data/panel-state/cert.conf,Go + entrypoint 都从这里读。
 //
 // 优先级链(高 → 低):
-//   1. /data/panel-state/cert.conf (面板运行时)
-//   2. IKEV2_CERT_MODE / IKEV2_DOMAIN / IKEV2_SERVER_CN / IKEV2_ACME_EMAIL env
+//  1. /data/panel-state/cert.conf (面板运行时)
+//  2. IKEV2_CERT_MODE / IKEV2_DOMAIN / IKEV2_SERVER_CN / IKEV2_ACME_EMAIL env
 //
 // 文件格式(JSON,跟 aliyun.creds 同风格):
 //
@@ -32,7 +33,7 @@
 //   - 不做"运行时存储"(跟 AliyunCreds 不同):cert 模式变了 cert 文件路径变了,
 //     进程里的 tls.Certificate 也要重 load,涉及 swanctl 重启,运行时改不安全
 //
-// 设计见 docs/design.md §19.6(v2-83) + v2.86-PR12.5 扩展。
+// 见 docs/architecture.md §1（internal/panelstate）。
 package panelstate
 
 import (
@@ -58,9 +59,9 @@ import (
 // 是更稳妥的修复 —— 老镜像 / 老 cert.conf 也能正常工作。)
 type CertConfig struct {
 	CertMode  string `json:"cert_mode"`            // "self-signed" / "letsencrypt"
-	Domain    string `json:"domain"`              // LE 模式必填,自签模式忽略
-	ServerCN  string `json:"server_cn"`           // mobileconfig RemoteIdentifier;空时 fallback 到 Domain 或 "vpn.local"
-	ACMEEmail string `json:"acme_email"`          // LE 注册邮箱(可选,Let's Encrypt 不强制)
+	Domain    string `json:"domain"`               // LE 模式必填,自签模式忽略
+	ServerCN  string `json:"server_cn"`            // mobileconfig RemoteIdentifier;空时 fallback 到 Domain 或 "vpn.local"
+	ACMEEmail string `json:"acme_email"`           // LE 注册邮箱(可选,Let's Encrypt 不强制)
 	UpdatedAt int64  `json:"updated_at,omitempty"` // unix seconds,更新时间戳
 }
 

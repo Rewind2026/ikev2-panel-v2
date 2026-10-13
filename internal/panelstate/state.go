@@ -14,7 +14,7 @@
 //   - 那些是"标志文件"(纯文本一字节),不是凭证
 //   - panelstate 是"凭证存储"(结构化 JSON)
 //
-// 设计见 docs/design.md §19.6(v2-83)。
+// 见 docs/architecture.md §1（internal/panelstate）。
 package panelstate
 
 import (

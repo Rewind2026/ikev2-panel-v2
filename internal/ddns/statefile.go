@@ -29,6 +29,79 @@ import (
 	"github.com/yourname/ikev2-panel-v2/internal/swanctl"
 )
 
+// DefaultStateFile v2.86-pr24(B6):DDNS 运行时状态文件的默认路径。
+//
+// 必须在 /data 命名卷内。docker-compose.yml 只把 /data 挂成卷
+// (tmpfs 只有 /etc/swanctl、/etc/cron.d),老默认 /etc/ikev2/ddns.conf
+// 落在容器可写层 → docker compose down / 重建镜像 / 换容器都会连带丢掉,
+// 面板上配的 DDNS 开关、RR、节流时间戳重启后全回默认。
+//
+// 文件名不叫 ddns.conf:panelstate 的 ddns.conf(JSON)已经占用那个名字,
+// ddns 包写的是 INI-style key=value,同名会两边互相覆盖。
+const DefaultStateFile = "/data/panel-state/ddns-runtime.conf"
+
+// legacyStateFile v2.86-pr24 之前的默认路径,仅用于一次性迁移。
+const legacyStateFile = "/etc/ikev2/ddns.conf"
+
+// migrateLegacyStateFile 把老路径的状态文件搬到新路径(v2.86-pr24 B6 升级兼容)。
+//
+// 四条不搬的规则,每条都对应一个踩过的坑:
+//  1. 同路径 / 参数为空 → 直接返回。尤其不能同路径时"复制完删源",那是自己删自己。
+//  2. 旧文件不存在(全新安装)→ 什么都不做,连新文件都不建。
+//  3. 旧文件是空白 → 不搬。空白搬过去后 parseStateFile 得到 Enabled=false,
+//     反过来把 env 里 DDNSEnabled=true 的部署直接关掉 DDNS。
+//  4. 新文件已存在 → 旧文件原样留着,新优先。
+//
+// 搬的是**字节一致**的副本:不经过 writeStateFile(那个函数会加 header 并补全
+// 字段)。格式现代化交给调用方紧接着跑的 migrateStateFileIfNeeded。
+//
+// 任何一步失败都只记日志不 fatal:迁移失败最坏结果是回退到"读不到状态文件",
+// 用户在面板上重设一次即可,不该让面板起不来。
+func migrateLegacyStateFile(newPath, oldPath string, logger *slog.Logger) {
+	if newPath == "" || oldPath == "" || newPath == oldPath {
+		return
+	}
+	oldData, err := os.ReadFile(oldPath)
+	if err != nil {
+		return // 规则 2:全新安装,或读不了(权限等)→ 无事可做
+	}
+	if strings.TrimSpace(string(oldData)) == "" {
+		return // 规则 3:空白不搬
+	}
+	if _, err := os.Stat(newPath); err == nil {
+		return // 规则 4:新路径已有数据,不覆盖也不删旧文件
+	}
+
+	dir := filepath.Dir(newPath)
+	if dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			if logger != nil {
+				logger.Warn("ddns: cannot create state file dir, skipping legacy migration",
+					"dir", dir, "err", err)
+			}
+			return
+		}
+	}
+	if err := swanctl.AtomicWriteFile(newPath, oldData, 0o644); err != nil {
+		if logger != nil {
+			logger.Warn("ddns: legacy state file migration failed; will retry next start",
+				"from", oldPath, "to", newPath, "err", err)
+		}
+		return
+	}
+	if err := os.Remove(oldPath); err != nil {
+		// 内容已经搬走了,删不掉只是留个垃圾文件,不影响功能
+		if logger != nil {
+			logger.Warn("ddns: legacy state file copied but not removed",
+				"path", oldPath, "err", err)
+		}
+	}
+	if logger != nil {
+		logger.Info("ddns: legacy state file migrated into the data volume",
+			"from", oldPath, "to", newPath)
+	}
+}
+
 // stateFileFormat 当前状态文件格式说明(注释 + 一行 key=value,以后扩展只追加 key)。
 const (
 	// stateFileHeader 注释行,运维手动编辑时能看出文件用途。
@@ -133,7 +206,7 @@ type stateRecord struct {
 	LastSyncAAAA int64  // 同上
 }
 
-// parseStateFile 读 /etc/ikev2/ddns.conf,返回 stateRecord。
+// parseStateFile 读 DefaultStateFile 指向的状态文件,返回 stateRecord。
 //
 // 支持三种格式(按优先级):
 //  1. INI-style key=value:每行 "enabled=true" / "family=dual",忽略 # 开头注释和空行

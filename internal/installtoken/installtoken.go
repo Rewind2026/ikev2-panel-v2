@@ -1,4 +1,4 @@
-﻿// 一次性安装 token：二维码扫码后浏览器访问 /install/{token}，
+// 一次性安装 token：二维码扫码后浏览器访问 /install/{token}，
 // 服务端验证 token 有效后 stream mobileconfig，iOS 看到正确的 MIME
 // 类型会自动弹"安装描述文件"。
 //
@@ -22,6 +22,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -37,29 +38,37 @@ type Token struct {
 
 // Store token 存储。
 type Store struct {
-	mu    sync.Mutex
+	mu     sync.Mutex
 	tokens map[string]Token
-	ttl   time.Duration
-	now   func() time.Time // 可注入，便于测试
+	ttl    time.Duration
+	now    func() time.Time // 可注入，便于测试
 }
 
 // New 构造 token 存储。
 func New(ttl time.Duration) *Store {
 	return &Store{
 		tokens: make(map[string]Token),
-		ttl:   ttl,
-		now:   time.Now,
+		ttl:    ttl,
+		now:    time.Now,
 	}
 }
 
 // Issue 生成新 token，绑定 userID，记录过期时间。
 //
 // 返回的 token 字符串可直接放进 URL：/install/{token}
-func (s *Store) Issue(userID int64) string {
+//
+// 错误返回:Go 1.24+ 上 crypto/rand.Read 文档保证永不失败,但仍返回 error
+// 是为了让 HTTP handler 路径能优雅失败(panic 会直接挂进程),而不是 crash。
+// 历史:原实现 panic "crypto/rand failed" —— 这条路径在 Issue() 上被
+// handleUserMobileconfigQR 直接调用,panic 会让 panel 整个挂掉,
+// 即便 OS 实际上几乎不可能让 /dev/urandom 失败。
+func (s *Store) Issue(userID int64) (string, error) {
 	var raw [32]byte
 	if _, err := rand.Read(raw[:]); err != nil {
-		// crypto/rand 失败是 OS 级别问题，没法 fallback
-		panic("installtoken: crypto/rand failed: " + err.Error())
+		// crypto/rand 失败是 OS 级别问题(/dev/urandom 不可用等)。
+		// 返回 error 而不是 panic —— 让 HTTP handler 写 500 + 日志,
+		// 运维看到错误后人工处置(而不是进程直接挂掉、charon 用户全部断连)。
+		return "", fmt.Errorf("installtoken: crypto/rand failed: %w", err)
 	}
 	token := base64.RawURLEncoding.EncodeToString(raw[:])
 
@@ -69,7 +78,7 @@ func (s *Store) Issue(userID int64) string {
 		UserID:    userID,
 		ExpiresAt: s.now().Add(s.ttl),
 	}
-	return token
+	return token, nil
 }
 
 // Consume 验证并消费 token（一次性）。

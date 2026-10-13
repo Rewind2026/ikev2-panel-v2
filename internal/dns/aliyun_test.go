@@ -5,6 +5,7 @@
 package dns
 
 import (
+	"context"
 	"net/url"
 	"strings"
 	"testing"
@@ -36,7 +37,7 @@ func TestValidRecordType(t *testing.T) {
 func TestFindRecordRejectsInvalidType(t *testing.T) {
 	c := NewAliyunClient("test-id", "test-secret")
 	// 不应该 panic 也不应该尝试拨号 — 错误立即返回
-	rec, err := c.FindRecord("example.com", "vpn", "CNAME")
+	rec, err := c.FindRecord(context.Background(), "example.com", "vpn", "CNAME")
 	if err == nil {
 		t.Fatal("expected error for invalid recordType, got nil")
 	}
@@ -51,7 +52,7 @@ func TestFindRecordRejectsInvalidType(t *testing.T) {
 // TestUpdateRecordValueRejectsInvalidType 验证 UpdateRecordValue 同样白名单。
 func TestUpdateRecordValueRejectsInvalidType(t *testing.T) {
 	c := NewAliyunClient("test-id", "test-secret")
-	err := c.UpdateRecordValue("rec-123", "vpn", "TXT", "1.2.3.4", 600)
+	err := c.UpdateRecordValue(context.Background(), "rec-123", "vpn", "TXT", "1.2.3.4", 600)
 	if err == nil {
 		t.Fatal("expected error for invalid recordType, got nil")
 	}

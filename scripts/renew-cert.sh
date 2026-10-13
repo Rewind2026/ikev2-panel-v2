@@ -1,6 +1,6 @@
 #!/bin/bash
 # Let's Encrypt 证书续签脚本（含失败回退）
-# 设计见 docs/design.md §1.4.1
+# 设计说明见 docs/architecture.md §4.6（cert 包）
 #
 # 流程：
 #   1. 证书还有 >30 天 → 跳过

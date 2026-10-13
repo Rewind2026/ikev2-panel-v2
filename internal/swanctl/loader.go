@@ -1,7 +1,5 @@
 // swanctl 配置重载：写文件 + shell out 到 swanctl CLI。
-// 设计见 docs/architecture.md §18 (govici 重构) +
-//
-//	docs/design.md §3.5
+// 设计见 docs/architecture.md §4.4（两条通道并存：状态走 VICI，配置下发走 CLI）。
 //
 // 重要发现（M8 实机测试）：charon 6.0.1 VICI 协议**不实现** `load-creds`/`load-all` 命令。
 // VICI 协议层只支持细粒度的 load-cert/load-key/load-conn。
@@ -80,16 +78,42 @@ const defaultViciSocketPath = "/var/run/charon.vici"
 // 容器外开发可通过 WithConfDir 选项覆盖。
 const ConfDir = "/etc/swanctl/conf.d"
 
-// SwanctlBin swanctl 二进制路径（容器内）。
+// SwanctlBin swanctl 二进制默认路径（容器内）。
 // 自编译 strongSwan 6.0.1 装到 /usr/sbin/swanctl（configure --prefix=/usr）。
+//
+// 常量仍是包级默认值，但**实际调用走 Manager.swanctlBin()**：测试用
+// WithSwanctlBin 注入假二进制，才能断言"到底调了哪些参数"。
 const SwanctlBin = "/usr/sbin/swanctl"
+
+// P1-8 已撤销：不要实现"按连接名细粒度重载"。
+//
+// v2.86-pr24 曾试图把改 IP 段的重载从 `--load-all` 换成 `--load-conn ikev2-rw`，
+// 声称能避免踢掉在线用户。该实现已撤销，三个原因（均已核实官方文档 + 本仓配置）：
+//
+//  1. **`swanctl` CLI 没有 `--load-conn`（单数）这个子命令。**
+//     strongSwan 6.0 的加载类子命令只有 --load-all / --load-conns / --load-pools /
+//     --load-creds / --load-authorities（docs.strongswan.org/docs/6.0/swanctl/）。
+//     `--load-conns` 是复数、且不接受连接名参数。原实现调的命令永远失败并回落。
+//
+//  2. **零收益。** 本项目只有 ikev2-rw 一条连接（configs/swanctl-ipv6-only.conf），
+//     per-user 文件只写 secrets 块、不新建连接。"只重载这一条"与"重载全部"完全等价。
+//
+//  3. **改的是 pool 不是 conn。** 官方定义 --load-all = --load-conns + --load-creds +
+//     --load-authorities + --load-pools，只有它含 --load-pools。换成 --load-conns
+//     会漏掉 pool 本身，改动可能不生效。
+//
+// 真正能按名细粒度重载的是 **VICI 层的 `load-conn`**（VICI 协议支持，CLI 不支持）。
+// 但那条路要求内联完整连接定义（需新写 swanctl.conf 嵌套块解析器），且
+// govici v0.8.1 是纯客户端无 server、无法测试 —— 为零收益引入不可测的高风险代码，
+// 不值得。真要做时先解决测试手段（起一个假 VICI server）。
 
 // Manager swanctl 子配置 + 重载管理。
 type Manager struct {
 	confDir  string
 	confPath string // v2.86-PR13.2:测试可覆盖 swanctl.conf 路径
 	viciSock string
-	SkipVici bool // dev 模式：无 swanctl/charon.vici 时静默跳过 reload
+	bin      string // swanctl 二进制路径;空 = SwanctlBin(v2.86-pr24 P1-8 注入点)
+	SkipVici bool   // dev 模式：无 swanctl/charon.vici 时静默跳过 reload
 
 	// reloadMu 串行化所有"会改变 swanctl 状态"的操作：
 	//   - ReloadAll / LoadCreds（直接动 charon）
@@ -131,6 +155,23 @@ func (m *Manager) WithViciSocketPath(path string) *Manager {
 func (m *Manager) WithSkipVici() *Manager {
 	m.SkipVici = true
 	return m
+}
+
+// WithSwanctlBin 覆盖 swanctl 二进制路径(v2.86-pr24 P1-8,测试用)。
+//
+// 没有这个注入点就无法断言"改 IP 段到底调了 --load-conn 还是 --load-all" ——
+// 而这正是 P1-8 的全部意义所在(前者不踢在线用户,后者踢)。
+func (m *Manager) WithSwanctlBin(path string) *Manager {
+	m.bin = path
+	return m
+}
+
+// swanctlBin 返回实际要 exec 的二进制路径。
+func (m *Manager) swanctlBin() string {
+	if m.bin != "" {
+		return m.bin
+	}
+	return SwanctlBin
 }
 
 // WriteUserConfAndReload 写 conf.d 文件 + 立即 ReloadAll，整体持锁。
@@ -181,7 +222,7 @@ func (m *Manager) reloadAllLocked(ctx context.Context) error {
 	}
 	ctx, cancel := withTimeout(ctx, ReloadAllTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, SwanctlBin, "--load-all", "--noprompt")
+	cmd := exec.CommandContext(ctx, m.swanctlBin(), "--load-all", "--noprompt")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
@@ -210,12 +251,14 @@ func (m *Manager) openSession(_ context.Context) (*vici.Session, error) {
 // ReloadAll 重载所有 swanctl.conf（connections + secrets + certs）。
 //
 // 实现：shell out 到 `swanctl --load-all --noprompt`。
-// 该命令内部展开为：unload-conn 所有旧 conn + load-conn 新 conn +
+// 按官方定义，该命令在单个命令内执行 `--load-conns` + `--load-creds` +
+// `--load-authorities` + `--load-pools`。
 //
-//	load-cert + load-key + load-shared。
+// 为什么改 IP 段也用它、而不是更窄的 `--load-conns`：改的是 **pool** 段，
+// 而只有 `--load-all` 含 `--load-pools`。详见下方 "P1-8 已撤销" 注释块。
 //
-// 设计陷阱（architecture §12）：swanctl --load-all 会卸载并重载所有连接，
-// 对活跃 SA 是中断。LE 续签场景下应调用 LoadCreds 而不是 ReloadAll。
+// 设计陷阱（architecture §12）：重载会卸载并重载活跃 SA，对在线用户是短暂中断。
+// LE 续签场景下应调用 LoadCreds 而不是 ReloadAll。
 func (m *Manager) ReloadAll(ctx context.Context) error {
 	if m.SkipVici {
 		return nil
@@ -290,7 +333,7 @@ func WaitForCharonReady(sockPath string, timeout time.Duration) error {
 // 实现：shell out 到 `swanctl --load-creds --noprompt`。
 // 该命令内部展开为：unload-key 旧 key + load-key 新 key + load-cert 新 cert。
 //
-// 设计见 docs/design.md §1.4.1：
+// 见 docs/architecture.md §12.2：
 //   - LE 模式证书自动续签时，只换证书不重载连接
 //   - VICI load-creds 内部按 child_sa 复用相同 SPI，只换 key material
 //   - 实测：1000 个活跃 SA 下 load-creds 中断 < 50ms（load-all 中断 ~500ms）

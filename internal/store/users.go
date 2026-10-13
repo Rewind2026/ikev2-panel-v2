@@ -1,5 +1,5 @@
 // users 表 CRUD
-// 设计见 docs/design.md §6.1
+// 见 docs/architecture.md §5
 package store
 
 import (
@@ -217,15 +217,20 @@ func (s *Store) CountUsers(ctx context.Context) (int, error) {
 	return n, err
 }
 
-// GetExpiredUsers 返回 expires_at > 0 且 < nowUnix 的用户列表。
-// 用于 expiry goroutine（design §5.9）。
+// GetExpiredUsers 返回「已过期且仍处于启用中」的用户列表。
+// 用于 expiry goroutine，见 docs/architecture.md §3.7。
+//
+// 必须带 enabled = 1：expiry.check 拿到列表后会把用户置 enabled=0，
+// 若查询不看 enabled，第二轮扫描会把同一批人再捞出来 → 每 60 秒对每个过期用户
+// 重复调一次 swanctl.Terminate（打 charon VICI），长期运行是无意义的调用风暴。
+// 带 enabled 过滤同时让"停用 = 已处理"成为幂等语义。
 func (s *Store) GetExpiredUsers(ctx context.Context, nowUnix int64) ([]*User, error) {
 	rows, err := s.DB.QueryContext(ctx, `
 		SELECT id, username, password, enabled, note, speed_limit_mbps, expires_at,
 		       bytes_in_total, bytes_out_total, created_at, updated_at, last_used_at,
 		       mobileconfig_opts
 		FROM users
-		WHERE expires_at > 0 AND expires_at < ?
+		WHERE expires_at > 0 AND expires_at < ? AND enabled = 1
 		ORDER BY expires_at ASC
 	`, nowUnix)
 	if err != nil {
@@ -245,7 +250,7 @@ func (s *Store) GetExpiredUsers(ctx context.Context, nowUnix int64) ([]*User, er
 }
 
 // IncrementUserBytes 累加单个用户的流量字节。
-// 由 collector goroutine 调用（design §3.6）。
+// 由 collector goroutine 调用，见 docs/architecture.md §3.6。
 // 用 SQL 表达式直接累加，避免读-改-写竞争。
 func (s *Store) IncrementUserBytes(ctx context.Context, username string, bytesIn, bytesOut int64) error {
 	now := time.Now().Unix()

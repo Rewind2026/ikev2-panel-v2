@@ -8,6 +8,7 @@
 package ddns
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -110,7 +111,7 @@ func TestSync_StopOnce(t *testing.T) {
 	s2 := newTestSync(t)
 	defer s2.Stop()
 	// 检查 stopCh 是新的(没被前一个实例污染)— 通过调用 tick 验证不 panic
-	s2.tick(s2.snapshot()) // enabled=false → 直接 return,确认结构体可用
+	s2.tick(context.Background(), s2.snapshot()) // enabled=false → 直接 return,确认结构体可用
 }
 
 // TestSync_BackwardCompatOldFormat 验证 v2-83 裸 "true" 文件不破坏。

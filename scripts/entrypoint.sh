@@ -1,7 +1,7 @@
 #!/bin/bash
 # 容器入口：环境校验 → 网卡探测 → forwarding → MASQUERADE →
 #           swanctl.conf 占位符替换 → charon → swanctl 首次加载 → exec Go
-# 设计见 docs/design.md §1.5 + §8.4 + §11 (v2-79 自动探测)
+# 设计说明见 docs/architecture.md §3.1（启动数据流）与 §6.1（环境变量）
 #
 # v2-79 重大改动：§0 自动探测链 + 所有硬编码可选
 #   - 优先用环境变量；没传就自动探测；自动探测失败才报 FATAL
@@ -75,6 +75,25 @@ if [ -f "$CERT_CONF" ]; then
   [ -n "$domain_conf" ] && IKEV2_DOMAIN="$domain_conf"
   [ -n "$cn_conf" ] && IKEV2_SERVER_CN="$cn_conf"
   [ -n "$email_conf" ] && IKEV2_ACME_EMAIL="$email_conf"
+
+  # v2.86-PR19(A11):LE 模式下 ServerCN 强制等于 Domain。
+  #
+  # 背景:cert.conf 里 server_cn 绝大多数情况是空串(LE 模式下这个字段本来就没用),
+  # 上面第 76 行 `[ -n "$cn_conf" ] && ...` 在空串时不执行 → IKEV2_SERVER_CN
+  # 保留 compose/env 里的默认值 vpn.example.com。
+  # 而 Go 端 main.go 的兜底是 `if cfg.ServerCN == ""` 条件式 —— 看到非空的
+  # vpn.example.com 就不兜底了,于是 mobileconfig 里的
+  # ServerCertificateCommonName = vpn.example.com,而证书 CN = vpn.rewind2023.cn。
+  # iOS 用 ServerCertificateCommonName 匹配证书 CN/SAN,不匹配就静默失败,
+  # 客户端只报 "an unexpected error occurred"。
+  #
+  # LE 签发时证书 CN 强制等于 domain(acme.sh 的 LE 模式不给自定义 CN 的余地),
+  # 所以这里无条件覆盖不会破坏任何合法配置 —— LE 模式下"ServerCN 与 Domain
+  # 不同"本来就是非法状态。
+  if [ "${IKEV2_CERT_MODE:-}" = "letsencrypt" ] && [ -n "${IKEV2_DOMAIN:-}" ]; then
+    IKEV2_SERVER_CN="${IKEV2_DOMAIN}"
+  fi
+
   echo "${LOG_PREFIX} [cert.conf] applied: cert_mode=${IKEV2_CERT_MODE} domain=${IKEV2_DOMAIN:-<empty>} server_cn=${IKEV2_SERVER_CN:-<empty>}"
 fi
 
@@ -370,7 +389,7 @@ export IKEV2_ACTUAL_NETWORK_MODE="host"
 #  IPv6：net.ipv6.conf.all.forwarding=1
 #  IPv4：net.ipv4.ip_forward=1
 #
-# 三层兜底（设计见 docs §15.x "forwarding 自愈"）：
+# 单一路径（设计说明见 docs/architecture.md §12.8）：
 #   1) docker-compose.yml 的 sysctls: —— docker daemon 起容器时改宿主内核
 #      （依赖 docker daemon 权限，多数发行版默认就有 CAP_SYS_ADMIN）
 #   2) entrypoint 自愈 —— 上一步失败时，host 模式下 privileged: true 会让
@@ -433,21 +452,62 @@ enable_forwarding() {
   return 1
 }
 
-if [ "$IKEV2_IPV6_ONLY" != "true" ]; then
-  # v2.86-PR14 收敛:不再有 bridge 模式跳过分支(只剩 host)
+# v2.86-PR19(A16):这里曾经包在 `if [ "$IKEV2_IPV6_ONLY" != "true" ]` 里,
+# 只有双栈模式才自愈 IPv6 forwarding。**这是错的**,现改为无条件尝试。
+#
+# 为什么错(192.168.50.63 实测,IPV6_ONLY=true 即默认配置):
+#   实机 /proc/sys/net/ipv6/conf/*/forwarding 全线为 0,而且因为
+#   `IPV6_ONLY=true` 走了跳过分支,enable_forwarding ipv6 **一次都没被调用过**。
+#
+# 但 IPv6 内层流量其实是通的(设计如此):
+#   local_ts = 0.0.0.0/0, ::/0   ← §5 恒定双栈,不受 IPV6_ONLY 影响
+#   addrs    = 10.10.0.0/24, fd00:1::/64  ← 客户端会拿到 ULA IPv6
+#   dns      = 1.1.1.1, 8.8.8.8, 2606:4700:4700::1111, ... ← 已推 IPv6 DNS
+#   nft ip6 ikev26 masquerade + MSS / DOCKER-USER ip6tables ipsec0 ACCEPT 全部就位
+# 也就是说"IPv6 转发链路"只差 forwarding 这一个开关 —— 而它偏偏被条件跳过了。
+#
+# 后果(不是"完全断网",所以很容易被漏掉):
+#   iOS/Android 会优先用 ULA IPv6 发包 → 内核 forwarding=0 直接丢弃(无 ICMP)
+#   → Happy Eyeballs 超时后回退 IPv4 → 用户看到"能上网",只是慢一拍。
+#   已经推给客户端的 IPv6 DNS 服务器则完全不可达。
+#   192.168.50.63 上 nft table ip6 ikev26 所有 counter 恒为 0,与该分析一致。
+#
+# 与 IPV6_ONLY 的关系:v2.86-PR12.10 起 local_ts 恒为双栈,IPV6_ONLY
+# 只控制"监听/拨号用哪个网络栈"(IKE 协商走 IPv6),**不影响 ESP 内层协议族**。
+# 内层协议族既然不受它影响,转发开关就不该受它控制 —— 原条件分支与该前提自相矛盾。
+#
+# ⚠️ 为什么 IPv6 失败只 WARN 不 FATAL,而 IPv4 失败 FATAL(2026-10-13 实测修正):
+#   宿主上 /proc/sys 是 **ro** 挂载:
+#     $ grep ' /proc/sys ' /proc/mounts
+#     proc /proc/sys proc ro,nosuid,nodev,noexec,relatime 0 0
+#   → enable_forwarding 的 `echo 1 > $path` 在容器内**永远失败**,
+#     NET_ADMIN 也救不了(ro 是挂载属性,不是 capability)。
+#   → 也就是说 v4 / v6 的"自愈"从来没真正成功过。IPv4 之所以一路绿灯,
+#     只是因为宿主本来就开着 ip_forward=1,走的是函数开头的"已开直接返回"。
+#
+#   所以:
+#     - IPv4=0 是**致命**的:没有任何转发 → 所有客户端都出不了网,
+#       且这是本项目的核心功能,必须启动即失败。
+#     - IPv6=0 只是**降级**:客户端会 IPv4 回退,IPv4 主链路完好,面板和
+#       VPN 都能正常使用。此时 FATAL 会让整个面板起不来,代价远大于收益。
+#       正确做法是明确告警 + 给出宿主侧修复命令,让运维自己决定。
+if [ -e /proc/sys/net/ipv6/conf/all/forwarding ]; then
   if ! enable_forwarding ipv6; then
-    echo "${LOG_PREFIX} FATAL: net.ipv6.conf.all.forwarding=0 and cannot auto-enable" >&2
-    echo "${LOG_PREFIX} 提示 1：sudo sysctl -w net.ipv6.conf.all.forwarding=1" >&2
-    echo "${LOG_PREFIX} 提示 2：检查 docker compose 是否给了 NET_ADMIN capability（v2.86-PR11 后已不再需要 privileged）" >&2
-    echo "${LOG_PREFIX} 提示 3：docker daemon 自身需要 CAP_SYS_ADMIN 写 /proc/sys/net" >&2
-    exit 11
+    echo "${LOG_PREFIX} WARN: net.ipv6.conf.all.forwarding=0 and cannot auto-enable — IPv6 内层转发不可用,客户端会回退 IPv4" >&2
+    echo "${LOG_PREFIX}   影响：客户端拿到 fd00:1:: 地址后会先试 IPv6,被内核静默丢弃后回退 IPv4(能上网但慢一拍);已推送的 IPv6 DNS 不可达" >&2
+    echo "${LOG_PREFIX}   宿主侧修复：sudo sysctl -w net.ipv6.conf.all.forwarding=1" >&2
+    echo "${LOG_PREFIX}   持久化    ：echo 'net.ipv6.conf.all.forwarding=1' | sudo tee /etc/sysctl.d/99-ikev2.conf" >&2
+    echo "${LOG_PREFIX}   若 /proc/sys 是 ro 挂载(容器内常见),NET_ADMIN 也无法写,只能从宿主执行上面两条" >&2
   fi
+else
+  echo "${LOG_PREFIX} WARN: kernel built without IPv6, skipping net.ipv6.conf.all.forwarding" >&2
 fi
 if ! enable_forwarding ipv4; then
   echo "${LOG_PREFIX} FATAL: net.ipv4.ip_forward=0 and cannot auto-enable" >&2
   echo "${LOG_PREFIX} 提示 1：sudo sysctl -w net.ipv4.ip_forward=1" >&2
-  echo "${LOG_PREFIX} 提示 2：检查 docker compose 是否给了 NET_ADMIN capability（v2.86-PR11 后已不再需要 privileged）" >&2
-  echo "${LOG_PREFIX} 提示 3：docker daemon 自身需要 CAP_SYS_ADMIN 写 /proc/sys/net" >&2
+  echo "${LOG_PREFIX} 提示 2：echo 'net.ipv4.ip_forward=1' | sudo tee /etc/sysctl.d/99-ikev2.conf（宿主侧持久化）" >&2
+  echo "${LOG_PREFIX} 提示 3：若 /proc/sys 是 ro 挂载(容器内常见),NET_ADMIN 也无法写,只能从宿主执行上面两条" >&2
+  echo "${LOG_PREFIX} 提示 4：IPv4 forwarding=0 时所有客户端都出不了网,这里不降级" >&2
   exit 11
 fi
 echo "${LOG_PREFIX} IP forwarding OK (v4=$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null), v6=$(cat /proc/sys/net/ipv6/conf/all/forwarding 2>/dev/null))"
@@ -491,6 +551,28 @@ if [ "$IKEV2_IPV6_ONLY" = "true" ]; then
     # 2. v2.86-PR12.16:nft 自定义表 ikev2 / ikev26 一次性原子提交
     #    替换原来的 iptables -I FORWARD / -t nat -A POSTROUTING 零散操作
     #    docker daemon 重写 filter/nat 表不会碰自定义表,根治 PR12.13 二次 iptables-restore 挤掉规则
+    #
+    # v2.86-PR19(A14):失败不再 exit 15,改为降级。
+    #
+    # 原来 `nft -f` 失败就 exit 15 → restart: unless-stopped 无限重启
+    # (实测 RestartCount 一路涨到 9,面板完全起不来)。
+    # 但这张表只负责"VPN 客户端的转发 + NAT",失败不该让整个面板不可用 ——
+    # 面板网页、用户管理、证书签发、DDNS、审计都不依赖它。
+    #
+    # 关于"iifname 指向的接口必须存在"这个假设:实测**不成立**。
+    # 我一度怀疑是时序问题(nft 规则在 charon 启动前应用,而 ipsec0 由 charon
+    # 创建),专门写了"轮询等 ipsec0 出现"的逻辑,然后在 192.168.50.63 上
+    # 用 NET_ADMIN 容器实测:
+    #   iifname "nosuchif0" accept            → 加载成功
+    #   oifname "nosuchif0" accept            → 加载成功
+    #   含 ipsec0 引用的完整模板(接口全不存在) → 加载成功
+    #   表已存在时 delete + nft -f             → 加载成功
+    #   表已存在时直接叠加 nft -f              → 加载成功
+    # 所以那次"Operation not supported"另有原因(排查期间我手工往宿主 nft
+    # 加载过带重复 chain 的表,污染了环境),**不是模板也不是时序**。
+    # 等待逻辑已撤掉 —— charon 在 §6 才启动,§3.5 等它出现会白等 30 秒。
+    #
+    # 保留的改动只有一条:失败降级 + 清半成品表,让 §7.9 的 retry 循环去补。
     if [ -f "$NFT_TEMPLATE" ]; then
       NFT_RUNTIME="/run/ikev2-panel/ikev2.nft"
       mkdir -p /run/ikev2-panel
@@ -499,11 +581,19 @@ if [ "$IKEV2_IPV6_ONLY" = "true" ]; then
           -e "s|@VPN_SUBNET4@|${IKEV2_VPN_SUBNET}|g" \
           -e "s|@VPN_SUBNET6@|${IKEV2_VPN_SUBNET_V6:-fd00::/64}|g" \
           "$NFT_TEMPLATE" > "$NFT_RUNTIME"
+
       if $NFT_CMD -f "$NFT_RUNTIME" 2>&1; then
         echo "${LOG_PREFIX} nft ikev2/ikev26 ruleset applied (atomic via $NFT_RUNTIME)"
       else
-        echo "${LOG_PREFIX} FATAL: nft -f failed" >&2
-        exit 15
+        # v2.86-PR19(A14):不再 exit 15。
+        #
+        # 原来失败就 exit 15 → restart: unless-stopped 无限重启。
+        # 但 nft 规则只影响"VPN 客户端的转发/NAT",失败不该让整个面板不可用
+        # —— 面板网页、用户管理、证书签发、DDNS、审计都不依赖这张表。
+        # 降级为:删掉半成品表 + 写告警,让 §7.9 的 retry 循环去补。
+        echo "${LOG_PREFIX} ERROR: nft -f failed, degrading (retry loop will re-apply)" >&2
+        $NFT_CMD delete table ip ikev2  2>/dev/null || true
+        $NFT_CMD delete table ip6 ikev26 2>/dev/null || true
       fi
     else
       echo "${LOG_PREFIX} FATAL: $NFT_TEMPLATE not found" >&2
@@ -793,7 +883,29 @@ if [ -f /etc/swanctl/swanctl.conf ]; then
   sed -i "s|%IKEV2_VPN_SUBNET_V6%|${IKEV2_VPN_SUBNET_V6}|g" "$SWAN_TMP_CONF"
 
   # ---- 3. CN / cert 文件名 / 其他 ----
-  sed -i "s|%IKEV2_SERVER_CN%|${IKEV2_SERVER_CN:-vpn.example.com}|g" "$SWAN_TMP_CONF"
+  # v2.86-PR19(A11)修复:local.id 必须与证书 CN 一致,否则 EAP 阶段必失败。
+  #
+  # 实机故障(192.168.50.63,LE 模式,domain=vpn.rewind2023.cn):
+  #   certs = vpn.rewind2023.cn.pem   ← 证书文件名按 IKEV2_DOMAIN 替换,正确
+  #   id    = vpn.example.com         ← 但 CN 走的是另一个变量,落到默认值
+  # iOS 连上后卡在 IKE_AUTH,charon.log 反复打:
+  #     EAP-Identity request configured, but not supported
+  #     initiating EAP_MSCHAPV2 method
+  #     authentication of 'vpn.example.com' (myself) with RSA signature successful
+  # 然后 half open IKE_SA 超时销毁,客户端报 "user authentication failed"。
+  #
+  # 原因:strongSwan 拿 local.id 去跟证书做匹配,id=vpn.example.com 而证书
+  # CN=vpn.rewind2023.cn → 匹配不上,EAP 阶段直接断。LE 模式下证书 CN 就是
+  # IKEV2_DOMAIN(LE 签发时强制要求),所以 local.id 必须取它。
+  #
+  # 自签模式保持用 IKEV2_SERVER_CN(自签证书的 CN 由面板设置决定)。
+  if [ "${IKEV2_CERT_MODE:-self-signed}" = "letsencrypt" ] && [ -n "${IKEV2_DOMAIN:-}" ]; then
+    SWAN_LOCAL_ID="${IKEV2_DOMAIN}"
+  else
+    SWAN_LOCAL_ID="${IKEV2_SERVER_CN:-vpn.example.com}"
+  fi
+  sed -i "s|%IKEV2_SERVER_CN%|${SWAN_LOCAL_ID}|g" "$SWAN_TMP_CONF"
+  echo "${LOG_PREFIX} local.id = ${SWAN_LOCAL_ID} (cert CN)"
   sed -i "s|%IKEV2_OUT_IF%|${OUT_IF}|g" "$SWAN_TMP_CONF"
 
   # 证书文件名：LE 模式用 $DOMAIN.pem，自签模式用 server.cert.pem
@@ -857,7 +969,7 @@ if ! swanctl --load-all 2>&1 | tail -10; then
 fi
 
 # ---------- 7.5. Let's Encrypt 模式证书准备 ----------
-# 设计见 docs/design.md §1.4.1
+# 设计说明见 docs/architecture.md §4.6（cert 包）
 #
 # 触发条件：IKEV2_CERT_MODE=letsencrypt
 # 流程：
@@ -953,7 +1065,13 @@ if [ "${IKEV2_CERT_MODE:-self-signed}" = "letsencrypt" ]; then
   if [ -n "${Ali_Key:-}" ] && [ -n "${Ali_Secret:-}" ]; then
     printf 'export Ali_Key="%s"\nexport Ali_Secret="%s"\n' \
       "${Ali_Key}" "${Ali_Secret}" > "${ACME_CONF}"
-    chmod 600 "${ACME_CONF}"
+    # v2.86-PR19(A10):chmod 失败不能终止启动。
+    # 实机(192.168.50.63):文件属主可能是 10001(面板 uid)而非 root,
+    # 此时 chmod 需要 CAP_FOWNER;cap 配齐后正常,但仍不应让 set -e 杀掉
+    # 整个启动流程 —— 凭证已经写进去了,权限不理想最多是"同 uid 可读",
+    # 远好过面板起不来。Dockerfile/compose 已补 FOWNER,这里是兜底。
+    chmod 600 "${ACME_CONF}" 2>/dev/null \
+      || echo "${LOG_PREFIX} WARN: chmod 600 ${ACME_CONF} failed — 凭证已写入,但权限可能偏宽" >&2
     echo "${LOG_PREFIX} LE: aliyun DNS API credentials installed to ${ACME_CONF}"
   fi
 
@@ -986,8 +1104,12 @@ if [ "${IKEV2_CERT_MODE:-self-signed}" = "letsencrypt" ]; then
       echo "${LOG_PREFIX} FATAL: acme.sh --install-cert failed" >&2
       exit 19
     fi
-    chmod 644 "${LE_FULLCHAIN}"
-    chmod 600 "${LE_PRIVKEY}"
+    # v2.86-PR19(A10):同 account.conf,chmod 失败不致命(见上文)。
+    # 证书本身已由 acme.sh 以 0600 写出,这里的 chmod 只是收尾加固。
+    chmod 644 "${LE_FULLCHAIN}" 2>/dev/null \
+      || echo "${LOG_PREFIX} WARN: chmod 644 ${LE_FULLCHAIN} failed, using acme.sh default mode" >&2
+    chmod 600 "${LE_PRIVKEY}" 2>/dev/null \
+      || echo "${LOG_PREFIX} WARN: chmod 600 ${LE_PRIVKEY} failed, using acme.sh default mode" >&2
     echo "${LOG_PREFIX} LE: cert issued and stored at ${LE_CERT_DIR}"
   else
     echo "${LOG_PREFIX} LE: existing cert found at ${LE_CERT_DIR}, skipping issue"
@@ -1007,6 +1129,45 @@ if [ "${IKEV2_CERT_MODE:-self-signed}" = "letsencrypt" ]; then
   }
 
   # 复制到 strongSwan 默认查找路径(v2.86-PR12.4 atomic + key 0600)
+  #
+  # v2.86-PR19(A11):剥掉链尾的根证书,只保留 leaf + intermediate。
+  #
+  # 背景(2026-10-12,192.168.50.63 + iOS 17 实测):
+  # LE 从 2025 起默认签发的 fullchain 是 **3 张**:
+  #     leaf(CN=vpn.rewind2023.cn) → "Let's Encrypt YR2" → "ISRG Root YR"
+  # 而 "ISRG Root YR" 本身是根证书(由 ISRG Root X1 交叉签发)。
+  #
+  # RFC 5246 §7.4.2/§7.4.1:发送方**不应**把信任锚(根证书)包含在链里,
+  # 客户端本地已预置 iOS 的系统根证书。strongSwan 拿到 3 张会原样全发出去,
+  # iOS 的路径构建引擎对"根证书由另一个根证书签发"(YR → X1 交叉签发)
+  # 存在已知的歧义拒绝路径 —— 实测表现为 IKE_AUTH 阶段客户端静默断开。
+  #
+  # strongSwan 官方的做法是只 load leaf + 中间 CA,把根留给客户端的系统信任库。
+  # 所以这里在拷贝前统一剥掉链尾的根,只留前 N-1 张(至少 2 张:leaf+intermediate)。
+  LE_CHAIN_FIXED="$(mktemp)"
+  if openssl crl2pkcs7 -nocrl -certfile "${LE_FULLCHAIN}" 2>/dev/null | \
+     openssl pkcs7 -print_certs -outform PEM > /dev/null 2>&1; then
+    total_certs=$(grep -c "BEGIN CERTIFICATE" "${LE_FULLCHAIN}" 2>/dev/null || echo 1)
+    if [ "${total_certs}" -gt 2 ]; then
+      # 逐张拆出前 N-1 张(去掉最后一张根)
+      awk -v keep=$((total_certs - 1)) -v out="${LE_CHAIN_FIXED}" '
+        /-----BEGIN CERTIFICATE-----/ { n++ }
+        n <= keep { print >> out }
+      ' "${LE_FULLCHAIN}"
+      if grep -q "BEGIN CERTIFICATE" "${LE_CHAIN_FIXED}" 2>/dev/null; then
+        cp "${LE_CHAIN_FIXED}" "${LE_FULLCHAIN}"
+        echo "${LOG_PREFIX} LE: 剥掉链尾根证书,保留 $((total_certs - 1)) 张(原 ${total_certs} 张)—— iOS 不接受带根的 fullchain"
+      else
+        echo "${LOG_PREFIX} WARN: 剥根失败,保留原 fullchain(${total_certs} 张)"
+      fi
+    else
+      echo "${LOG_PREFIX} LE: fullchain 已是 ${total_certs} 张(leaf+intermediate),无需剥根"
+    fi
+  else
+    echo "${LOG_PREFIX} WARN: 无法解析 fullchain,跳过剥根(保持原样)"
+  fi
+  rm -f "${LE_CHAIN_FIXED}"
+
   atomic_rename_inline "${LE_FULLCHAIN}" "${SWAN_X509}" "644"
   atomic_rename_inline "${LE_PRIVKEY}"  "${SWAN_KEY}" "600"
   echo "${LOG_PREFIX} LE: cert installed to ${SWAN_X509}"
@@ -1097,13 +1258,68 @@ IPTABLES_HEALTHZ_DIR="/run/ikev2-panel"
 mkdir -p "$IPTABLES_HEALTHZ_DIR" 2>/dev/null || true
 
 check_ikev2_rules() {
-  # v2.86-PR12.16:检查自定义 nft 表 ikev2 (ip) + ikev26 (ip6) 是否存在
+  # v2.86-PR19(A12):检查自定义 nft 表 ikev2 (ip) + ikev26 (ip6) 是否存在
   # `nft list table` 失败返回非 0 = 表不存在
   if ! command -v "$NFT_CMD" >/dev/null 2>&1; then
     return 1
   fi
   $NFT_CMD list table ip ikev2  >/dev/null 2>&1 || return 1
   $NFT_CMD list table ip6 ikev26 >/dev/null 2>&1 || return 1
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# v2.86-PR19(A12):DOCKER-USER ACCEPT ——VPN 转发修复
+#
+# 实机故障(192.168.50.63, 2026-10-12):
+#   CHILD_SA 建立成功,in 4.86MB/27984pkt,但客户端完全无法访问网络。
+#   nft ikev2.mangle_forward (priority mangle=-150) counter=1424pkt  ← 包进了forward hook
+#   nft ikev2.postrouting `ip saddr 10.10.0.0/24 masquerade` counter=0  ← 却被 NAT 不到
+#   iptables -L FORWARD -n -v:policy DROP 6048 packets
+#
+# 根因(踩了一个很隐蔽的 nft 语义坑):
+#
+#   宿主 netns 里Docker daemon 建了 `table ip filter`,其 FORWARD chain 是
+#       type filter hook forward priority filter; policy drop;
+#   我们在 nft 模板里写的也是
+#       type filter hook forward priority 0(等价 filter); policy accept;
+#       iifname "ipsec0" accept
+#
+#   **nft 的 accept 判定在 base chain 里不是终态。** 它只终止"当前这条
+#   base chain"的求值,包**继续流向同 hook 上优先级更大的下一条 base chain**。
+#   所以哪怕我们把 priority 调到 -10 抢在 docker 前面并且 accept,包也会
+#   继续走 priority filter(0) → DOCKER-USER(空链) → DOCKER-FORWARD →
+#   无 accept 规则 → 命中 docker 的 policy drop 被丢弃。
+#   实测印证:DOCKER-USER counter 6208 = FORWARD 链总 counter 6208,
+#   policy drop 6048 —— 6208 个包全部走到了链尾被丢。
+#
+#   (我最初以为"priority 抢在前面 + accept"就能解决,加了 priority -10 后
+#    依然不通 —— 因为 nft accept 根本不终止跨 chain 的遍历。)
+#
+# 修复:改用 **iptables -I DOCKER-USER**,这是 iptables 层规则,
+#       -j ACCEPT 是**真终态**(终止 iptables 链遍历 + 跳过其余 FORWARD 规则
+#       + 不套用链尾 policy)。DOCKER-USER 也是 Docker 官方文档指定的
+#       "用户自定义规则"插入点,不会被 docker 自己清理。
+#
+# 幂等:先 -C 检查再 -I,避免重复累积。
+# ---------------------------------------------------------------------------
+ensure_docker_user_accept() {
+  _ipt="$(command -v iptables || true)"
+  _ip6t="$(command -v ip6tables || true)"
+  # -i ipsec0:客户端解封后的包进入宿主机转发
+  # -o ipsec0:服务端回给客户端的包(回程也要放行,否则单向可达)
+  if [ -n "$_ipt" ]; then
+    $_ipt -C DOCKER-USER -i ipsec0 -j ACCEPT 2>/dev/null || \
+      $_ipt -I DOCKER-USER 1 -i ipsec0 -j ACCEPT 2>/dev/null || true
+    $_ipt -C DOCKER-USER -o ipsec0 -j ACCEPT 2>/dev/null || \
+      $_ipt -I DOCKER-USER 1 -o ipsec0 -j ACCEPT 2>/dev/null || true
+  fi
+  if [ -n "$_ip6t" ]; then
+    $_ip6t -C DOCKER-USER -i ipsec0 -j ACCEPT 2>/dev/null || \
+      $_ip6t -I DOCKER-USER 1 -i ipsec0 -j ACCEPT 2>/dev/null || true
+    $_ip6t -C DOCKER-USER -o ipsec0 -j ACCEPT 2>/dev/null || \
+      $_ip6t -I DOCKER-USER 1 -o ipsec0 -j ACCEPT 2>/dev/null || true
+  fi
   return 0
 }
 
@@ -1157,6 +1373,18 @@ while true; do
   fi
   if [ "$IPTABLES_PHASE2" = "1" ]; then sleep 5; else sleep 1; fi
 done
+
+# ---------- 7b. v2.86-PR19(A12):DOCKER-USER ACCEPT ----------
+# nft 自定义表的 accept 不终止跨 chain 遍历(见 ensure_docker_user_accept 注释),
+# 必须额外往 iptables 的 DOCKER-USER 链插 ACCEPT 才能真正放行 ipsec0 转发。
+# 放在规则校验循环之后 —— DOCKER-USER 链由 docker daemon 创建,首次启动时
+# 可能还没就绪,这里已确保前面的循环至少跑过一轮。
+ensure_docker_user_accept
+if command -v iptables >/dev/null 2>&1 && iptables -C DOCKER-USER -i ipsec0 -j ACCEPT 2>/dev/null; then
+  echo "${LOG_PREFIX} DOCKER-USER ACCEPT rules present (ipsec0 in/out, v4+v6)"
+else
+  echo "${LOG_PREFIX} WARN: failed to install DOCKER-USER ACCEPT; VPN clients may not reach the internet" >&2
+fi
 
 # ---------- 8. exec Go 进程（接管 PID 1，收到信号时优雅关闭）----------
 echo "${LOG_PREFIX} Starting ikev2-panel (Go)..."
