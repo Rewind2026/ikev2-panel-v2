@@ -29,20 +29,17 @@ env:
 
 jobs:
   build:
-    name: build & push (${{ matrix.platform }})
+    name: build & push (multi-arch)
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
 
-    strategy:
-      fail-fast: false
-      matrix:
-        # GitHub 免费 runner 只支持 linux/amd64（arm64 是 QEMU 模拟构建）
-        # arm64 真机构建需要 self-hosted runner，这里用 buildx QEMU 跨架构
-        platform:
-          - linux/amd64
-          - linux/arm64
+    # v2.86-pr24 修复：此前用 matrix 让 amd64 / arm64 各自 push **同一个 tag**，
+    # 两者互相覆盖 —— 后完成的架构把先完成的 manifest 顶掉，最终 registry 里只剩
+    # 一个架构。amd64 恰好总是最后 push，所以历史上所有 tag（含 :latest）实际
+    # 都是单架构 amd64，arm64 从未发布成功，但 job 全绿、看不出异常。
+    # 现在改成单个 job 一次构建两个平台，buildx 自己合并成 manifest index。
 
     steps:
       - name: checkout
@@ -55,8 +52,6 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
-        if: matrix.platform == 'linux/amd64'
-        # 只登录一次（任意一个 job 即可），其他 job 复用缓存；但为保险每个都登录
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -105,7 +100,10 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: ${{ matrix.platform }}
+          # 一次构建两个平台。必须写成逗号分隔的**列表**，让 buildx 产出
+          # manifest index；写成矩阵 + 单平台会让两个 job 互相覆盖同一个 tag。
+          # runner 是 amd64，arm64 走 QEMU 模拟（慢，约 30 分钟）。
+          platforms: linux/amd64,linux/arm64
           # tag 通过 -t 多次指定（buildx 支持逗号分隔）
           tags: ${{ steps.meta.outputs.tags }}
           # v2.86-PR18:把算好的版本号传给 Dockerfile ARG,让 /etc/ikev2-panel-version
@@ -115,21 +113,40 @@ jobs:
             PANEL_VERSION=${{ steps.meta.outputs.panel_version }}
             BUILD_DATE=${{ github.event.head_commit.timestamp }}
             VCS_REF=${{ github.sha }}
-          # QEMU arm64 构建不需要 cache-from（runner 是 amd64，cache 命名空间会冲突）
-          cache-from: type=gha,scope=${{ matrix.platform }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
+          # 单一 cache scope：两个架构共享，命中率高且不会互相污染命名空间
+          cache-from: type=gha,scope=multiarch
+          cache-to: type=gha,mode=max,scope=multiarch
           provenance: false
           push: true
 
+      - name: Verify multi-arch manifest
+        # 防御：矩阵时代的静默覆盖就是缺这一步才漏掉的。
+        # push 完立刻确认 manifest 里确实有两个架构，而不是被覆盖成单架构。
+        run: |
+          set -euo pipefail
+          TAGS='${{ steps.meta.outputs.tags }}'
+          REF="${REGISTRY}/${IMAGE_NAME}:${TAGS%%,*}"
+          echo "检查 $REF"
+          docker buildx imagetools inspect "$REF" --raw > manifest.json
+          echo "mediaType: $(grep -o '"mediaType":[^,]*' manifest.json | head -1)"
+          if ! grep -q '"manifests"' manifest.json; then
+            echo "::error::manifest 里没有 manifests 数组 —— 这是单架构镜像，arm64 丢失了"
+            exit 1
+          fi
+          for p in linux/amd64 linux/arm64; do
+            grep -q "$p" manifest.json || { echo "::error::缺少 $p"; exit 1; }
+            echo "✓ $p"
+          done
+
       - name: Image digest summary
-        if: matrix.platform == 'linux/amd64'
         run: |
           echo "### 多架构镜像构建完成" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "- 仓库: \`${REGISTRY}/${IMAGE_NAME}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- tags: \`${{ steps.meta.outputs.tags }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- 架构: \`linux/amd64\` + \`linux/arm64\`（已校验 manifest index）" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "拉取示例：" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-          echo "docker pull ${REGISTRY}/${IMAGE_NAME}:2.79.2" >> "$GITHUB_STEP_SUMMARY"
+          echo "docker pull ${REGISTRY}/${IMAGE_NAME}:2.86-pr24" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
