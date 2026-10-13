@@ -1,736 +1,309 @@
 # IKEv2 Panel v2
 
-> 1–50 人规模的 IKEv2/IPsec VPN 管理面板（IPv6-only 默认，IPv4 可选）。
-> **v2-79 起：所有网络参数自动探测，用户唯一必填只有 `IKEV2_SERVER_CN`**。
->
-> **v2.86**(2026-09-19):**v2.85 之后的综合规范化(Sprint 1-3,7 PR)**,详见 [`docs/release-notes-v2.86.md`](docs/release-notes-v2.86.md)。
-> **v2.86-PR12.10 ~ PR12.17 hotfix**(2026-09-19 追加):**iOS 上网修复 + 全面切 nft 自定义表**,详见 [release-notes-v2.86.md 末尾补充章节](docs/release-notes-v2.86.md#pr1210--pr1217-紧急-hotfix--iptables--nft-迁移2026-09-19-追加)。推荐镜像:`v2.86-pr12.17`。
->
-> **v2.85**(2026-09-19):**8 PR + Phase 5 A+B 合并发布**,详见 [`docs/release-notes-v2.85.md`](docs/release-notes-v2.85.md)。
->
-> **v2-79.1**：ECDH 协商 + 私钥权限 + mobileconfig DNSSettings 格式三处 Critical 修复。
->
-> **v2-79.2**：Android 11+ 原生客户端 EAP-MSCHAPv2 + iOS 18 ESP DH 修复。
-> 设计与架构文档见仓库 `docs/` 目录：
-> - [`docs/design.md`](docs/design.md) — 设计文档（重点 §1.5 libipsec 选型 + §15~20 v2-79 自动探测 + §22.2 v2-79.2 Android 原生）
-> - [`docs/architecture.md`](docs/architecture.md) — 架构理解文档（重点 §18 govici 重构 + §3.5 VICI 协议）
+单容器 IKEv2/IPsec VPN 管理面板：镜像内自带自编译 strongSwan（`kernel-libipsec`）和 Go 面板进程，
+用一个 Web 面板管理用户、签发客户端配置、限速、DDNS 和证书续签。默认 IPv6-only，可切双栈。
 
----
+适合家用 / 小团队自建 VPN（1–50 人），不适合对外提供公共服务。
 
-## 项目状态
+## 关键特性
 
-### 里程碑
-
-| 里程碑 | 内容 | 状态 |
-|---|---|---|
-| M1 | 项目骨架：Docker + entrypoint + updown + swanctl 主配置 | ✅ |
-| M2 | 存储层：SQLite (modernc.org/sqlite, WAL)，users/sessions/admins 三表 | ✅ |
-| M3 | 认证：bcrypt 管理员 + cookie + 随机密码生成 + 限速保护 | ✅ |
-| M4 | 用户管理：swanctl 子配置 CRUD + 失败回滚 | ✅ |
-| M5 | 客户端配置：mobileconfig（自签内联 / LE 不内联）+ QR 码 + sswan + CA cert | ✅ |
-| M6 | 限速/过期/流量：tc updown + collector + expiry checker | ✅ |
-| M7 | LE 模式：acme.sh 集成 + 续签健康检查 + 失败回退 | ✅ |
-| M8 | Dockerfile 自编译强Swan + libipsec + govici VICI 协议 | ✅ |
-| **M9** | **v2-79 零硬编码部署 + 公网 IPv6 自动变化感知（ipv6watch）** | ✅ |
-| **M10** | **v2-82 阿里云 DDNS 自动同步** (v2.86-PR14 收敛:网络模式只保留 host) | ✅ |
-| **M11** | **v2-83 阿里云凭证统一(面板 UI 卡)+ 面板 HTTPS 证书热重载** | ✅ |
-| **M12** | **v2-84 DDNS 支持 IPv4 / IPv6 / 双栈可选(family 枚举)** | ✅ |
-| **M13** | **v2.85 综合质量提升(8 PR)+ Phase 5 A+B(audit retention cron + TCP MSS clamp)** | ✅ |
-| **M14** | **v2.86 综合规范化(Sprint 1-3:算法去弱 + 容器减权 + 续签 atomic + filelog 脱敏 + SA 审计)** | ✅ |
-
-### M9 v2-79 改动总览（commit 27，2026-09-17）
-
-| Commit | 内容 | 关键文件 |
-|---|---|---|
-| **27** | entrypoint.sh §0 自动探测链 + 所有硬编码改为可选 | [`scripts/entrypoint.sh`](scripts/entrypoint.sh), [`configs/swanctl-ipv6-only.conf`](configs/swanctl-ipv6-only.conf), [`docker-compose.yml`](docker-compose.yml), [`.env`](.env), [`.env.example`](.env.example) |
-
-**v2-79 设计动机**：解决用户的 5 个真实痛点——
-1. **公网 IPv6 动态变化**（ISP 重拨） → `internal/swanctl/ipv6watch.go`（v2-72 已存在，v2-79 加强文档）+ §0.2 自动探测
-2. **网卡名硬编码**（ens18 / eth0 因部署环境而异） → §0.1 自动探测（`ip -4 route show default`）
-3. **网关 / 网段变化** → §0.4 / §0.5 自动探测 + §0.6 自动选不冲突的 VPN 虚拟 IP 段
-4. **"改了宿主机配置"误解** → §19.4 文档明确：只改容器内，绝不动宿主
-5. **host 网络不允许怎么办** → v2.86-PR14 收敛:已不支持其他模式,host 仍不允许请换宿主
-
-**v2-79 关键文件改动清单**：
-
-| 文件 | 改动 |
-|---|---|
-| `scripts/entrypoint.sh` | §0.1~§0.6 自动探测链 + §3.5 MASQUERADE 源用 `%IKEV2_VPN_SUBNET%` + §5 占位符替换扩展 |
-| `configs/swanctl-ipv6-only.conf` | `local_addrs = %IKEV2_LOCAL_ADDRS_DIRECTIVE%`（可省略） + `local_ts = %IKEV2_LOCAL_TS%` + `addrs = %IKEV2_VPN_SUBNET%, fd00:1::/64` |
-| `docker-compose.yml` | `IKEV2_SERVER_ADDR_V6=` / `IKEV2_OUT_IF=` 留空 + 新增 `IKEV2_VPN_SUBNET=auto`(v2.86-PR14 删了 IKEV2_NETWORK_MODE 默认) |
-| `.env` / `.env.example` | 所有字段都注释"留空 → 自动探测" |
-| `internal/cert/mobileconfig.go` | `PanelVersion = "v2-79"` |
-| `internal/swanctl/ipv6watch.go` | 不动（v2-72 已就位，v2-79 文档化） |
-
-### v2-79.1 增量（Critical 修复）
-
-三个 agent 并行审查后筛选的、对你这个家用 IPv6 VPN 部署场景真正有影响的 3 个问题：
-
-| # | 问题 | 修复 |
-|---|---|---|
-| C5 | iOS 18 默认推 ecp256 → 当前 proposals 只列 MODP2048 → 降级耗电 | `swanctl-ipv6-only.conf:44` 追加 `ecp256` / `curve25519` 系列 |
-| C4 | server.key.pem 私钥被写成 0o644（任何同主机用户可读）| `cmd/ikev2-panel/main.go:installCertsToSwanctl` 按文件类型拆权限——cert 0o644，key 0o600 |
-| C6 | mobileconfig DNSSettings 用了 `<array><dict>` 错误格式，iOS 17/18 静默忽略整个节点 | 改为 `<dict><key>DNS</key><array>...</array></dict>` |
-
-**没修的其他 23 个问题**（DB 事务化、密码走 query string、reload 竞态、fd 上限、panic recover 等）全部进 v2-85+ backlog。
-
-### v2-79.2 增量（ESP DH + Android 原生客户端支持）
-
-v2-79.1 完成后，用户对四平台兼容性提出疑问。agent 审查发现两个真问题，**加上一次方案撤回**：初版基于 agent 错误判断"Android 11+ 原生只支持 PSK"做了 PSK 段，被用户实测 + AOSP 源码反驳后撤回，最终方案比初版更简单。
-
-#### 部署注意事项（host 网络 + user namespace + forwarding 自愈）
-
-v2-79.2 移除 `docker compose sysctls:` 配置。原因：host 网络 + user namespace 下 docker daemon 拒绝写 `net.ipv4.ip_forward`（报错 `not allowed in host network namespace`）。
-
-新的 forwarding 自愈链路（**首次部署到新机器完全无人值守**）：
-
-1. **entrypoint §3 自愈 + 自动持久化**（v2-79.2 新增，推荐）
-   - 镜像内 `scripts/entrypoint.sh:251-271` 检测 forwarding 是否开
-   - 没开 → `echo 1 > /proc/sys/net/...`（host 模式共享 net ns，写的就是宿主内核）
-   - 自愈成功后**自动追加到宿主 `/etc/sysctl.d/99-ikev2.conf`**（需要 docker-compose.yml 的 bind mount）
-   - 宿主重启时 `systemd-sysctl.service` 自动加载该 conf，下次部署自带配置
-   - 已实测验证（删 conf + 关 forwarding → 重启容器 → 自动重建）
-
-   bind mount 配置（`docker-compose.yml:94-95`）：
-   ```yaml
-   - /etc/sysctl.d:/host-sysctl.d:rw
-   ```
-
-2. **手工预置 `/etc/sysctl.d/99-ikev2.conf`**（可选，初次部署前手工写）
-   ```
-   net.ipv6.conf.all.forwarding = 1
-   net.ipv4.ip_forward = 1
-   ```
-
-3. **docker compose sysctls**（传统方式，v2.86-PR14 后不再使用，仅 host 模式 entrypoint 自愈）
-
-```yaml
-# docker-compose.yml 里 sysctls 块已注释：
-#   sysctls:
-#     net.ipv6.conf.all.forwarding: 1
-#     net.ipv4.ip_forward: 1
-```
-
-实际验证：`cat /proc/sys/net/ipv4/ip_forward` 在宿主机和容器内显示同一值（host net ns 共享）。
-
-**最终改动（两条 Critical）**：
-
-| # | 类型 | 问题 | 修复 |
-|---|---|---|---|
-| F1 | 真 Critical | v2-79.1 只改了 IKE SA proposals，ESP SA 独立重协商 DH 仍走 MODP2048 → iOS 18 数据通道耗电 | `swanctl-ipv6-only.conf:36` `esp_proposals` 同步追加 ECDH 系列 |
-| F2 | 真 Critical | `internal/cert/generate.go:5` 注释错误"iOS 拒 ECDSA，必须 RSA 2048"（实际 iOS 17+ 已支持） | 注释改为"默认 RSA 2048 兼容所有客户端；切 ECDSA 会破坏现有 mobileconfig" |
-
-**Android 11+ 原生客户端最终方案（重要）**：
-
-**iOS 和 Android 走同一个 server 端 `ikev2-rw` connection 段**（EAP-MSCHAPv2 + 证书）—— 不需要单独的 PSK 段、不需要 strongSwan app、不需要任何额外代码。
-
-AOSP 11+ 的 `android.net.Ikev2VpnProfile.Builder.setAuthUsernamePassword(user, pass, serverRootCa)` 官方 Javadoc 明文：
-> "Setting this will configure IKEv2 authentication using EAP-MSCHAPv2."
-
-设置里那个 `IKEv2/IPSec MSCHAPv2` 选项（默认第一个）就是这个 API 消费的，直接接受用户名密码+证书，跟 iOS mobileconfig 一致。
-
-**Android 用户使用流程**（系统原生，不装任何 app）：
-1. 管理员在面板 → 用户详情 → 点 "Android 11+ 原生（无需第三方 app）" → 看到 `服务器地址 / IPSec 标识符 / 用户名 / 密码` + CA 证书下载链接
-2. Android 端：设置 → 网络和互联网 → VPN → 右上角 `+` → 类型选 `IKEv2/IPsec MSCHAPv2`（默认第一个）→ 填 4 个字段 → 保存 → 点连接
-3. **iOS 用户不受影响**（同一段 `ikev2-rw` EAP）
-
-**v2-79.2 净代码变化**：删除约 280 行（初版 PSK 段），新增约 15 行（F1+F2 修复），整体代码量比 v2-79.1 少。
-
-**v2-79.2 用户体验**：
-
-```bash
-# 改之前的 .env（v2-78）：
-IKEV2_SERVER_ADDR_V6=2408:832e:8a5:1000:be24:11ff:fefb:1bb  # 必填
-IKEV2_OUT_IF=ens18                                          # 必填
-# + 换环境必须改 .env + 重 build
-
-# v2-79 的 .env（推荐）：
-IKEV2_SERVER_CN=ikev2.rewind2023.cn   # 唯一必填
-IKEV2_CERT_MODE=letsencrypt
-IKEV2_DOMAIN=ikev2.rewind2023.cn
-Ali_Key=...
-Ali_Secret=...
-# 其他全部留空 → entrypoint.sh §0 自动探测
-```
+| 特性 | 说明 |
+|------|------|
+| 单容器 | strongSwan + 面板合成一个镜像，`docker compose up -d` 即可 |
+| 网络零配置 | 出口网卡、公网 IP、VPN 虚拟网段由 entrypoint 自动探测，只有域名必须手填 |
+| 用户自助接入 | 面板生成 iOS `.mobileconfig`（含二维码）、Android 原生参数页、strongSwan `.sswan` |
+| 免内核 XFRM | ESP 走用户态 `kernel-libipsec`，不依赖宿主内核 XFRM 模块，OpenVZ/LXC 也能跑 |
+| 证书自愈 | 默认自签 CA + 面板证书，容器销毁后从数据卷恢复；也可切 Let's Encrypt（DNS-01） |
+| DDNS | 阿里云 DNS API 同步 A / AAAA 记录，公网 IP 变了自动改解析 |
+| 断线自愈 | forwarding、nftables 规则、用户配置加载均有启动自愈 + 失败即拒绝启动 |
+| 可观测 | `/healthz`、`/readyz`、`/metrics`（Prometheus 文本格式）、审计日志落盘 |
 
 ---
 
 ## 快速开始
 
-### 本地开发（无 strongSwan，无 docker）
+### 前置条件
+
+- Linux 宿主机，内核有 `/dev/net/tun`，且有公网 IPv6（IPv6-only 模式的硬性要求）
+- Docker 与 Docker Compose v2
+- 宿主防火墙放行 UDP 500、UDP 4500（IKEv2 与 NAT-T）
+
+### 步骤
 
 ```bash
-# 1. 编译（dev 模式：自动写到 dataDir/，VICI socket 不存在时静默跳过）
-go build -o bin/ikev2-panel ./cmd/ikev2-panel
-
-# 2. 跑
-export IKEV2_DATA_DIR=$HOME/.ikev2-panel-dev
-export IKEV2_LISTEN_ADDR=127.0.0.1:8443
-export IKEV2_LOG_LEVEL=debug
-export IKEV2_SERVER_CN=vpn.test.local
-export IKEV2_COOKIE_SECURE=false
-./bin/ikev2-panel
-```
-
-启动日志会打印首次生成的默认管理员密码。
-
-**dev 模式要点**（M8 commit 25）：
-- 旧：`WithSkipReload()` 检查 `swanctl` 二进制是否在 PATH
-- 新：`WithSkipVici()` 检查 `charon.vici` unix socket 是否存在
-- dev 模式下 socket 不存在时静默跳过所有 reload / terminate / list-sas（仅记日志）
-
-### 容器化（生产，v2.85 自动网络模式）
-
-```bash
-# 1. 构建镜像（自编译 strongSwan 6.0.1 + libipsec，约 5-10 分钟首次）
-docker build --network=host --build-arg PANEL_VERSION=v2.85 -t ikev2-panel:v2.85 .
-
-# 2. 按 .env.example 修改环境变量（v2.85：除域名 + LE 凭证外都可留空）
+# 1. 取配置
 cp .env.example .env
-$EDITOR .env
-# 至少填：IKEV2_SERVER_CN（必填）+ IKEV2_DOMAIN + Ali_Key + Ali_Secret（LE 模式）
 
-# 3. 启动（推荐用 ./scripts/up.sh，自动探测网络模式）
+# 2. 至少改这一项（证书 CN + mobileconfig 的 RemoteIdentifier 都用它）
+$EDITOR .env
+#    IKEV2_SERVER_CN=vpn.example.com
+
+# 3. 启动（scripts/up.sh = 建 ./logs 目录 + docker compose up -d）
 ./scripts/up.sh
 
-# 4. 看日志（重点关注 [auto-detect] 行 + version= 验证版本）
-docker compose logs -f | grep -E '(auto-detect|FATAL|version=)'
+# 4. 打开面板
+#    https://<宿主IP>:8443/login
 ```
 
-**日志落盘（v2.86-PR13.4）**：
+首次启动会自签一套 CA + 服务器证书 + 面板证书并写入数据卷，因此浏览器会报自签证书不受信任，
+这是预期行为（客户端通过内嵌 CA 信任，不受影响）。
+
+### 取初始管理员密码
+
+首次启动会创建管理员 `admin`，密码同时打印到 stdout 并持久化到文件：
 
 ```bash
-# 容器内 /var/log bind 到宿主机 ./logs(sticky bit 1777)
-ls -la ./logs/
-# 典型文件:
-#   swanctl.log          strongSwan 控制连接日志
-#   charon.log            IKE daemon 主日志
-#   audit.log            面板审计日志(用户增删 / 证书变更 / DDNS 同步等)
-#   cron.log             renew-cert / audit-retention cron 执行日志
-#   panel-stdout.log     Go 进程 stdlib log(容器 stdout/stderr 的本地镜像)
+# 从日志取
+docker compose logs ikev2-panel | grep -A3 "默认管理员已创建"
 
-# 直接 tail 排查
-tail -f ./logs/audit.log
-
-# 容器 stdout/stderr(docker daemon 层轮转 20m×5)
-docker logs -f ikev2-panel
+# 或从文件取（容器销毁 / 日志轮转后依然有效）
+docker compose exec ikev2-panel cat /data/panel-state/INITIAL_ADMIN_PASSWORD.txt
 ```
 
-**v2.86-PR14 收敛**：网络模式固定 `host`(`docker-compose.yml` 已写死 `network_mode: host`)。
-不再支持 bridge / ipvlan 模式（v2-79 写过但 2025 实机验证多用户并发丢包严重，已下线）。
-`./scripts/up.sh` 不再调用探测脚本，只负责 `./logs` 目录准备 + `docker compose up -d`。
-**老用户继续 `docker compose up -d` 仍然 100% 兼容**（默认 host 网络，无需任何 override）。
+该文件**已存在时不会被覆盖**，所以重启容器不会把已改过的密码改回去。
+面板检测到它存在就会一直提示"还在用默认密码"，改完密码后删掉它即可。
 
-预期启动日志：
+### 用 Let's Encrypt（可选）
 
-```
-[entrypoint] [auto-detect] Outbound interface: ens18
-[entrypoint] [auto-detect] Public IPv6: 2408:832e:8a5:1000:be24:11ff:fefb:1bb
-[entrypoint] [auto-detect] IPv4 gateway: 192.168.50.1
-[entrypoint] [auto-detect] LAN subnets: 192.168.50.0/24
-[entrypoint] [auto-detect] VPN subnet: 10.10.0.0/24 (LAN: 192.168.50.0/24)
-[entrypoint] Using IPv6 address: 2408:832e:8a5:1000:be24:11ff:fefb:1bb
-[entrypoint] IP forwarding OK (v4=1, v6=1)
-...
-[entrypoint] table 220 default route added via 192.168.50.1 dev ens18
-[entrypoint] FORWARD -i ipsec0 ACCEPT added
-[entrypoint] FORWARD -o ipsec0 ACCEPT added
-[entrypoint] MASQUERADE 10.10.0.0/24 -> ens18 added
-[entrypoint] local_addrs = 2408:...:1bb (auto-detected v6)
-[entrypoint] IPv6 MASQUERADE applied on ens18
-[entrypoint] Replacing placeholders in /etc/swanctl/swanctl.conf...
-...
-[entrypoint] charon ready (took 1.5s)
-[entrypoint] Loading swanctl connections...
-```
-
-### 验证部署正确性（v2.85）
-
-启动后**必须**确认以下三项（任一不一致说明 build/tag 没对齐）：
+自签模式下客户端零配置，但浏览器始终报警告。切 LE 需要公网域名 + 阿里云 DNS API 凭证：
 
 ```bash
-# 1. 启动日志应显示 version=v2.85
-docker compose logs ikev2-panel 2>&1 | grep version=
-# 期望: msg="ikev2-panel starting" version=v2.85 go_version=go1.26.0 ...
-
-# 2. 镜像内版本文件内容
-docker compose exec ikev2-panel cat /etc/ikev2-panel-version
-# 期望: v2.85
-
-# 3. 本地镜像 tag 与 docker-compose.yml 一致
-docker compose config | grep 'image:'
-# 期望: image: ikev2-panel:v2.85
+# .env 里改这几项
+IKEV2_CERT_MODE=letsencrypt
+IKEV2_DOMAIN=vpn.example.com
 ```
 
-如果 `version=dev` 或 `cat` 找不到文件 → 说明 build 时没传 `--build-arg PANEL_VERSION=v2.85`,或 docker-compose.yml 的 `${PANEL_TAG:-v2.85}` 默认值没生效。重新 `docker build` 并确保 `export PANEL_TAG=v2.85` 或在 `.env` 里加 `PANEL_TAG=v2.85`。
+凭证推荐直接在面板的「阿里云 API 凭证」卡片里填（写入 `/data/panel-state/aliyun.creds`），
+不必写进 `.env`。也可以用环境变量，优先级从高到低：
+
+| 变量 | 说明 |
+|------|------|
+| `IKEV2_ALIYUN_KEY_ID` / `IKEV2_ALIYUN_KEY_SECRET` | 推荐的统一命名 |
+| `ALIYUN_ACCESS_KEY_ID` / `ALIYUN_ACCESS_KEY_SECRET` | 旧命名，加载时打 deprecation 警告 |
+| `Ali_Key` / `Ali_Secret` | acme.sh 原生命名，最老的一层 |
+
+> 切到 LE 是**破坏性变更**：所有已分发的 `.mobileconfig` 内嵌的是旧 CA，
+> 换证书后必须重新生成并分发，否则客户端集体失配断连。升级前先看 [CHANGELOG.md](docs/CHANGELOG.md)。
 
 ---
 
-### v2.86 改动总览(2026-09-19)
+## 部署要点
 
-v2.85 之后的综合规范化,**累计 4.8 人日**(Sprint 1-3,7 PR)。完整 release notes:[`docs/release-notes-v2.86.md`](docs/release-notes-v2.86.md)。
+以下每条都对应 [`docker-compose.yml`](docker-compose.yml) 里的实际配置。
 
-| PR | 主题 | 用户感知 |
-|----|------|----------|
-| **PR-11** | Docker 减权 + 清华源 GPG | 删除 `privileged: true` + `SYS_ADMIN`;apt 源 GPG 防供应链攻击 |
-| **PR-9** | 登录 rate limit + HTTP 安全 header + DDoS | 暴力破解入口关闭;7 个 header;connlimit 50/IP + hashlimit 30/min |
-| **PR-10** | IKEv2 算法去弱 + RFC 7383 分片 + RFC 6023 childless | 算法合规 RFC 8247;iOS 14/15 仍用 modp2048 fallback;rekey 零断流 |
-| **PR-12** | 续签 atomic + acme.sh pinned commit + cron 随机化 | LE 续签 0 断流(load-creds);acme.sh pinned SHA256 |
-| **PR-13** | filelog 脱敏 + logrotate | charon.log 不再泄漏 NT-hash;7 天轮转 |
-| **PR-14** | DDNS jitter retry | retry 雪崩消失(全球用户不再同秒 retry) |
-| **PR-15** | VICI SA lifecycle 审计 | `/audit` 看到 SA 建立/断开事件 |
+### 网络：只有 host 模式
 
-设计原则:为家用 1-50 人场景定制,**不引入 PQC / ESP TFC / ingress IFB 等过度开发**(留给 v3.0)。
+`network_mode: host` 是**唯一支持的模式**，容器与宿主共享网络命名空间。
 
----
+- **compose 里没有 `ports:` 映射**，host 模式下写了也不生效 —— 端口是容器直接在宿主上监听的。
+- 不要去改 `/etc/docker/daemon.json` 配 IPv6 或转发开关：host 模式不走 Docker 的
+  iptables / sysctl 管理，改那些只会在宿主上留下无关配置。
+- 公网 IPv6 必须可达，所以 bridge 模式（Docker 默认从 `fd00::/8` 分 ULA，公网不可路由）
+  天然不可用。`.env` 里若把 `IKEV2_NETWORK_MODE` 设成 `bridge` / `ipvlan`，
+  entrypoint 会直接 FATAL 退出并说明原因。
 
-### v2.85 改动总览(2026-09-19)
+### Capabilities
 
-v2-79.2 之后的综合质量提升,**累计 6.0 人日**(8 PR × 5.2d + Phase 5 A+B × 0.8d)。完整 release notes:[`docs/release-notes-v2.85.md`](docs/release-notes-v2.85.md)。
-
-| PR | 主题 | 用户感知 |
-|----|------|----------|
-| **PR-1** | 部署一致性 + Dockerfile race-test | `PANEL_TAG` / build-arg / `/etc/ikev2-panel-version` 三向同步,漏传立即 WARN |
-| **PR-2** | 默认密码持久化 + bcrypt cost 12 | 容器重启不换密码;暴力破解阈值收紧 |
-| **PR-3** | 时区显示统一 + 续签日志路径修复 | mobileconfig / 审计页按 `IKEV2_TIMEZONE` 渲染;LE 日志可查 |
-| **PR-4** | main.go WaitGroup + charon ready wait | 优雅退出零泄漏;swanctl 启动前等 charon 真 ready |
-| **PR-5** | alidns 错误码精确匹配 + HMAC-SHA256 | 401 立刻报错,不再 9s retry 浪费 |
-| **PR-6** | DDNS throttle 持久化 + stopCh sync.Once + collector REKEYING | 跨重启 throttle 保留;REKEYING 事件不再吞 |
-| **PR-7** | tc IPv6 限速(flower classifier) | IPv6-only VPS 也能限速,dual v4+v6 共享 class |
-| **PR-8** | onboarding checklist + /healthz/readyz/metrics + audit log + 双确认 delete | 5 项可观测 + Prometheus 指标 + 完整操作审计 + 删用户前 4 副作用提示 |
-| **Phase 5-A** | audit 90 天 retention cron | 自动清理过期 audit,默认 90 天可调 |
-| **Phase 5-B** | TCP MSS clamp(iptables mangle) | 解决 VPN 路径 MTU 黑洞,SSH/curl/大包 HTTP 不再卡死 |
-
----
-
-## ⚠️ 仅限自用 / 内部团队
-
-v2 设计上**不适用于对外提供服务**：
-
-- 用户 VPN 密码明文存库（妥协项，理由见 design §4.3）
-- 单一管理员账号，无 RBAC / 审计日志
-- 无 2FA / 防 DDoS / IP 白名单
-
-如需对外提供服务，请加 reverse proxy + fail2ban，或等待 v3。
-
----
-
-## 部署兼容性矩阵（M8）
-
-### 1. 操作系统（宿主机）
-
-| OS | 版本 | 备注 |
-|---|---|---|
-| Debian | 12+ (bookworm) | ✅ 推荐：与 Dockerfile 同源，最大兼容 |
-| Ubuntu | 22.04+ (jammy) | ✅ 测试通过 |
-| 其他 glibc | ≥ 2.36 | ⚠️ 理论支持，strongSwan 运行时库需对应版本 |
-
-> 宿主机 OS **不影响** 容器内的 strongSwan 6.0.1（容器自带 runtime）。
-
-### 2. 内核要求
-
-| 项 | 要求 | 原因 |
-|---|---|---|
-| `/dev/net/tun` 设备 | 必须可用 | `kernel-libipsec` 通过 TUN 设备注入解密后流量 |
-| `CONFIG_TUN` | 内核编译时启用 | 几乎所有主流发行版默认启用 |
-| 内核 XFRM 模块 | **不需要** | libipsec 走用户态，不依赖 XFRM（这是 M8 关键改进） |
-| IPv6 NAT (`CONFIG_IP6_NF_NAT`) | IPv6 MASQUERADE 需要 | Debian/Ubuntu 默认编入；OpenVZ 7 可能缺失 |
-| IP forwarding | `sysctl net.ipv4.ip_forward=1` + `net.ipv6.conf.all.forwarding=1` | **三层兜底**：① `docker-compose.yml sysctls:` 让 docker daemon 自动开 ② `entrypoint.sh §3 enable_forwarding()` 自愈（host 模式 rw 时直接 echo 1） ③ 仍失败才 FATAL 提示手动 `sudo sysctl -w` |
-
-### 3. 网络模式（关键决策）
-
-**M8 commit 24 后的最终结论 + v2.86-PR14 收敛**：**唯一支持 `network_mode: host`**。
-
-| 网络模式 | 状态 | 原因 |
-|---|---|---|
-| **`network_mode: host`**（唯一） | ✅ 强制默认 | 直绑宿主网卡，公网 IPv6 直达 + UDP 500/4500 不需要端口映射 |
-| bridge + `ipvlan` | ❌ 已下线 | v2-79 写过但 2025 实机验证多用户并发丢包严重 |
-| bridge（docker 默认） | ❌ **不可用** | docker 给容器分配 fd00::/8 ULA，公网不可达 |
-| bridge + macvlan | ❌ 不支持 | 不提供模板 |
-
-**为什么 docker 默认 bridge 不可用**（实机验证 192.168.50.176）：
-```
-$ docker exec ikev2-panel ip -6 addr show eth0
-inet6 fd00:d0c::242:ac11:2/64 scope global nodad  ← ULA，公网不可达！
+```yaml
+cap_drop: [ALL]
+cap_add: [NET_ADMIN, NET_RAW, NET_BIND_SERVICE, CHOWN, DAC_OVERRIDE]
+security_opt: [no-new-privileges:true]
+devices: [/dev/net/tun]
 ```
 
-Docker bridge 默认从 `fd00::/8` ULA 段分配 IPv6，**即使是 global scope 也无法在公网路由**。即便配置 `daemon.json` 开启 IPv6 + `ip6tables`，仍然只会得到 ULA 段。**唯一解法是 host 网络**。
+| Capability | 用途 |
+|------------|------|
+| `NET_ADMIN` | nftables 规则、路由表、forwarding 自愈 |
+| `NET_RAW` | `tc` qdisc / class / filter（限速） |
+| `NET_BIND_SERVICE` | 监听 500 / 4500 特权端口 |
+| `CHOWN` | entrypoint 调整 `/etc/swanctl` 权限 |
+| `DAC_OVERRIDE` | 读取 `/proc/sys/net` 下的转发开关 |
 
-> v2.86-PR14 后:`.env` 里设 `IKEV2_NETWORK_MODE=bridge|ipvlan` 会被 entrypoint.sh §0.7 FATAL 拒绝并明确报错。
+不要随手加 `SYS_ADMIN` 或 `privileged: true` —— 这个镜像不需要它们。
 
-### 4. 容器 capabilities
+### 数据卷
 
-| Capability | host 模式（唯一） | 用途 |
-|---|---|---|
-| `NET_ADMIN` | ✅ 必需 | iptables MASQUERADE、ip link 探测、ip route |
-| `NET_BIND_SERVICE` | ✅ 必需 | 监听 privileged 端口 500/4500 |
-| `SYS_ADMIN` | ✅ 必需 | host 模式下 tc 限速、ip rule 路由 |
-| `NET_RAW` | ❌ 不需要 | libipsec 走 TUN，不需要 raw socket |
-| `cap_drop ALL` | ✅ 强烈推荐 | 最小权限原则 |
+```yaml
+volumes:
+  - ikev2-panel-v2_ikev2-data:/data
+  - ./logs:/var/log:rw
+  - /etc/sysctl.d:/host-sysctl.d:rw
+```
 
-### 5. 设备
+命名卷的实际名字是 `{项目目录名}_ikev2-data`，即默认的 `ikev2-panel-v2_ikev2-data`。
+**这意味着改名仓库目录会换一个卷名**：Compose 找不到旧卷就静默建一个空的，
+面板数据与证书看起来"消失"且不报错。迁移或改名后请显式对齐：
 
-| 设备 | 必需 | 原因 |
-|---|---|---|
-| `/dev/net/tun` | ✅ | `kernel-libipsec` 注入解密后流量到 TUN，协议栈再走正常路由表 |
+```bash
+# 改名后把旧卷挂到新名字上
+docker volume rename ikev2-panel-v2_ikev2-data <新目录名>_ikev2-data
+```
 
-### 6. 端口与防火墙
+`/data` 下持久化四类数据：`panel.db`（用户 / 审计）、`panel-state/`（运行时配置与凭证）、
+`le/`（LE 证书）、`acme-sh/`（acme.sh 工作目录，避免重启触发 LE 速率限制）。
 
-| 协议 | 端口 | 用途 | 防火墙建议 |
-|---|---|---|---|
-| UDP | 500 | IKEv2 协商 | 公网开放 |
-| UDP | 4500 | IKEv2 NAT-T（libipsec 强制） | 公网开放 |
-| IP proto 50 (ESP) | — | ❌ **不需要** | libipsec 走 UDP/4500 后无需开放 ESP |
-| TCP | 8443 | 管理面板 HTTPS | **限制源 IP**（host 模式下直接暴露公网） |
-| TCP | 22 (SSH) | — | 不要与 panel 8443 冲突 |
+`/etc/sysctl.d:/host-sysctl.d:rw` 只在 forwarding 自愈成功时才会被写入 `99-ikev2.conf`，
+让宿主重启后仍然生效；宿主上原本没有该文件时，自愈不会留下任何配置痕迹。
 
-### 7. DNS
+### 端口与防火墙
 
-- AAAA 记录 → `IKEV2_SERVER_ADDR_V6`
-- **不要配 A 记录**（IPv4 优先会导致客户端走 v4 失败）
-- mobileconfig 里 `RemoteIdentifier` 用域名，不要裸用 IPv6 地址（证书 SAN 必须匹配域名）
+| 端口 | 协议 | 用途 | 建议 |
+|------|------|------|------|
+| 500 | UDP | IKEv2 协商 | 对所有客户端开放 |
+| 4500 | UDP | IKEv2 NAT-T（`kernel-libipsec` 强制） | 对所有客户端开放 |
+| 8443 | TCP | 管理面板 HTTPS（默认 `0.0.0.0:8443`） | **限制源 IP** |
+| — | ESP / IP 协议号 50 | 不需要 | libipsec 走 UDP/4500 |
+
+host 网络下 8443 直接暴露在公网，面板自身没有 RBAC 和 2FA，务必用防火墙或反向代理限制来源。
+面板前面挂了反代时才设 `IKEV2_TRUSTED_PROXY=true`，否则登录限流只按直连地址计数。
+
+### 日志
+
+业务日志 bind 到宿主 `./logs`（`scripts/up.sh` 会建目录并 `chmod 1777`），
+容器 stdout/stderr 另由 Docker 的 `json-file` 驱动按 20 MB × 5 滚动。
+
+```bash
+tail -f ./logs/audit.log        # 审计日志
+tail -f ./logs/charon.log       # IKE daemon
+docker compose logs -f          # 容器 stdout
+```
+
+---
+
+## 运行时配置生效时机
+
+改完配置后什么时候生效，取决于值从哪里来。
+
+| 配置 | 改完何时生效 |
+|------|--------------|
+| `IKEV2_SERVER_CN` / `IKEV2_CERT_MODE` / `IKEV2_DOMAIN` | **重启容器**（entrypoint 启动时替换 swanctl.conf 占位符） |
+| `IKEV2_IPV6_ONLY` / `IKEV2_OUT_IF` / `IKEV2_VPN_SUBNET` | **重启容器** |
+| `IKEV2_LISTEN_ADDR` / `IKEV2_LOG_LEVEL` / `IKEV2_DISPLAY_TIMEZONE` | **重启容器** |
+| `IKEV2_SESSION_TTL` / `IKEV2_DEFAULT_USER_PASSWORD_LEN` | **重启容器** |
+| 面板里改的证书配置、客户端虚拟网段 | **重启容器**（`cert.conf` / `subnet.conf` 由 entrypoint 启动时读；网段另有"保存并立即生效"按钮，不重启也能改） |
+| 面板里填的阿里云凭证 | **无需重启**，下一轮 DDNS 同步现读（`CredentialGetter`） |
+| 面板里的 DDNS 开关 / 记录类型 / RR / 同步周期 | **立即生效**，进程内直接生效 |
+| 面板里的 mobileconfig 默认值 | **立即生效** |
+| 面板 HTTPS 证书（`panel-tls/`） | 收到 `SIGHUP` 时重载 |
+
+> **SIGHUP 只做一件事：重载面板自己的 TLS 证书。**
+> `kill -HUP` 不会重新读取任何环境变量，也不会刷新阿里云凭证 ——
+> 凭证是每轮同步现读的，根本不需要信号；环境变量则必须重启容器。
 
 ---
 
-## libipsec 性能边界
+## 备份与恢复
 
-### 原理
+[`scripts/backup-restore.sh`](scripts/backup-restore.sh) 在**宿主机**上运行，
+用 `DATA_DIR` 指向命名卷的挂载点（默认 `/data` 是容器内路径，宿主机上没有）：
 
-[`kernel-libipsec`](https://docs.strongswan.org/docs/latest/plugins/kernel-libipsec.html) 是 strongSwan 官方提供的**用户态 ESP 实现**：
-- ESP 包不再走内核 XFRM，而是封装到 UDP/4500（NAT-T）由 charon 用户态解密
-- 解密后通过 TUN 设备注入回协议栈，正常走路由表
+```bash
+DATA_DIR=/var/lib/docker/volumes/ikev2-panel-v2_ikev2-data/_data ./scripts/backup-restore.sh backup
+```
 
-### 性能特征
+| 子命令 | 作用 |
+|--------|------|
+| `backup` | 备份运行时数据 + 代码 git bundle |
+| `backup-data` | 只备份运行时数据 |
+| `list` | 列出已有备份 |
+| `verify <备份目录>` | 校验（含 SQLite 完整性检查） |
+| `restore <备份目录>` | 覆盖恢复运行时数据，需输入 `yes` 确认，完成后需 `docker compose restart` |
+| `snapshot <名称>` / `rollback <ref>` | 代码快照与回滚指引 |
 
-| 维度 | 数值 | 说明 |
-|---|---|---|
-| 单包开销 | +8 ~ +12 字节 | UDP/4500 + UDP header + libipsec nonce |
-| 单核吞吐（openssl plugin，软算） | 200 ~ 500 Mbps | AES-GCM-128，软件实现 |
-| 单核吞吐（aesni plugin + AES-NI） | 1.5 ~ 3 Gbps | 需 CPU 支持 AES-NI（几乎所有 2013+ 服务器 CPU） |
-| 多核扩展 | ❌ **单核瓶颈** | libipsec 单 SA 绑定到单线程，无法利用多核 |
-| 硬件 offload | ❌ **不支持** | 内核 XFRM 才支持 NIC IPsec offload |
-| 包缓冲 | 全包内存缓冲 | 不适合大包/长肥管道 |
-| 延迟增加 | +0.1 ~ +0.5 ms | 相比内核 XFRM 多一次用户态拷贝 |
-
-### 推荐适用范围
-
-| 场景 | 是否适合 libipsec | 备注 |
-|---|---|---|
-| 1–20 用户，每用户 ≤ 5 Mbps | ✅ **理想** | 总带宽 ≤ 100 Mbps 完全在软算能力内 |
-| 20–50 用户，每用户 ≤ 5 Mbps | ✅ 可用 | 总带宽 ≤ 250 Mbps，需 CPU 支持 AES-NI |
-| 50+ 用户 / 单用户 > 10 Mbps / 总 > 500 Mbps | ❌ **改用内核 XFRM** | 走宿主机 systemd 安装 + `charon.plugins.kernel-libipsec.load = no` |
-| 延迟敏感（VoIP/游戏/高频交易） | ⚠️ | +0.1–0.5ms 延迟可接受；如不能接受，改内核 XFRM |
-| 多核 CPU 想要扩展吞吐 | ❌ | libipsec 是单核瓶颈；改内核 XFRM |
-
-### 性能调优建议（如确实需要接近上限）
-
-1. **CPU 选型**：优先选支持 AES-NI 的型号（Intel Xeon E3/E5、AMD EPYC）
-2. **算法选择**：IKEv2 proposal 用 `aes128gcm16-prfsha256-ecp256`（AES-GCM 单 pass 即可加解密）
-3. **MTU**：UDP/4500 封装后包长 +12 字节，建议客户端 MTU 设为 1280（IPv6 默认）
-4. **MOBIKE (`mobike=yes`)**：v2-79+ 显式启用。RFC 4555 让 IKEv2 client 切网时复用现有 IKE SA（不重协商 ESP）—— **iOS 切网不掉 VPN + 省电**。日常家用场景**必须开**；只有切换到内核 XFRM 且追求 > 500 Mbps 单 SA 极限吞吐时才考虑 `mobike=no`（上一版"不要开"建议是误导，已更新）。
-5. **监控**：`swanctl --stats` 看 `bytes_in/out` per-SA，如果单 SA > 200Mbps 持续 5 分钟以上，建议拆分用户
-
-### 切换到内核 XFRM（高吞吐场景）
-
-如果你确实需要 > 500 Mbps 总带宽：
-
-1. **宿主机装 strongSwan 6.0.1**（不用容器）
-   ```bash
-   apt install strongswan strongswan-swanctl libstrongswan-extra-plugins
-   ```
-2. **关闭 libipsec，启用 kernel-netlink**：
-   ```conf
-   # /etc/strongswan.d/charon/kernel-libipsec.conf
-   kernel-libipsec { load = no }
-   ```
-3. **ESP 走原生 IP proto 50**（不需要 UDP/4500 端口）
-4. **Go 进程同样可用**：Govici 走 VICI socket，协议与后端无关
+备份默认落在 `/opt/ikev2-backups`，每个备份目录带 `MANIFEST.txt`。
+`restore` 会把 `panel.db` 权限复位为 `0600`。
 
 ---
+
+## 已知限制与故障自愈
+
+### 限速只作用于客户端上传方向
+
+`scripts/ikev2-updown` 里的 tc filter 匹配的是 **源地址为客户端虚拟 IP** 的报文
+（`u32 match ip src <peer>` / `flower src_ip <peer>`），挂在出口网卡上。
+所以限速约束的是**客户端 → 公网**的流量，**下载方向不限速**。
+需要限制下载的话得在客户端侧或路由器上另做。
+
+限速单位是 Mbps，`0` 表示不限速。IPv6 限速依赖 `tc flower`（内核 4.1+），
+不支持时只打 WARN、不阻断 SA 建立。
+
+### libipsec 是单核瓶颈
+
+ESP 走用户态解密，单 SA 绑定单线程，**无法多核扩展，也不支持网卡硬件 offload**。
+
+| 场景 | 是否适合 |
+|------|----------|
+| 1–20 人，每人 ≤ 5 Mbps | 适合 |
+| 20–50 人，每人 ≤ 5 Mbps | 可用，CPU 建议支持 AES-NI |
+| 50+ 人，或总带宽 > 500 Mbps，或延迟敏感业务 | 不适合，应改用内核 XFRM |
+
+MOBIKE 默认开启，客户端切网时复用现有 IKE SA，切换不掉线。
+
+### forwarding 自愈，失败即拒绝启动
+
+容器作为 VPN 路由器需要宿主打开转发。`compose` 里**没有 `sysctls:` 段** ——
+host 网络模式下 runc 会以 `not allowed in host network namespace` 拒绝它。
+转发开关由 entrypoint 在容器内直接写 `/proc/sys/net/...`（host 模式共享 net ns，
+写的就是宿主内核），成功后再把值持久化到宿主 `/etc/sysctl.d/99-ikev2.conf`。
+
+两步都失败时 entrypoint **FATAL `exit 11`**，容器起不来。这是刻意设计：
+宁可启动失败，也不要跑出一个"看起来正常但客户端连上后上不了网"的实例。
+
+nftables 规则同理：启动时校验自定义表 `ikev2` / `ikev26` 是否生效，缺失则重建重试
+（快阶段 1s × 10，慢阶段 5s × 50）。彻底失败会写哨兵文件，面板顶部告警。
+
+### VICI socket 权限没有配置项
+
+strongSwan 的 `vici` 插件把 socket 权限**硬编码为 `0770 root:root`**，
+strongSwan 侧**不存在**任何能改这个权限的配置项（改 `charon.conf` 无效）。
+当前镜像里面板进程以 root 运行，可以直接访问，所以不影响使用。
+若将来把面板改成非 root 运行遇到 `permission denied`，
+只能从 socket 的属组入手，不要指望 strongSwan 配置。
+
+### 其他
+
+- 用户 VPN 密码明文存库（EAP-MSCHAPv2 的取舍），数据库文件权限 `0600`。
+- 单一管理员账号，无 RBAC / 2FA。
+- 二维码里的面板地址取自访问用的 `Host`，部署时必须用域名或 IP 访问，不能用 `localhost`。
+- **二维码只对 iOS / macOS 有效。** 它下发的是 `.mobileconfig`（Apple MDM 专有格式），
+  Android 浏览器无法解析 —— Android 用户请用 `/users/<id>/android`（系统原生填参）
+  或 `/users/<id>/sswan`（strongSwan App 导入）。二维码里的 token 是一次性的，
+  在 Android 上扫了会白白作废。
+- 本地开发模式（判定依据是 `/etc/swanctl` 目录是否存在，而非 VICI 连通性）
+  把用户配置写到 `<DataDir>/swanctl-conf.d/` 并跳过所有 VICI 操作，仅供调试。
+
+---
+
+## 文档地图
+
+| 你要做的事 | 看这里 |
+|------------|--------|
+| 要改代码 | [architecture.md](docs/architecture.md) |
+| **要改前端模板** | [architecture.md §12.9](docs/architecture.md)（CSP 与模板转义两条硬边界） |
+| 要调接口 | [API.md](docs/API.md) |
+| 出问题了 | [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)（§1-7 服务端 · §8 纯前端） |
+| 升级前必看 | [CHANGELOG.md](docs/CHANGELOG.md) |
+| 配置项清单 | [.env.example](.env.example)（唯一权威） |
+
+文档分层约定见 [docs/README.md](docs/README.md)：一个问题只应有一个权威出处，
+配置项清单只维护一份（在 `.env.example`），版本变更只维护一份（在 CHANGELOG）。
+**文档描述代码当前状态，不描述设计意图**；发现文档与代码不符时以代码为准。
+
+### 改前端前必须知道的两条边界
+
+写在 [architecture.md §12.9](docs/architecture.md)，这里只列结论：
+
+1. **CSP 没有 `'unsafe-inline'`** —— `onclick="return confirm(...)"` 会被浏览器
+   **静默拒绝**，破坏性操作的二次确认等于没有。二次确认一律用 `data-confirm`。
+   不要为了"让它能用"去放松 CSP。
+2. **banner 的 `.Msg` 永远转义，`MsgHTML` 只能是代码里的字面量。**
+   动态值（密码、用户名、外部 API 错误串）不进 `MsgHTML`，拆成同级独立元素。
+
+两条都有回归测试锁住（`internal/web/p0_banner_confirm_test.go`）。
 
 ## 模块结构
 
-```
-ikev2-panel-v2/
-├── cmd/ikev2-panel/main.go          # 入口
-├── internal/
-│   ├── auth/                         # bcrypt + session
-│   ├── cert/                         # RSA 自签证书 + mobileconfig + LE 状态
-│   ├── config/                       # 环境变量
-│   ├── expiry/                       # 过期检查 goroutine
-│   ├── limit/                        # 限速文件 + collector goroutine
-│   ├── store/                        # SQLite + CRUD
-│   ├── swanctl/                      # 子配置 + VICI reload + parser + terminate
-│   │   ├── writer.go                 #   用户 conf.d 文件写
-│   │   ├── loader.go                 #   VICI load-all / load-creds
-│   │   ├── terminate.go              #   VICI terminate-IKE / terminate-all
-│   │   └── parser.go                 #   VICI list-sas streaming
-│   └── web/                          # HTTP server + handlers + templates
-├── web/templates/                    # html/template
-├── web/static/                       # style.css
-├── scripts/
-│   ├── entrypoint.sh                 # IPv6 校验 + MASQUERADE + charon 启动
-│   ├── ikev2-updown                  # tc 限速
-│   └── renew-cert.sh                 # LE 续签（失败回退）
-├── configs/swanctl-ipv6-only.conf    # 主配置（IPv6-only）
-├── Dockerfile
-└── docker-compose.yml
-```
-
----
-
-## 测试
-
-```bash
-# 跑所有测试
-go test ./...
-
-# 加 verbose
-go test -v ./...
-```
-
-覆盖率（按 package）：
-
-- `auth`：5 个测试（密码生成 + 长度限制 + 随机性 + bcrypt + session ID）
-- `cert`：5 个测试（CA 生成 + Server cert + mobileconfig + UUID + 文件存在）
-- `expiry`：1 个测试（swanctl mock 接口）
-- `limit`：3 个测试（限速文件读写 + collector 单次 tick）
-- `store`：4 个测试（用户 CRUD + 过期用户 + session CRUD + admin CRUD）
-- `swanctl`：12 个测试（M8 commit 25 改造：VICI Message 结构化 + dev 模式 SkipVici）
-
-> M8 commit 25 后 `swanctl` 测试改为手工构造 `vici.Message`，不再依赖 `swanctl --list-sas` 文本输出格式。
-
----
-
-## 端到端验收（按 design §12）
-
-启动服务后（dev 模式或容器内）：
-
-| 步骤 | 验证 | 命令 |
-|---|---|---|
-| 1. docker compose up -d | 启动成功 | `docker compose logs -f` |
-| 2. 看启动日志 | 默认管理员密码打印 | stdout |
-| 3. 浏览器登录 | HTTPS 警告 + 登录成功 | `https://<host>:8443/login` |
-| 4. 新增用户 | 数据库 + swanctl 配置文件生成 | `cat $DATA/swanctl-conf.d/<user>.conf` |
-| 5. iOS 扫码 | mobileconfig 下载 + 安装 | `https://<host>:8443/users/<id>/mobileconfig` |
-| 6. 真机连接 | strongSwan client 连通 | iOS/Android |
-| 7. 验证 VICI | charon.vici unix socket 存在 | `docker exec ikev2-panel ls -l /var/run/charon.vici` |
-| 8. 验证 ESP | UDP/4500 抓包看到 ESP-in-UDP | `tcpdump -i any -n udp port 4500` |
-
----
-
-## 已知限制
-
-- IPv6-only 时限速 tc 只能作用于 IPv4 流量（tc u32 不识别 IPv6）
-- 单向上传限速（下载不限速，需在客户端侧另配）
-- libipsec 不支持硬件 offload / 多核扩展（详见上文性能边界）
-- dev 模式容器外不能 reload（VICI socket 不存在）— 容器内是生产路径
-- mobileconfig URL 在 QR 码里用 `r.Host`，**部署时必须用域名/IP 访问**（不能用 localhost）
-
----
-
-## 部署清单（容器）
-
-### v2-79 简化版（推荐）
-
-修改 `.env`：
-- **`IKEV2_SERVER_CN`**（必填）：你的域名（mobileconfig RemoteIdentifier + 证书 CN 用）
-- **`IKEV2_CERT_MODE=letsencrypt` + `IKEV2_DOMAIN` + `Ali_Key` + `Ali_Secret`**（LE 模式必填）
-- 其他字段全部留空 → entrypoint.sh §0 自动探测
-
-```env
-# .env 最简配置（v2-79）
-IKEV2_SERVER_CN=ikev2.your-domain.com
-IKEV2_CERT_MODE=letsencrypt
-IKEV2_DOMAIN=ikev2.your-domain.com
-Ali_Key=xxx
-Ali_Secret=yyy
-# IKEV2_SERVER_ADDR_V6=    ← 留空自动探测
-# IKEV2_OUT_IF=            ← 留空自动探测
-# IKEV2_IPV6_ONLY=true     ← 默认就是 true
-```
-
-### v2-78 之前的版本（兼容）
-
-如果保留 `IKEV2_SERVER_ADDR_V6` / `IKEV2_OUT_IF` 等字段，entrypoint 仍优先使用（不覆盖）。
-
-防火墙：
-- UDP 500 + 4500（IKEv2 + NAT-T）— **ESP 协议号 50 不需要**
-- TCP 8443（管理面板）— 建议只允许管理员 IP
-
-DNS：
-- AAAA 记录指向 `IKEV2_SERVER_ADDR_V6`（自动探测的值；可以登录面板看"当前服务器信息"）
-- **不要配 A 记录**（IPv4 优先会失败）
-
-### 公网 IPv6 动态变化的处理（v2-82 自动,v2-83 凭证统一）
-
-v2-79 已经内置 `internal/swanctl/ipv6watch.go`：
-- 容器内每 60 秒扫描 `/proc/net/if_inet6`
-- 公网 IPv6 变化 → 自动 `sed` + `swanctl --load-all` → 客户端无感
-
-**v2-82 新增:DDNS 自动同步**(阿里云 alidns):
-- 启用后,ipv6 变化时自动调阿里云 API 把域名 AAAA 改到新 IP
-- 证书不变(SAN 只放域名,DNS-01 跟 IP 无关)
-- 失败时面板顶部红色横幅告警 + 最多 3 次自动重试
-
-**v2-83 凭证统一**:不用在 `.env` 写两套凭证(`Ali_Key` + `ALIYUN_ACCESS_KEY_*`),统一在面板"阿里云 API 凭证"卡片填(type=password)。
-
-启用:
-```bash
-# 方式 A:推荐 — 面板填
-#   面板首页 → 阿里云 API 凭证卡片 → 填 ID + Secret → 保存
-#   DDNS 下次 tick (60s) 自动用新凭证
-
-# 方式 B:.env 写
-# 新统一命名 (推荐):
-IKEV2_ALIYUN_KEY_ID=your_ak            # RAM 控制台创建,最小权限见 docs/design.md §19.6
-IKEV2_ALIYUN_KEY_SECRET=your_sk
-# 老命名 (兼容,标 deprecated):
-# ALIYUN_ACCESS_KEY_ID=...
-# ALIYUN_ACCESS_KEY_SECRET=...
-
-# DDNS 总开关(面板 UI 也可切换)
-IKEV2_DDNS_ENABLED=true
-ALIYUN_DOMAIN=example.com
-ALIYUN_RR=vpn                          # 完整域名 = vpn.example.com
-
-# v2-84:DDNS family 选择 — 同步哪些记录类型
-#   v4   = 仅 A 记录(IPv4-only VPS)
-#   v6   = 仅 AAAA 记录(IPv6-only VPS,默认 v2-83 行为)
-#   dual = A + AAAA 都同步(默认;双栈 VPS 推荐)
-IKEV2_DDNS_FAMILY=dual
-
-# v2-84(可选):IPv4 探测目标(中国大陆用户改 223.5.5.5 阿里 DNS,默认 8.8.8.8 Google DNS)
-IKEV2_DDNS_PROBE_TARGET=8.8.8.8
-```
-
-不开 DDNS 的话,VPS 拿到新 IPv6 后你需要手动把 `vpn.example.com` 的 AAAA 改到新 IP。
-
-**v2-84 DDNS family 说明**:
-- `v4`:仅同步 A 记录(IPv4-only VPS 用)
-- `v6`:仅同步 AAAA 记录(纯 IPv6 NAT VPS 用)
-- `dual`:A + AAAA 都同步,**v4 retry 不会阻塞 v6**,面板分别显示两种状态
-- **必须 host 网络模式**(IPv4 DDNS 依赖 `net.Dial("udp",8.8.8.8:80")` 拿出口 IP,bridge 模式下拿到的是容器 IP)
-- 阿里云控制台需预先建好对应类型的记录(DDNS 不会自动创建)
-
-### 换网络环境迁移（v2-79 零硬编码）
-
-从家里 → 公司 → VPS 切换：
-
-```bash
-# 1. 停掉旧部署
-cd /path/to/old/deploy
-docker compose down
-
-# 2. 在新机器上：
-git clone <repo>
-cd ikev2-panel-v2
-cp .env.example .env
-$EDITOR .env   # 只填 IKEV2_SERVER_CN + LE 凭证
-
-# 3. 启动（不需要重 build，因为镜像自带 strongSwan）
-docker compose up -d
-
-# 4. 验证 [auto-detect] 日志
-docker compose logs -f | grep auto-detect
-
-# 5. 拷贝旧数据卷（如果有）
-docker run --rm -v ikev2-panel-v2_ikev2-data:/from -v $(pwd):/to alpine cp -a /from/. /to/
-# 然后在新机器上创建 volume：docker volume create ikev2-panel-v2_ikev2-data
-# 再 cp -a 回去
-```
-
-**v2-79 之前的版本必须重 build 镜像**（因为 IPv6 写死在 swanctl.conf 模板里）；v2-79 之后**镜像通用**，换环境不用重 build。
-
-### 故障排查（v2-79 自动探测相关）
-
-| 现象 | 原因 | 排查 |
-|---|---|---|
-| 启动报 `FATAL: cannot detect outbound interface` | 容器内没有任何 UP 的非 lo 接口 | 检查 docker 网络模式（不能是 `network: none`）；或手动传 `IKEV2_OUT_IF=eth0` |
-| 启动报 `FATAL: no global IPv6 address found` | 宿主没公网 IPv6，或容器网络 namespace 没拿到 | 宿主 `ip -6 addr` 是否有 `2000::/3` 段；或用 host 网络模式；或传 `IKEV2_SERVER_ADDR_V6=...` 手动指定 |
-| 启动报 `[auto-detect] no IPv4 gateway` | IPv6-only 主机没有 IPv4 默认路由 | 正常；如果需要 IPv4 MASQUERADE 需 IPv4 路由 |
-| 启动报 `[auto-detect] VPN subnet: 10.10.0.0/24 (LAN: 192.168.50.0/24)` 但 LAN 真冲突 | 自动选段失败 fallback | 手动传 `IKEV2_VPN_SUBNET=10.99.0.0/24` |
-| iPhone 拨号后 captive.apple.com 探测失败 | 没推 DNS（v2-78 已加，推送应该是 1.1.1.1/8.8.8.8） | 检查 iPhone 设置 → VPN → DNS 栏；看不到就重装 mobileconfig |
-| iPhone 拨号成功但上不了网 | 多种根因叠加（v2.86-PR12.10 ~ PR12.17） | **v2.86 后**：`docker exec ikev2-panel nft list table ip ikev2` 看自定义表是否在 + 计数器是否在涨；详见 [docs/TROUBLESHOOTING.md §2.4](docs/TROUBLESHOOTING.md#24-能拨号但上不了网ios--android-通用v286-pr1210--pr1217-修复) |
-| iPhone 拨号成功但上不了网（v2.85 及更早） | MASQUERADE / FORWARD 规则没加（v2-78 §3.5） | `docker exec ikev2-panel iptables -t nat -L POSTROUTING` 看是否有 MASQUERADE |
-| 公网 IPv6 变了 iPhone 重拨失败 | `ipv6watch` 没启动或太慢 | `docker logs ikev2-panel \| grep ipv6watch` 看是否有扫描日志；最多 60 秒感知 |
-
----
-
-## 常见问题（FAQ）
-
-### Q1：怎么把已部署容器从 bridge 模式迁到 host（v2.86-PR14）？
-
-**A**：v2.86-PR14 后唯一支持 `network_mode: host`。如果你之前用 bridge / ipvlan：
-1. 停掉容器：`docker compose down`
-2. 编辑 `.env`，删掉 `IKEV2_NETWORK_MODE=` 那行（或改成 `host`）
-3. 删 `docker-compose.override.yml`（如有）
-4. 重新启动：`./scripts/up.sh`
-
-### Q2：charon.vici socket permission denied？
-
-**A**：检查 `cmd/ikev2-panel` 进程的 UID 是否能访问 `/var/run/charon.vici`。
-- 容器内 ikev2-panel 以 root 运行，默认 OK
-- 宿主机 systemd 安装时，charon 通常以 root 运行，socket 权限 0660（root:root）
-- 如果用非 root 运行 ikev2-panel，需要加用户到 `root` 组或调 socket 权限：
-  ```bash
-  chmod 0666 /var/run/charon.vici  # 不推荐生产
-  ```
-- 或在 `charon.conf` 里改 `vici { socket = unix:///var/run/charon.vici }` 加权限
-
-### Q3：strongSwan 6.0.1 编译报 `undefined reference to gmp_*`？
-
-**A**：build stage 缺 `libgmp-dev`，在 Dockerfile 的 `apt-get install` 段加上：
-```dockerfile
-libgmp-dev
-```
-
-### Q4：list-sas 显示空但实际有客户端连上？
-
-**A**：可能是 charon 启动竞态。第一次 reload `swanctl --load-all` 在 entrypoint 里做了，Go 进程的 `ListSAs()` 调用是异步的。
-- 容器内日志看 `vici list-sas stream: ...` 错误
-- 验证 socket：`docker exec ikev2-panel ls -l /var/run/charon.vici`
-- 验证 charon 进程：`docker exec ikev2-panel ps aux | grep charon`
-
-### Q5：dev 模式（容器外）启动后日志一直刷 "vici NewSession failed"？
-
-**A**：dev 模式下 charon 不存在是正常的。Go 进程会用 `WithSkipVici()` 静默跳过所有 VICI 操作（仅记 warn 日志）。
-- 确认 dev 模式检测：日志里搜 `skip vici` 或 `charon.vici not found`
-- 如果是生产模式（容器内）报错，那就是真实问题，看上面 Q2/Q4
-
-### Q6：libipsec 启用后 strongSwan 报 `no matching peer config found`？
-
-**A**：99% 是 swanctl.conf 里 `local_addrs` 配置错。`%IKEV2_SERVER_ADDR_V6%` 占位符没替换成实际公网 IPv6。
-- 验证：`docker exec ikev2-panel cat /etc/swanctl/swanctl.conf | grep local_addrs`
-- 应该看到 `local_addrs = 2001:db8::75`（实际地址），不是 `%IKEV2_SERVER_ADDR_V6%`
-
-### Q7：升级 strongSwan 6.0.1 → 6.1.0 后编译失败？
-
-**A**：6.1.0 的 tar.bz2 在官方下载源经常 404。建议保持 6.0.1（已生产验证）。如必须升级：
-1. 修改 `Dockerfile` 的 `STRONGSWAN_VERSION` + `STRONGSWAN_MD5`
-2. MD5 从 https://download.strongswan.org/strongswan-X.Y.Z.tar.bz2.md5 获取
-3. 跑 `docker build --no-cache` 重编译
-
-### Q8：怎么从内核 XFRM 切到 libipsec（或反过来）？
-
-**A**：都是修改 `/etc/strongswan.d/charon/` 下 plugin 配置：
-```bash
-# libipsec 模式（默认，容器场景）
-echo 'kernel-libipsec { load = yes }' > /etc/strongswan.d/charon/kernel-libipsec.conf
-
-# 内核 XFRM 模式（高吞吐场景）
-echo 'kernel-libipsec { load = no }'  > /etc/strongswan.d/charon/kernel-libipsec.conf
-echo 'kernel-netlink  { load = yes }' > /etc/strongswan.d/charon/kernel-netlink.conf
-```
-Dockerfile 默认两个都编译，运行时由 plugin load 标志切换。
-
----
-
-## 设计/架构参考
-
-- [`docs/design.md §1.5`](docs/design.md) — libipsec 选型详细分析
-- [`docs/architecture.md §3.5`](docs/architecture.md) — VICI 协议介绍
-- [`docs/architecture.md §18`](docs/architecture.md) — govici 重构详细设计
-- [strongSwan kernel-libipsec 文档](https://docs.strongswan.org/docs/latest/plugins/kernel-libipsec.html)
-- [strongSwan VICI 协议文档](https://docs.strongswan.org/docs/latest/plugins/vici.html)
-- [govici GitHub](https://github.com/strongswan/govici) — strongSwan 官方 Go VICI 客户端
+Go 单体，内部按包分层：`cmd/ikev2-panel`（入口）→ `internal/*`（auth / cert / config /
+runtime / panelstate / store / swanctl / web / ddns / limit / expiry 等），
+外加 `scripts/`（entrypoint、updown、续签、备份）和 `configs/`（swanctl 模板）。
+完整包结构、依赖方向和数据流见 [architecture.md §1](docs/architecture.md)。
