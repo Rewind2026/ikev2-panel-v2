@@ -2221,9 +2221,16 @@ form[style*="display:inline"]{ display:inline-flex;}
   font-family:var(--ikev2-font-mono);
   font-size:0.9375rem; letter-spacing:0.04em;
 }
-/* eye toggle — 纯按钮,absolute 定位不影响 layout */
+/* eye toggle — 纯按钮,absolute 定位不影响 layout。
+   垂直居中用 top:0;bottom:0;margin:auto,**不能**用 transform:translateY(-50%)。
+   原因:全局 button:active{transform:translateY(1px)} 特异性 (0,1,1) 高于这里的
+   .password-toggle (0,1,0),按下时会把 translateY(-50%) 整条覆盖掉 → 居中丢失,
+   图标整体下坠半个身位(约 18px),且 .password-toggle 的 transition 不含 transform,
+   位移是瞬时的,iOS 上 :active 还会粘住,观感就是"点一下按钮跳出去"。
+   定位归定位、动效归动效,两者不能共用 transform 这一个属性。 */
 .password-toggle{
-  position:absolute; right:0.45rem; top:50%; transform:translateY(-50%);
+  position:absolute; right:0.45rem;
+  top:0; bottom:0; margin-top:auto; margin-bottom:auto;
   display:inline-flex; align-items:center; justify-content:center;
   width:34px; height:34px;
   background:transparent; border:1px solid transparent;
@@ -2232,6 +2239,11 @@ form[style*="display:inline"]{ display:inline-flex;}
   cursor:pointer; padding:0;
   transition:color .12s, background-color .12s, border-color .12s;
 }
+/* 再断一层:全局 button:active{transform:translateY(1px)} 特异性 (0,1,1) 高于
+   .password-toggle 的 (0,1,0),不显式覆盖的话按压时仍有 1px 位移。这个按钮是
+   浮在输入框**里面**的图标,不是流式按钮 —— 位移看起来就是"图标错位",
+   而按压反馈已经由 :hover / [aria-pressed] 的底色+描边+图标变色承担了,不需要位移。 */
+.password-toggle:active{ transform:none;}
 .password-toggle:hover{
   color:var(--ikev2-brand);
   background:rgba(34,211,238,0.10);
