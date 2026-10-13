@@ -134,19 +134,23 @@ jobs:
         #      传播延迟），故轮询重试。
         run: |
           set -uo pipefail
+          # steps.meta.outputs.tags 已经是完整引用（如 ghcr.io/x/y:latest,...），
+          # 直接取第一项当被检镜像；不要再拼 REGISTRY/IMAGE_NAME，会拼出
+          # "y:ghcr.io/x/y:latest" 这种不存在的引用，然后白等满整个重试窗口。
           TAGS='${{ steps.meta.outputs.tags }}'
-          REF="${REGISTRY}/${IMAGE_NAME}:${TAGS%%,*}"
+          REF="${TAGS%%,*}"
           echo "检查 $REF"
 
           ok=0
-          for i in $(seq 1 18); do
+          # GHCR 索引传播通常几秒内完成，6×5s=30s 足够；不再空转 3 分钟
+          for i in $(seq 1 6); do
             # 输出形如：{amd64 linux  [] }   /   {arm64 linux/v8 [] }
             INFO=$(docker buildx imagetools inspect "$REF" --format '{{.Image}}' 2>/dev/null || true)
             echo "  第 $i 次: $INFO"
             case "$INFO" in
               *amd64*) ok=1; break ;;
             esac
-            sleep 10
+            sleep 5
           done
 
           if [ "$ok" -ne 1 ]; then
