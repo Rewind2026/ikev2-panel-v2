@@ -18,6 +18,129 @@ hotfix。升级前请重点看目标版本的「⚠️ 行为变更」。
 
 ---
 
+## v2.88（2026-10-20）— UI 质感层：四条轴 + 全站面板语言统一
+
+把面板从「配色接近 EZZON」推进到「元素语言是 EZZON」。改动全部集中在
+`web/static/style.css` 的 §30 新增节与模板层，**不涉及任何后端逻辑**。
+
+### 背景：v2.87 之后还差什么
+
+v2.86 重设计定的 7 条 EZZON 设计意图里，落地时发现 3 条根本没兑现：
+
+| 设计意图 | 实际情况 |
+|----------|----------|
+| 像素级描边 / 光泽感 | 全站 0 处 sheen，27 个 transition 全是 hover 变色 |
+| 暗调蓝灰 panel grid | `--ikev2-lane-1..8` 定义了但零规则消费（死变量） |
+| 顶栏 HUD 大数字区 | `.topbar-hud` / `.hud-stat` 写完了但模板零引用（死代码） |
+
+另外 2 个 `@keyframes` 全是一次性的（入场淡入、横幅消失），零循环动画 ——
+所以界面「很不动」。
+
+### 四条轴
+
+| 轴 | 落地位置 | 内容 |
+|----|----------|------|
+| 轴 1 切角 / 锐利质感 | §30.1 | 卡片、按钮、输入框、chip 统一 `clip-path` 斜切（左上 + 右下双向）；受光边 A（`::before`）+ 受光边 B（`::after` + `mask-composite: exclude`）；按钮扫光；登录卡 conic 流光 |
+| 轴 2 常驻微动效 | §30.2 | 网格漂移 26s / 舞台光呼吸 8s / 噪点 12s `steps(1,end)` / 状态脉冲 / 折叠箭头 / 隧道跑光 / HUD 入场脉冲 |
+| 轴 3 HUD 数字升级 | §30.3 | 关键指标改 `tabular-nums` + 侧栏竖条 |
+| 轴 4 lane 轨 | §30.6 | 首页「服务就绪链路」8 格轨 |
+
+### 轴 4：服务就绪链路
+
+8 格绑 **8 个固定子系统**，格数恒为 8，不随在线用户数变化。排序即依赖顺序：
+左半是管理面与配置依赖，右半是数据面 —— 任一格变红，它右边的格子语义上
+就不该再是绿的，用户能直接读出「链路在哪断的」。
+
+| # | 格位 | 判据 | 跳转 |
+|---|------|------|------|
+| 1 | 管理口令 | `IsDefaultPassword` | `/account` |
+| 2 | IP 池 | `SubnetConfigured` / `SubnetCurrentIPv4` | `#subnet-card` |
+| 3 | 服务端证书 | `CertMode` / `CertConfigured` | `#cert-card` |
+| 4 | LE 续签 | `CertDaysLeft` / `CertLastRenewFailed` | `#cert-card` |
+| 5 | 阿里云凭证 | `AliyunConfigured` | `#aliyun-card` |
+| 6 | DNS 同步 | `DDNSReady` / `DDNSFailed` / `DDNSEnabled` | `#aliyun-card` |
+| 7 | IKE_SA | `TotalActive` / `SAsUnavailable` | 不可点击 |
+| 8 | 面板设置 | `Settings.Set*` × 8 | `#settings-card` |
+
+四态：`ok` 就绪 / `warn` 降级可用 / `danger` 故障 / `off` 未启用。
+
+**第 8 格的判据是「全绿才绿，否则黄」**：8 项全部被面板显式设过才给绿。
+理由是「部分设过」是**正常运维状态**（用户只改了关心的那一两项），给绿色
+会让人误以为「全部都由面板接管」；黄灯读作「还有 N 项在跟 env」，配 `title`
+里的计数是准确信息，给绿灯则是在撒谎。计数用 `printf` 拼串 + `len` 取长
+（每个 flag 只追加 1 个 ASCII 字符，串长 == 已设项数），不动 Go 代码。
+
+取值全部来自 `homeData` 已有字段，**Go 侧零改动**。
+
+### 全站面板语言统一（§30.7 ~ §30.9）
+
+不再只做首页几个格子 —— banner / metric / settings-card / login-card / card /
+empty-state / 顶栏 / 拓扑图全部接入同一套「面板零件」语言：
+
+- §30.7 `.ez-panel` / `.ez-face` 零件 + 语义色统一走 `--ez-accent`
+- §30.8 banner / metric / settings-card / login-card / card / empty-state
+- §30.9 顶栏与拓扑图
+
+### 排版与降级（§30.4 / §30.5）
+
+- `.section-title` 收编所有散落的内联 `letter-spacing: 0.10em`
+- **中文标签字距归零** —— 全站 computed-style 扫描后补齐 override。
+  `letter-spacing` 会把 CJK 字符逐字拆散，「面板设置」被渲染成「面 板 设 置」
+- 对比度提升（`--ikev2-fg-subtle` / `--ikev2-fg-strong` / `--ikev2-fg-disabled`）
+- `prefers-reduced-motion: reduce` 时全部常驻动效降级为静态
+
+### ⚠️ 修掉 / 规避的 4 个真 bug
+
+1. **噪点层洗白深色主题** —— `feTurbulence` 输出是不透明中灰（各通道均值
+   ≈0.5、alpha 也是 0.5），裸铺等于在 `#050816` 上盖 50% 灰纱。headless
+   Chrome 实测平均亮度：不加噪点 `luma=14.0`（正确深色）→ 裸 feTurbulence
+   `luma=84.5`（被洗白）→ 加 `feColorMatrix` `luma=24.5`（有颗粒感且仍是深色）
+2. **中文标签被字距拆散** —— 同上，§30.4
+3. **顶栏账号区点了没反应** —— 弹出菜单被放在 `.topbar-user-pill` 内，而 pill
+   带 `clip-path`：**`clip-path` 会创建裁剪上下文，把溢出到 border-box 之外的
+   后代一起裁掉** → 菜单被裁成一条线。修复：菜单移出 pill，成为 `.topbar-user-wrap`
+   的兄弟节点；同时给 wrap 补 `position: relative` 作为定位上下文
+4. **点 lane 快捷入口后卡片展开无法折叠** —— 早期版本在 `hashchange` 之外多听了
+   `click` + `setTimeout(openTarget, 0)`，想覆盖「点同一个锚点两次」，结果
+   `location.hash` 还是上一次的旧值，卡片被强行重新展开。修复：**只保留
+   `hashchange`**
+
+### banner 详情行改由宏内渲染
+
+`Detail` / `DetailTime` 移进 banner 宏的 `.banner-body` 内部。原来它们是 banner
+外面独立的 `.ddns-failed-detail`，靠 `margin: -0.5rem` 负边距硬贴在框边上 ——
+实测文字裸露在切角外、一条条 banner 糊成一片。
+
+安全边界不变：`Detail` 走 `{{.Detail}}` 默认转义（**不**经过 `safeHTML`），
+可安全承载外部输入（阿里云 API 报错原文）。
+
+### DDNS 兜底文案纠偏
+
+`handlers_home.go` 兜底分支原文写「详见 `/var/log/charon.log`」—— **指错日志了**。
+`charon.log` 是 strongSwan IKE 进程的日志，DDNS 同步是面板自己的 goroutine 跑的，
+原因只可能在面板日志里。同时原文说「最近一次同步失败」，但该分支的前提正是
+「本次进程压根没同步过」，真实语义是「上次运行失败，且本次尚未重试」。
+新文案：`上次运行同步失败，本次进程尚未开始重试；具体原因见面板日志（docker compose logs ikev2-panel）`
+
+### 安全约束（本次未触碰）
+
+- `WriteDDNSConfig` **只改注释不删除** —— 本次未改动 `internal/panelstate/`
+- `scripts/entrypoint.sh` **不改现有 `grep` 判定逻辑** —— 本次未改动该文件
+- `schema_version` 兼容老文件 —— 本次未改动 `internal/panelstate/`
+
+### 验收
+
+- `go build ./...` / `go vet ./...` / `go test -count=1 ./...` 全绿
+- 新增 `internal/web/v288_topbar_menu_test.go`：5 个防回归测试
+  （菜单不在被裁剪的 pill 内 / wrap 是定位上下文 / 账号区整块可点 /
+  真实模板渲染结构 / 真实 HTTP 链路走通 `/account` + `/logout`）
+- 真实浏览器实测：登录页 / 首页 lane 轨 8 格数据 / lane 点击跳转 / summary
+  折叠不回归 / 首屏带 hash 直接落地 / 面板设置前端校验拦截非法值 /
+  合法值保存并持久化 / 控制台零报错
+- 15 个新增 CSS 变量存在性校验
+
+---
+
 ## v2.87（2026-10-20）— 配置统一：面板设置页 + 前端校验 + entrypoint 顺序修复
 
 把原先只能手改 `.env` / compose 的配置项搬进面板。三批改动：批次 D（17 项已有项
