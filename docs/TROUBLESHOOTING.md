@@ -563,7 +563,7 @@ docker network inspect <项目名>_ikev2-l2 | grep -i macvlan -A3
 | 没挂到 `ikev2-l2` 上 | 用的是 `docker-compose.yml`（host）而不是 L2 文件；或 `.env` 里模式名拼写不对 |
 | IP 为空、事件日志报 `failed to allocate gateway` | `IKEV2_L2_SUBNET` 与宿主实际网段不符（同一二层上有别的 DHCP 池），或网关不在子网内 |
 | 报 `could not find an available, non-overlapping IPv4 address pool` | `IKEV2_L2_SUBNET` 与已有 Docker 网段（如默认 `172.17.0.0/16`）重叠 → 换一个不重叠的子网 |
-| **容器压根没创建**（`docker compose up` 就报 `device or resource busy`） | 父接口是 virtio，**不是配置问题** → [1.7.6](#176-device-or-resource-busy父接口是-virtio) |
+| **容器压根没创建**（`docker compose up` 就报 `device or resource busy`） | 宿主虚拟化层限制，**不是配置问题** → [1.7.6](#176-device-or-resource-busy宿主虚拟化层限制) |
 | IP 拿到了但 ping 不通网关 | 交换机 / 云安全组不允许多个源 MAC（macvlan）→ 改用 `ipvlan`；或网络是 `/32` 主机路由，点对点配置 |
 | 容器 ping 不到**宿主** | **这是设计如此**，macvlan/ipvlan 在内核层隔离父子，不是 bug。需要互通就建 shim |
 
@@ -631,7 +631,7 @@ ip link del macvlan-shim
 
 ⚠️ shim 本身也要走宿主防火墙策略，别以为建了就能通。
 
-#### 1.7.6 `device or resource busy`（父接口是 virtio）
+#### 1.7.6 `device or resource busy`（宿主虚拟化层限制）
 
 **症状**：`docker compose up` 在**创建网络**这一步就失败，容器根本没起来：
 
@@ -639,25 +639,13 @@ ip link del macvlan-shim
 Error response from daemon: device or resource busy
 ```
 
-**这是宿主虚拟化层的限制，不是配置写错。** 父接口是 **virtio**（KVM 虚拟机的
-常见网卡）时，内核不允许在上面挂 macvlan / ipvlan，**两种模式都会失败**，
-改任何参数都绕不过去。
+**这是宿主虚拟化层的限制，不是配置写错。** 内核不允许在该父接口上挂
+macvlan / ipvlan，**两种模式都会失败**，改任何参数都绕不过去。
 
 > 注意区分：报 `could not find an available, non-overlapping IPv4 address pool`
 > 是**另一个问题**（`IKEV2_L2_SUBNET` 与已有 Docker 网段撞了），见 [1.7.2](#172-容器没有-v4-地址)。
 
-**先确认父接口类型**：
-
-```bash
-ip -d link show eth0 | head -1
-```
-
-| 输出 | 结论 |
-|------|------|
-| `virtio` 开头 | ❌ L2 模式在这台机器上不可用，只能留在 host 模式 |
-| `e1000` / `enp*` / `ens*` / `bond*` / `bridge` | 一般没问题，继续往下看 |
-
-**用一次探测代替反复试 compose**（探测网络比试 compose 快得多，且失败不留半成品）：
+**直接用一次探测代替反复试 compose**（探测网络比试 compose 快得多，且失败不留半成品）：
 
 ```bash
 # macvlan
@@ -667,9 +655,21 @@ docker network create ikev2-l2-probe --driver ipvlan -o parent=eth0 -o ipvlan_mo
 docker network rm ikev2-l2-probe     # 探测完记得删
 ```
 
-报 `device or resource busy` → 就是 virtio。
+报 `device or resource busy` → 就是宿主限制，换 host 模式。
 
-**实测对照**（Docker 28.5.2）：
+⚠️ **不要凭接口名（`parentbus virtio`）直接下结论** —— 它只是风险信号。
+实测两台机器的 `ens18` **都是 `parentbus virtio`**，结论却相反：
+
+| 机器 | 宿主 `ens18` | macvlan | ipvlan |
+|------|---------------|---------|--------|
+| 云主机（Docker 28.5.2） | `parentbus virtio` | ❌ `device or resource busy` | ❌ `device or resource busy` |
+| 群晖 NAS（Docker 28.5.2） | `parentbus virtio` | ✅ 正常创建 | ✅ 正常创建，且容器跑起来了 |
+
+群晖那台实测：ipvlan 容器拿到 `192.168.50.2/24`，**IPv6 GUA 经 SLAAC 正常获取**，
+`RestartCount=0`。所以**以探针命令的实际输出为准**，探针通过就说明这台机器的
+虚拟化层放行。
+
+**实测对照**（Docker 28.5.2，云主机）：
 
 | parent | 类型 | macvlan | ipvlan |
 |--------|------|---------|--------|
@@ -682,8 +682,9 @@ docker network rm ikev2-l2-probe     # 探测完记得删
 
 1. 留在 **host 模式** —— 宿主 500/4500 没被占用就用它，最省事，也是绝大多数情况下的正解。
 2. 换一块**非 virtio** 网卡作 parent（物理网卡 / e1000 类型的 vNIC）。
+3. 探针在当前 parent 上失败、但换别的 parent 探针通过 → 用那个 parent 就行。
 
-⚠️ shim（[1.7.5](#175-宿主与容器需要互通建-shim)）在纯 virtio 宿主上通常也不通 ——
+⚠️ shim（[1.7.5](#175-宿主与容器需要互通建-shim)）在宿主限制的 parent 上通常也不通 ——
 shim 本身也是建在 parent 上的 macvlan 子接口，同样被内核拒绝。
 
 ---

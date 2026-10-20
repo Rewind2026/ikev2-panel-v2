@@ -101,6 +101,33 @@ required variable IKEV2_L2_PARENT is missing a value: 必填：宿主父接口�
 - 三份 compose 的 YAML 结构解析通过，`environment` 键数一致（46）
 - `go build ./...` / `go vet ./...` / `go test -count=1 ./...` 全绿
 
+### 实机验证（192.168.50.63，Docker 28.5.2 / Compose v2.40.3）
+
+三份 compose 逐个真实 `up`：
+
+| 模式 | 缺变量时 | 补齐变量后 |
+|------|----------|------------|
+| host | `config` 通过（`:-` 保持可选 ✅） | 容器起来，`/healthz` 200，面板 8443 监听正常 |
+| macvlan | `up` 阶段报错并指名变量 | 容器起来，entrypoint 校验通过，拿到 `192.168.50.2/24` |
+| ipvlan | `up` 阶段报错并指名变量 | 容器起来，entrypoint 校验通过，**IPv6 GUA `2408:832e:...` 经 SLAAC 拿到** |
+
+**对照实验**（复现原故障 + 验证修复）：
+
+| compose | `up` 阶段 | 容器状态 | entrypoint |
+|---------|-----------|----------|------------|
+| 旧版（两段都 `:-`） | 成功 | `Restarting (12)`，重启 8 次 | `缺少必填变量` + `FATAL` ← **用户截图的故障现场** |
+| 修复后（environment 段 `:?`） | **直接报错** | 容器根本没建出来 | 走不到这一步 |
+
+**面板设置联动**（走真实 HTTP 链路：登录 → `/api/settings/save` → `/api/settings/status`）：
+
+- 保存后 `settings.json` 落盘（`schema_version: 1` 保持兼容），`status` API 全部项来源变 `panelstate`
+- entrypoint 重启后接住：`[settings.json] applied: ... connlimit=37 hashlimit=120 family=v4`
+- 非法值被服务端拦截并给出具体文案（如 `connlimit_per_ip 必须在 1 ~ 10000 之间,当前是 99999`），落盘值不变
+- `session_ttl=60` 被拒（要求 `24h` 这类时长格式）、`nft_family=inet` 被拒（只接受 `v4`/`v6`）—— 服务端校验均生效
+- **批次 E 优先级链路正确**：`env(88)` → 面板覆盖(`37`, `panelstate`) → 重启后 entrypoint 仍取 `37` → 清除面板设置后回退 `env(88)`
+
+**附带发现**：63 的 `ens18` 虽为 `parentbus virtio`，但 macvlan 与 ipvlan 驱动的网络**均能正常创建并跑起容器** —— README 里记的「virtio 父接口 → device or resource busy」在这台 NAS 上不成立。该结论已实测，不是推断。
+
 ### 安全约束（本次未触碰）
 
 - `WriteDDNSConfig` 只改注释不删除 —— `internal/panelstate/` 未改动

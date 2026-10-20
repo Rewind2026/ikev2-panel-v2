@@ -147,23 +147,30 @@ IKEV2_L2_GATEWAY=203.0.113.1          # 该子网的宿主网关，必须落在�
 | 非 rootless | rootless 下支持不完整 |
 | 上游对该网段**发 RA** | L2 模式的公网 IPv6 靠 RA/SLAAC 自动获取，没有 RA 就没有 v6 |
 | 云厂商可能拦新 MAC | macvlan 收不到 ARP/RA 时，改用共享 MAC 的 ipvlan |
-| **父接口不能是 virtio** | 云主机（KVM/超卖）上最常见的硬墙，**macvlan 和 ipvlan 都会失败**，见下方 |
+| **父接口可能被虚拟化层限制** | 云主机（KVM/超卖）上最常见的硬墙，macvlan 和 ipvlan 都会失败，见下方 |
 
-**先自查父接口类型**（两条命令，10 秒决定能不能用 L2）：
+**先自查父接口**（两条命令，10 秒决定能不能用 L2）：
 
 ```bash
 ip -d link show eth0 | head -1
-# virtio 开头 → macvlan / ipvlan 都起不来，直接留在 host 模式
-# e1000 / enp* / ens* / bond* / bridge → 一般没问题
+# 看 parentbus 那行：virtio 是「可能有风险」，不是「一定不行」
 docker network create ikev2-l2-probe \
   --driver macvlan -o parent=eth0 -o macvlan_mode=bridge
-# Error response from daemon: device or resource busy → 就是 virtio
+# Error response from daemon: device or resource busy → 宿主虚拟化层限制，改用 host 模式
 docker network rm ikev2-l2-probe
 ```
 
-实测（Docker 28.5.2，宿主 `ens18` 为 virtio）：macvlan 与 ipvlan **都**报
-`device or resource busy`；同一配置把 parent 换成 `docker0` 则 ipvlan 正常创建。
-这是宿主虚拟化层限制，**不是配置写错**，改任何参数都绕不过去。
+⚠️ **`parentbus virtio` 只是风险信号，不是判决**。实测两台机器结论相反：
+
+- 云主机（Docker 28.5.2，宿主 `ens18` 为 `parentbus virtio`）：macvlan 与 ipvlan
+  **都**报 `device or resource busy`；同一配置把 parent 换成 `docker0` 则 ipvlan
+  正常创建。
+- 群晖 NAS（Docker 28.5.2，宿主 `ens18` 同样为 `parentbus virtio`）：macvlan 与
+  ipvlan **都能正常创建网络并跑起容器**（ipvlan 容器拿到 `192.168.50.2/24`，
+  IPv6 GUA 经 SLAAC 正常获取）。
+
+所以**以探针命令的实际输出为准**，不要凭接口名推断。探针通过就说明这台机器的
+虚拟化层放行；探针失败就是宿主限制，**不是配置写错**，改任何参数都绕不过去。
 
 **已知限制**：
 
