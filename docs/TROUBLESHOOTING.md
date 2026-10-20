@@ -304,6 +304,72 @@ docker compose -f docker-compose.macvlan.yml up -d
 ⚠️ **`macvlan_mode=passthru` 不支持 IPAM**，所以本项目的 macvlan 模式
 不接受 `passthru`，改用 `bridge`（`private` / `vepa` 可以）。
 
+##### 1.3.2.1 用第三方面板部署（1Panel / 宝塔 / dpanel 等）时变量传不进容器
+
+**症状**：容器起来了，但日志反复刷同一行，最后无限重启：
+
+```
+[entrypoint] ERR: IKEV2_NETWORK_MODE=ipvlan 缺少必填变量: IKEV2_L2_PARENT IKEV2_L2_SUBNET IKEV2_L2_GATEWAY
+[entrypoint] FATAL: IKEV2_NETWORK_MODE=ipvlan 配置错误（详见上方 ERR）
+```
+
+**根因**：这三个变量在 compose 文件里出现**两次**，走两条**互相独立**的插值路径：
+
+| 位置 | 插值结果给谁 | 是否进容器 |
+|------|--------------|-----------|
+| `networks:` 段的 `parent` / `subnet` / `gateway` | Docker daemon 建网 | ❌ 不进 |
+| `environment:` 段的同名三项 | 容器环境变量 | ✅ 进 |
+
+entrypoint 读的是**容器里**那一份。第三方面板的编排有自己的目录和自己的
+`.env` 管理，**不读项目目录下的 `.env`** —— 于是：
+
+- 如果 `networks:` 段被改成了 `:-<默认值>`（面板模板常为了先让 compose
+  起得来这么改），compose 插值通过、容器创建成功；
+- 但 `environment:` 段若还是 `:-`（缺失即空串），容器里三个变量就是**空串**；
+- entrypoint 的 `net_mode_validate` 判为「缺少必填变量」→ `exit 12` →
+  `restart: unless-stopped` → 无限重启。
+
+**为什么日志上看不出来**：日志里只有「缺少必填变量」，看不出真实原因是
+「变量压根没传进容器」。这个不对称只在 compose 文件被改过时才暴露。
+
+**解法**（二选一）：
+
+1. **在面板的「环境变量」里补齐三项**。面板会生成 `.env` 给 compose 插值用，
+   `networks:` 段和 `environment:` 段就都拿到同一份值：
+
+   ```bash
+   IKEV2_L2_PARENT=eth0
+   IKEV2_L2_SUBNET=192.168.50.0/24     # 换成你宿主机的真实子网
+   IKEV2_L2_GATEWAY=192.168.50.1       # 换成你宿主机的真实网关
+   ```
+
+2. **直接改 compose 的 `environment:` 段写死**（不依赖面板的 env 机制）：
+
+   ```yaml
+         IKEV2_L2_PARENT: "eth0"
+         IKEV2_L2_SUBNET: "192.168.50.0/24"
+         IKEV2_L2_GATEWAY: "192.168.50.1"
+   ```
+
+**先确认真实值**，别沿用示例里的地址：
+
+```bash
+ip -br link                       # 父接口名（不能是 lo）
+ip -4 route show default          # 宿主机网关
+ip -4 addr show <父接口>          # 真实子网 + 前缀
+```
+
+> ✅ v2.89 起，两份 L2 compose 的 `environment:` 段也改用 `:?`（必填）。
+> 缺变量会在 `docker compose up` 阶段**直接失败**并指名变量：
+>
+> ```
+> error while interpolating services.ikev2-panel.environment.IKEV2_L2_PARENT:
+> required variable IKEV2_L2_PARENT is missing a value: 必填：宿主父接口名，如 eth0
+> ```
+>
+> 不用再等容器起来从刷屏日志里反推。host 模式那份保持 `:-`（host 根本不用
+> 这三个变量，写成必填会让所有 host 部署起不来）。
+
 #### 1.3.3 规格表文件缺失
 
 **症状**：`FATAL: /etc/ikev2-panel/scripts/network-mode.sh not found (image build incomplete)`。
