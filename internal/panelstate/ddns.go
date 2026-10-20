@@ -57,8 +57,10 @@ import (
 //     10ms 把阿里云 API 配额打爆。
 //   - UpdatedAt:unix seconds,更新时间戳
 //
-// 主域名 Domain **不存**这里 — 仍然走 env IKEV2_DDNS_DOMAIN(向后兼容,
+// 主域名 Domain **不存**这里 — 仍然走 env ALIYUN_DOMAIN(向后兼容,
 // entrypoint / acme.sh 都依赖 env,搬动成本大且容易出 bug)。
+// v2.86-pr23f 起主域名已可由面板改,持久化在 ddns-runtime.conf(见 ddns/statefile.go),
+// 本文件只管 RR / EnableA / EnableAAAA / PeriodSeconds。
 type DDNSConfig struct {
 	RR            string `json:"rr,omitempty"`             // 默认 "vpn";空 / "@" = 主域本身
 	EnableA       bool   `json:"enable_a"`                 // 默认 true
@@ -177,7 +179,13 @@ func (s *DDNSConfigStore) ReadDDNSConfig() (*DDNSConfig, error) {
 	return s.LoadDDNSConfig()
 }
 
-// WriteDDNSConfig 写 DDNS 配置(handler 调用)。
+// WriteDDNSConfig 写 DDNS 配置。
+//
+// ⚠️ 生产路径**已无调用方**:v2.86-pr23a 起面板的 DDNS 保存走
+// ddns.Sync.SetConfig → /data/panel-state/ddns-runtime.conf(INI key=value),
+// 不再写这个 JSON 文件。保留本函数是因为 main.go 仍在启动期读 ddns.conf
+// (LoadDDNSConfig,老部署兼容),删掉会让老用户的 RR / 同步开关配置被忽略。
+// 新代码请勿调用 —— 写进去面板不会读。
 //
 // 行为:
 //   - Validate 失败 → 返回错误

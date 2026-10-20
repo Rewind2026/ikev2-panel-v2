@@ -219,21 +219,29 @@ docker compose exec ikev2-panel /usr/local/bin/dnsq <domain> <rr>
 entrypoint.sh                                    # 容器入口（PID 1）
   │
   ├─► §0 自动探测链（v2-79 设计）
-  │     ├─► §0.1 detect_out_if()        # 网卡：env > ip -4 route default > ip -6 > 首个非 lo UP
-  │     ├─► §0.2 detect_public_ipv6()   # IPv6：env > /proc/net/if_inet6 (2000::/3)
+  │     ├─► §0.1 detect_out_if()        # 网卡：env > ip -4 route default > ip -6 > 首个非 lo UP（并 export IKEV2_OUT_IF）
+  │     ├─► §0.2 detect_public_ipv6()   # IPv6：env > ip -6 addr show (2000::/3 且 DAD 已收敛)
   │     ├─► §0.3 detect_public_ipv4()   # IPv4：env > OUT_IF 上非 RFC1918 首个（仅 IPv6_ONLY=false）
   │     ├─► §0.4 detect_v4_gateway()    # IPv4 GW：ip -4 route default
   │     ├─► §0.5 detect_lan_subnets()   # LAN 段：ip -4 addr 聚合 /24
   │     └─► §0.6 detect_vpn_subnet()    # VPN 子网：从候选（10.10/13/17/42/66.0.0/24）选不冲突
   │
+  ├─► §0.0 网络模式归一化 + 校验（v2.86-PR20，失败 FATAL 退出 12）
+  │     └─► source network-mode.sh 规格表 → net_mode_normalize / net_mode_validate
+  │
   ├─► §1 IPv6 公网地址硬校验（IPv6_ONLY=true 时）
   │     └─► 还没探测到 → FATAL 退出 10
+  │           （L2 模式下 6 次 × 3s 重试，等 RA 周期 + DAD 完成）
   │
   ├─► §3 IP forwarding 校验（三层兜底：L1 compose sysctls → L2 自愈 → L3 FATAL）
   │     ├─► L1 docker-compose.yml sysctls: 让 docker daemon 起容器前改宿主内核
-  │     ├─► L2 entrypoint §3 enable_forwarding() 自愈：host 模式 rw 时 echo 1
-  │     └─► L3 全失败 = FATAL 退出 11（提示加 sysctls / sudo sysctl / CAP_SYS_ADMIN）
+  │     ├─► L2 entrypoint §3 enable_forwarding() 自愈：echo 1 到 /proc/sys
+  │     │     └─► v2.86-PR19 实测：容器内 /proc/sys 是 ro，此步必然失败
+  │     └─► L3 全失败 = FATAL 退出 11（提示宿主 sysctl -w；勿再提示 CAP_SYS_ADMIN）
   │           都没开 = FATAL 退出 11
+  │
+  ├─► §3.2 SLAAC 双 sysctl 运行时回读复核（v2.86-PR20，仅 L2 模式）
+  │     └─► disable_ipv6≠0 或 accept_ra≠2 → FATAL 退出 10
   │
   ├─► §3.5 修出向路由 + 转发放行 + NAT（v2-78 + v2-79 + v2.86-PR19(A12)）
   │     ├─► table 220 default via $V4_GW dev $OUT_IF
@@ -867,8 +875,12 @@ Reset timer**，否则狂点手动同步会把定时同步一直往后推。
   ↓ Ali_Key / Ali_Secret             acme.sh 原生命名
 ```
 
-⚠️ **`IKEV2_NETWORK_MODE` 已废弃**：唯一支持 host 模式。传 `bridge` / `ipvlan`
-会被 entrypoint **FATAL 拒绝**并给出明确报错，不是静默降级。
+⚠️ **`IKEV2_NETWORK_MODE`**：每个 compose 文件里**硬编码**为自身模式，
+**不接受 `.env` 覆盖**。网络由**文件**决定，变量只用于 entrypoint 的行为分支，
+必须服从文件。写成 `${IKEV2_NETWORK_MODE:-macvlan}` 会有洞：`.env` 里残留的
+`IKEV2_NETWORK_MODE=host` 会覆盖掉默认值，造成「容器在 macvlan netns 里、
+entrypoint 却按 host 分支跑」。`bridge` 已被移除（v2.86-PR14），传它会被
+FATAL 拒绝 —— 不是静默降级。换模式请换文件（见 [§11.1](#111-网络模式host--macvlan--ipvlanv286-pr20)）。
 
 ⚠️ **`IKEV2_TRUSTED_PROXY` 默认 false**：不信任 `X-Forwarded-For`。
 默认信任的话，攻击者伪造 `X-Forwarded-For: 127.0.0.1` 就能绕过登录锁定。
@@ -885,6 +897,9 @@ Reset timer**，否则狂点手动同步会把定时同步一直往后推。
 | TLS 证书加载失败 | 退出码 1，**不带病运行** |
 | LE 模式缺阿里云凭证 | entrypoint `exit 18`（否则 acme.sh 会报误导性的 `Error adding TXT record`） |
 | IP forwarding 自愈失败（v4 或 v6） | entrypoint `exit 11` |
+| 网络模式值非法 / L2 变量缺失或非法 | entrypoint `exit 12`（校验逻辑见 [§11.1.1](#1111-网络模式规格表scriptsnetwork-modesh)） |
+| L2 模式下 `IKEV2_OUT_IF` 在容器内不存在 | entrypoint `exit 14` |
+| L2 模式下 SLAAC 双 sysctl 状态不符 | entrypoint `exit 10` |
 
 **不做**：JSON / YAML / TOML 配置文件。环境变量 + 镜像默认值 + panelstate 文件已经够用。
 
@@ -1045,13 +1060,13 @@ swanctl 重载失败必须回滚配置文件；TLS 证书加载失败 = 启动�
 | 步骤 | 探测什么 | 怎么探 | 覆盖它的环境变量 |
 |------|---------|--------|------------------|
 | §0.1 | 对外网卡 | `ip -4 route show default` → 首个非 `lo` 且 UP 的网卡 | `IKEV2_OUT_IF` |
-| §0.2 | 公网 IPv6 | `/proc/net/if_inet6` 里取 `2000::/3` 段（避开 ULA / link-local） | `IKEV2_SERVER_ADDR_V6` |
+| §0.2 | 公网 IPv6 | `ip -6 addr show` 里取 `2000::/3` 段、且 DAD 已收敛（避开 ULA / link-local / tentative） | `IKEV2_SERVER_ADDR_V6` |
 | §0.3 | 公网 IPv4 | 出口网卡上首个非 RFC1918 地址（仅双栈模式需要） | `IKEV2_SERVER_ADDR_V4` |
 | §0.4 | IPv4 默认网关 | `ip -4 route show default` | — |
 | §0.5 / §0.5b | 宿主 LAN 段 | IPv4 `/24` 聚合 + IPv6 ULA 段 | — |
 | §0.6 | 客户端 IPv4 pool | 从候选段里挑一个与 LAN 不冲突的 | `IKEV2_VPN_SUBNET` |
 | §0.6b | 客户端 IPv6 ULA pool | 挑一个不冲突的 `fd00::/64` | — |
-| §0.7 | 网络模式校验 | 只接受 `host`，其余 FATAL 拒绝 | `IKEV2_NETWORK_MODE`（已废弃） |
+| §0.7 | 网络模式记录 | 写 `/run/ikev2-panel/netmode.env`，并打印模式 / parent / subnet / container iface | `IKEV2_NETWORK_MODE` |
 
 ### 为什么 §0.5 要探测 LAN 段
 
@@ -1061,11 +1076,62 @@ swanctl 重载失败必须回滚配置文件；TLS 证书加载失败 = 启动�
 
 `§0.6` 的候选池是 `10.10 / 10.13 / 10.17 / 10.42 / 10.66` 这些 `.0.0/24`。
 
+### §0.2 为什么要按 DAD 状态过滤（v2.86-PR20）
+
+L2 模式（macvlan / ipvlan）的 IPv6 来自 RA + SLAAC，而内核对新配的地址
+一律先做 DAD（Duplicate Address Detection）。**DAD 没结束前地址带
+`tentative` 标记，此时它还不能收发报文。** 如果把这样一个地址写进
+`swanctl.conf` 的 `local_addrs`，charon 会绑定失败或客户端握手异常。
+
+原实现读 `/proc/net/if_inet6`，实测字段布局是：
+
+```
+$1 addr(32hex)  $2 ifindex(dec)  $3 prefixlen(hex)  $4 scope(hex)  $5 flags(hex)  $6 devname
+```
+
+它有**两个**独立缺陷：
+
+| # | 缺陷 | 后果 |
+|---|------|------|
+| 1 | 过滤条件写的是 `$4=="01" \|\| $4=="00"`，把 **scope** 当成 **flags**。`scope=00` 恰好等价于 global scope 所以「看起来能用」，但 `01` 不是合法 scope 值，真正的状态位在 `$5` | `tentative` / `dadfailed` 地址从未被排除 |
+| 2 | 外层 `awk '{print $6}'` 逐行打印**网卡名**，内层 `awk '$6==d ... {print $1; exit}'` 的 `exit` 只取该网卡上的**第一条**地址 | macvlan/ipvlan 容器 eth0 上 Docker 分的 ULA（`fd48:...`）必然先于 SLAAC 的 GUA 出现，拿到 ULA 后 `case 2xxx:` 匹配不上就跳过，而外层下一轮喂的还是同一张网卡名 → **永远走不到 GUA，探测返回空** |
+
+缺陷 2 的实测证据：同一份 `if_inet6`，只把 ULA 行挪到 GUA 前面，
+原实现输出从 `2408:832e:...` 变成**空字符串**。这意味着 L2 模式下
+`IKEV2_SERVER_ADDR_V6` 经常探测不到，用户只能靠 `.env` 手工兜底。
+
+改用 `ip -6 addr show` 后两个问题一并消失：
+
+- 按 `tentative` / `dadfailed` / `deprecated` **文字标签**过滤，而不是硬编码
+  flags 位 —— 位含义随内核版本演进，文字标签是稳定契约；
+- `ip -6 addr show` 按地址逐行输出，不做「每网卡取第一条」，ULA 不可能遮蔽 GUA。
+
+回归测试见 `tests/network_mode_test.sh` 的 NM-41 ~ NM-47 与 NM-52。
+
+> ⚠️ **同一类错误在 `internal/swanctl/ipv6watch.go` 里还有第二处**（v2.86-PR20 已修）。
+> `detectGlobalV6` 也读 `/proc/net/if_inet6`，也曾把 `fields[3]`（scope）
+> 当成 flags，导致 `tentative` / `dadfailed` 地址从未被排除 —— 而这条路径是
+> **运行时**的：ISP 重拨前缀后，`ipv6watch` 可能把一个尚未 DAD 收敛的地址
+> 写进 `local_addrs`，DDNS 也可能把不可用地址同步到 DNS。
+> 现已抽成纯函数 `parseIfInet6Line`（可脱机测试），按位掩码过滤
+> `DADFAILED 0x08` / `DEPRECATED 0x10` / `TENTATIVE 0x40`，
+> 并**保留** `TEMPORARY 0x20`（隐私地址是稳定态，应当接受）。
+> 测试见 `TestParseIfInet6Line_DADFlags`（12 条）。
+>
+> **教训**：`/proc/net/if_inet6` 的 flags 是**第 5 个**字段，第 4 个是 scope。
+> 两处代码都曾写成第 4 个。凡是碰这个文件的，先看一眼
+> `docs/architecture.md` 这里的字段表再动手。
+
 ### 探测结果怎么用
 
 探测值经过 `sed` 替换进镜像里的 `configs/swanctl-ipv6-only.conf` 模板占位符
-（`%IKEV2_SERVER_ADDR_V6%`、`%IKEV2_VPN_SUBNET%`、`%IKEV2_OUT_IF%` 等），
+（`%IKEV2_LOCAL_ADDRS_DIRECTIVE%`、`%IKEV2_VPN_SUBNET%`、`%IKEV2_SERVER_CN%` 等），
 生成容器内实际的 `/etc/swanctl/swanctl.conf`。
+
+⚠️ **`IKEV2_OUT_IF` 不走模板占位符**（v2.86-PR20）。模板里从来没有过
+`%IKEV2_OUT_IF%`，entrypoint 里那句对应的 `sed` 是个从不生效的空转，已删除。
+`OUT_IF` 通过 §0.1 的 `export IKEV2_OUT_IF` 以**环境变量**下发给
+`ikev2-updown`（tc 限速）、DDNS、`ipv6watch` 三处消费者。
 
 ⚠️ **因此这些值只在容器启动时生效**。改环境变量必须重启容器；
 改面板里的配置走 `panelstate`，有各自的生效时机（见 [README](../README.md)）。
@@ -1079,25 +1145,173 @@ IPv6 探测失败还会再走一次主动探测作为兜底。
 
 ## 11. 部署架构
 
-### 11.1 网络：host 是唯一模式
+### 11.1 网络模式：host / macvlan / ipvlan（v2.86-PR20）
 
-`network_mode: host`，容器与宿主共享网络命名空间。这是本项目能"导入 compose 直接用"的前提。
+**三个模式 = 三个独立完整的 compose 文件**，各管各的，不做叠加：
+
+| 模式 | compose 文件 | netns | 地址来源 | 何时用 |
+|------|-------------|-------|---------|-------|
+| `host` | `docker-compose.yml` | 与宿主共享 | 宿主网卡 | **默认**。零改动兼容，宿主已有公网 v6 时直接用 |
+| `macvlan` | `docker-compose.macvlan.yml` | 独立 | IPAM 分配 v4 + 上游 RA 下发 v6 | 宿主本身不需要跑这个服务，但要在同一二层里占一个独立 IP |
+| `ipvlan` | `docker-compose.ipvlan.yml` | 独立 | 同上，但与宿主共享 MAC | 同 macvlan，但上游（云厂商 / 交换机）不允许第二个源 MAC |
+
+**为什么 host 模式用默认文件名 `docker-compose.yml`**：老用户直接
+`docker compose up -d` 零改动可用，这是向后兼容的硬要求。
+
+启动方式（两种等价，`up.sh` 只是多了建 `./logs` 目录这一步）：
+
+```bash
+docker compose up -d                                    # host
+docker compose -f docker-compose.macvlan.yml up -d      # macvlan
+docker compose -f docker-compose.ipvlan.yml up -d       # ipvlan
+
+./scripts/up.sh                                         # 读 IKEV2_NETWORK_MODE 自动选文件
+```
 
 | 事实 | 说明 |
 |------|------|
-| **compose 里没有 `ports:`** | host 模式下写了也不生效 —— 端口是容器直接在宿主上监听的 |
-| **compose 里没有 `sysctls:`** | host 网络模式下 runc 会以 `not allowed in host network namespace` 拒绝 |
-| **`IKEV2_NETWORK_MODE` 已废弃** | 传 `bridge` / `ipvlan` 会被 entrypoint FATAL 拒绝并说明原因 |
-| **不要改 `/etc/docker/daemon.json`** | host 模式不走 docker 的 iptables / sysctl 管理，改了只会在宿主留下无关配置 |
+| **三个文件都是完整的** | 不用 `!reset` / `!override`，所以**任何 Docker Compose 版本都能用**，不设版本下限 |
+| **host 模式没有 `ports:`** | 端口是容器直接在宿主上监听的；L2 模式容器有自己的 IP，同样不需要 `ports:` |
+| **host 模式没有 `sysctls:`** | runc 会以 `not allowed in host network namespace` 拒绝（host 模式下容器与宿主共享 netns）；L2 模式容器有自己的 netns，service 段 `sysctls:` 完全可用 |
+| **L2 模式的 sysctl 走 service 段，不是 networks 段** | 见 §12.8.2 的实测结论。`networks.<name>.options` 不是合法 Compose 字段，`docker compose config` 会直接报错；driver option `com.docker.network.endpoint.sysctls` 两种格式实测都不生效 |
+| **L2 文件里没有 `network_mode:`** | 与 `networks` 互斥，只能二选一 |
+| **`bridge` 已被删除** | v2.86-PR14 起移除。传 `bridge` 会被 FATAL 拒绝；`IKEV2_NETWORK_MODE` 合法值只有 `host` / `macvlan` / `ipvlan` |
+| **切换模式必须重建容器** | compose 文件决定网络，不看环境变量。改了 `-f` 就会 recreate；`up.sh` 在 L2 分支会显式提示 |
+| **`IKEV2_NETWORK_MODE` 不决定用哪个文件** | 文件由 `-f` 决定。该变量在每份文件里**硬编码**为自身模式，只用于 entrypoint 做模式相关的行为分支 |
 
-为什么必须是 host：bridge 模式下 Docker 从 `fd00::/8` 分 ULA，公网 IPv6 不可路由，
-而 IKEv2 的 SA 协商需要真实的公网地址。
+⚠️ **三份服务定义必须保持一致**（image / capabilities / volumes / tmpfs / environment）。
+这是三独立文件方案唯一的结构性风险 —— 改一处漏两处的后果不是报错，而是
+「某个模式下静默新建空卷 → panel.db / LE 证书全丢」或「某个模式下静默缺
+FOWNER → chmod 失败 → 无限重启」（v2-72 与 PR19 已各真实踩过一次卷名坑）。
+所以 [tests/network_mode_test.sh](../tests/network_mode_test.sh) 的
+**NM-29~NM-36 强制校验三者一致**：image / container_name / capabilities /
+tmpfs / 顶层卷名 / 三条挂载 / environment 键集合 / L2 文件的模式默认值。
+改 compose 后必须跑这个测试。
+
+**为什么 host 是默认**：bridge 模式下 Docker 从 `fd00::/8` 分 ULA，公网 IPv6
+不可路由，而 IKEv2 的 SA 协商需要真实公网地址。host 模式是唯一开箱即用拿到
+公网 v6 的方式，所以保持默认；macvlan / ipvlan 解决的是"端口冲突 / 宿主已有
+同端口服务 / 多实例"这类 host 覆盖不到的场景。
+
+**L2 模式的前置条件**：
+
+| 条件 | 说明 |
+|------|------|
+| Linux + kernel ≥ 3.9（macvlan）/ ≥ 4.2（ipvlan） | macvlan/ipvlan 都是内核特性，Docker Desktop 的 Linux 容器虽可用但宿主互通限制不同 |
+| 非 rootless 模式 | rootless 下 macvlan/ipvlan 支持不完整 |
+| 宿主 ↔ 容器需要互通 | macvlan/ipvlan 在内核层隔离宿主与容器，需额外建 **macvlan shim**（见 [README](../README.md#三网络模式与前置条件)） |
+| 云厂商可能拦新 MAC | 一些云主机的安全组 / 反欺骗策略只放行原有 MAC，此时 macvlan 拿不到地址；ipvlan 共享 MAC 可绕过 |
+| `IKEV2_L2_SUBNET` **只接受 IPv4** | 传 v6 子网会被 FATAL 拒绝。L2 模式的 IPv6 一律走 RA/SLAAC |
+| `IKEV2_L2_SUBNET` 每段严格 0-255 且**无前导 0** | 见下方「为什么拒绝前导 0」 |
+
+**为什么拒绝前导 0**（v2.86-PR20 补）：POSIX sh 的 `$((010))` 按**八进制**求值得 8，
+而 Docker 侧按**十进制**得 10。同一份 `IKEV2_L2_SUBNET=192.168.050.0/24`
+在两处算出**不同的网络**，且**任何一边都不报错** —— 只表现为
+「网关莫名其妙不在子网内」，极难定位。
+
+之所以要专门拒：`net_mode_validate` 里的网段/网关比对是用 `$(( ))` 算的，
+一旦允许前导 0，它算出来的值就不再等于 Docker 的值。
+Go 1.17+ 的 `net.ParseIP` 同样拒绝前导 0，所以这里与 Docker 的判定一致 ——
+早拒总好过让用户拿到一条语焉不详的 docker 报错。
+
+实现见 `_nm_valid_octet` / `_nm_valid_ipv4`；回归测试 NM-53 ~ NM-56。
+
+**L2 模式下的行为差异**（entrypoint 按模式分支，见 §11.4 退出码）：
+
+| 关注点 | host | macvlan / ipvlan |
+|--------|------|------------------|
+| `IKEV2_OUT_IF` 语义 | 宿主网卡名（如 `ens18`） | **容器网卡名**（通常 `eth0`）。沿用宿主网卡名会 FATAL `exit 14` |
+| DDoS 规则链 | `DOCKER-USER` | 容器私有 netns 内的 `INPUT` |
+| forwarding 持久化 | 写宿主 `/host-sysctl.d/99-ikev2.conf` | **不写** —— `net.ipv4.ip_forward` 是 per-netns 的，写宿主对本容器无效 |
+| IPv6 地址收敛 | 单次探测 | 6 次 × 3s 重试（RA 周期 ~10s + DAD ~1s） |
+| 容器能看到 `docker0` | 是（预期） | 否。若看到说明声明与实际不符 → WARN |
+
+⚠️ **`IKEV2_OUT_IF` 有两道关，缺一不可**（v2.86-PR20 修正了此前不准确的表述）：
+
+1. **存在性校验**（entrypoint §0.1）：探测不到就 `FATAL` / `exit 14`。L2 模式下
+   若沿用宿主网卡名，nft 模板会生成一条永不匹配的 `oifname` 规则 →
+   MASQUERADE 失效 → 客户端能连 VPN 但出不了网。
+2. **回写环境变量**（v2.86-PR20 新增）：探测成功后必须
+   `export IKEV2_OUT_IF="$OUT_IF"`。此前 entrypoint 只把值写进自己的局部变量
+   就往下走，**从未 export**，导致三个下游消费者全部退回各自的默认值：
+   `ikev2-updown` 的 `tc` 限速套到 `eth0`、DDNS 的 `Iface`、ipv6watch 的
+   `Iface`（见 [§6.1](#61-环境变量) 的变量表）。这是"启动成功、面板全绿、
+   但功能悄悄不生效"的静默故障，比第 1 条更难发现 —— 日志里没有任何异常。
+
+   `export` 之后 `IKEV2_OUT_IF` 才真正是这条链路上唯一的网卡名真源，
+   容器内外读到的是同一个值。
+
+⚠️ **不要改 `/etc/docker/daemon.json`**：host 模式不走 docker 的 iptables /
+sysctl 管理，改了只会在宿主留下无关配置。
+
+### 11.1.1 网络模式规格表（`scripts/network-mode.sh`）
+
+镜像内路径 `/etc/ikev2-panel/scripts/network-mode.sh`，由 entrypoint source。
+**只定义常量与函数、无副作用**；文件缺失时 entrypoint `exit 12`（镜像构建不完整）。
+
+```sh
+net_mode_has_own_ip()      # host 模式为 0，其余为 1
+net_mode_procsys_rw()      # 同上（v2.86-PR19 结论：容器内 /proc/sys 是 ro）
+net_mode_has_docker_user() # 仅 host 模式为 1
+net_mode_ddos_chain()      # host → DOCKER-USER；L2 → INPUT
+net_mode_normalize()       # 小写 + trim；空值默认 host
+net_mode_driver_desc()     # 人类可读的驱动描述（日志用）
+net_mode_sysctls()         # L2 容器 netns 的 sysctl 真源（compose 的 sysctls 块同值）
+net_mode_sysctl_checks()   # 运行时回读清单：<sysctl 路径>|<期望值>
+net_mode_validate()        # 全部配置校验，返回非 0 表示失败
+```
+
+> **v2.86-PR20**：原表里的 `net_mode_out_if_is_host()` 已删除 —— 它零生产调用，
+> 且语义与 `net_mode_has_docker_user()` 完全相同。`IKEV2_OUT_IF` 的模式差异
+> 现在由 entrypoint §0.1 的存在性校验 + `export` 统一处理，不再需要一个
+> 无人调用的判定函数（详见 §0.1 关于 `export IKEV2_OUT_IF` 的说明）。
+
+**`scripts/up.sh` 也 source 这个文件**（v2.86-PR20）。此前 `up.sh` 自带一份
+`require_l2_env()`，与 `net_mode_validate()` 是同一件事的两份实现，规则一改
+就漂移 —— `net_mode_validate` 后加的 `PARENT != lo`、`GATEWAY` 必须落在
+`SUBNET` 内、`macvlan_mode=passthru` 拦截，`up.sh` 全都不知道，只能等容器起来
+才 `exit 12`。现在 `up.sh` 在 `docker compose` 之前就会报出与容器内完全一致的
+错误。
+
+能力开关用**返回码**而非全局变量实现 —— entrypoint 是
+`set -euo pipefail`，全局变量 + 条件判断容易踩 `-u` / `-e` 的坑。
+
+`net_mode_validate()` 的校验点：
+
+| 模式 | 校验 |
+|------|------|
+| `host` | 6 个 L2 变量非空时打 WARN（说明会被忽略），返回 0 |
+| `macvlan` / `ipvlan` | PARENT / SUBNET / GATEWAY 三项必填（聚合缺失清单）；`PARENT != lo`；SUBNET 必须是合法 IPv4 CIDR 且 GATEWAY 在其中；驱动枚举 |
+| `macvlan` 专属 | `passthru` 与 IPAM **互斥** → FATAL（建议 `bridge`）；枚举 `bridge \| private \| vepa` |
+| `ipvlan` 专属 | 枚举 `l2 \| l3 \| l3s`；`l2` 以外打 WARN；flag 枚举 `bridge \| private \| vepa` |
+| `bridge` | FATAL：已于 v2.86-PR14 移除 |
+| 其他 | FATAL + 列出合法值 |
+
+L2 容器 netns 需要的 sysctl（`net_mode_sysctls()` 的返回值，在 L2 compose 文件的
+service 段 `sysctls:` 块里静态注入）：
+
+```
+net.ipv4.conf.all.forwarding=1
+net.ipv6.conf.all.forwarding=1
+net.ipv6.conf.default.accept_ra=2
+```
+
+三条都写在 service 段的**原因**见 §12.8.2（`networks.<name>.options` 非法、
+driver option 实测不生效、service 段 sysctls 里 `IFNAME`/`eth0` 都会被拒）。
+
+`accept_ra=2` 必须是 `2`：内核功能性默认是"forwarding 关闭时接受 RA、开启时不接受"，
+而本项目必开 forwarding —— 不显式设 `2` 就会静默丢掉所有 RA。
+`disable_ipv6` 不在 sysctl 清单里，它由 networks 段的 `enable_ipv6: true` 保证
+（不开实测就是 `1`，且没有任何 sysctl 能从 service 段把它改回来）。
+
+三条都在 L2 compose 文件里**静态注入**，entrypoint 启动后按
+`net_mode_sysctl_checks()` 逐条回读复核（§12.8.1），任一条不符即 FATAL `exit 10`。
 
 ### 11.2 Capabilities
 
 ```
 cap_drop: ALL
-cap_add:  NET_ADMIN  NET_RAW  NET_BIND_SERVICE  CHOWN  DAC_OVERRIDE
+cap_add:  NET_ADMIN  NET_RAW  NET_BIND_SERVICE  CHOWN  DAC_OVERRIDE  FOWNER
 security_opt: no-new-privileges:true
 devices: /dev/net/tun
 ```
@@ -1109,9 +1323,12 @@ devices: /dev/net/tun
 | `NET_BIND_SERVICE` | 监听 500 / 4500 特权端口 |
 | `CHOWN` | entrypoint 调整 `/etc/swanctl` 权限 |
 | `DAC_OVERRIDE` | 读 `/proc/sys/net` 下的转发开关 |
+| `FOWNER` | chown/写入非属主文件（LE 证书签发、`/data` 下 panelstate 的属主切换） |
 
 不要加 `SYS_ADMIN` 或 `privileged: true` —— 这个镜像不需要。
 `/dev/net/tun` 是 `kernel-libipsec` 的 ESP 注入点，必须挂。
+
+三种网络模式共用同一套 `cap_add`，无需按模式调整。
 
 ### 11.3 数据卷
 
@@ -1180,12 +1397,50 @@ DATA_DIR="$(docker volume inspect ikev2-panel-data --format '{{.Mountpoint}}')" 
 | 退出码 | 含义 |
 |--------|------|
 | `1` | 通用启动失败（配置、目录、端口、证书） |
+| `10` | **IPv6 SLAAC 状态复核失败**（仅 L2 模式）：`disable_ipv6` / `accept_ra` 与期望不符 |
 | `11` | **IP forwarding 自愈失败（IPv4 / IPv6 任一）** |
+| `12` | **网络模式配置错误**：模式值非法、L2 变量缺失 / 非法、`network-mode.sh` 缺失，或 charon 启动失败 |
+| `14` | **对外网卡不可用**：`IKEV2_OUT_IF` 指定的名字在容器 netns 内不存在 |
 | `18` | LE 模式缺阿里云凭证 |
 
 `exit 11` 是刻意设计：forwarding 没开时客户端能拨通、能拿到 IP、ping 得通服务端，
 **但出不了网** —— 与其跑出一个"看起来正常但用不了"的实例，不如启动时明确失败。
 详见 [§12.8](#128-ipv6-forwarding-自愈)。
+
+`exit 12` / `14` 是 v2.86-PR20 新增的**网络模式**相关失败码，语义未变（12 原本
+已定义为"网络模式配置错误"），只是校验点从"只接受 host"扩展为三模式全量校验。
+`exit 14` 在 L2 模式下是硬要求：不校验就会退化成静默故障（见 §11.1）。
+
+`exit 10` 复用既有的 sysctl 相关退出码，L2 模式下用于 SLAAC 双 sysctl 的
+启动后回读复核 —— L2 compose 文件里静态注入的 sysctl 若被其他因素改写，
+RA 会被丢弃、客户端拿不到 v6 地址，与其带病运行不如启动即失败。
+
+启动顺序（v2.86-PR20）：
+
+```
+entrypoint.sh
+  ├─ source /etc/ikev2-panel/scripts/network-mode.sh   ← §0.0（缺文件 → exit 12）
+  ├─ net_mode_normalize + net_mode_validate            ← §0.0（失败 → exit 12）
+  ├─ detect_out_if（校验 netns 内存在性）               ← §0.1（失败 → exit 14）
+  ├─ …其余探测…
+  ├─ 写 /run/ikev2-panel/netmode.env                   ← §0.7
+  ├─ enable_forwarding                                ← §3（失败 → exit 11）
+  ├─ SLAAC 双 sysctl 运行时回读复核                     ← §3.2（失败 → exit 10）
+  ├─ apply_ddos_protection（链按模式选择）              ← §4.6
+  └─ charon → swanctl --load-all → Go 面板
+```
+
+`/run/ikev2-panel/netmode.env` 取代了原先的死变量 `IKEV2_ACTUAL_NETWORK_MODE`，
+供容器内排查用（`docker exec ikev2-panel cat /run/ikev2-panel/netmode.env`）：
+
+```
+MODE=macvlan
+OUT_IF=eth0
+DRIVER=macvlan_mode=bridge
+HAS_OWN_IP=1
+PROCSYS_RW=0
+DDOS_CHAIN=INPUT
+```
 
 ### 11.5 容器外的可选操作
 
@@ -1361,15 +1616,26 @@ VICI 的 10 秒超时由 `withTimeout` 统一注入，不要在调用点重复�
 ### 12.8 IP forwarding 检查（v4 / v6）
 
 host 网络模式下容器与宿主共享 net ns，**理论上**容器内写 `/proc/sys/net/...`
-写的就是宿主内核。
+写的就是宿主内核。L2 模式（macvlan / ipvlan）下容器有独立 netns，写的是
+**容器自己**的开关 —— 而 `net.ipv4.ip_forward` / `net.ipv6.conf.all.forwarding`
+本身就是 per-netns 的，所以两种模式互不影响，但也互不代偿。
 
 ```
 enable_forwarding()  读 /proc/sys/net/ipv4|ipv6/conf/*/forwarding
    ├─ 已是 1 → 直接返回（不发日志）
    ├─ 不是 1 → 尝试 echo 1 > 同一路径
-   │    ├─ 成功 → persist_sysctl() 写宿主 /host-sysctl.d/99-ikev2.conf（失败只 WARN）
+   │    ├─ 成功 → persist_sysctl()（失败只 WARN）
+   │    │            ├─ host 模式   → 写宿主 /host-sysctl.d/99-ikev2.conf
+   │    │            └─ L2 模式    → 直接 return 0（见下）
    │    └─ 失败 → 见下方「自愈从来就没成功过」
 ```
+
+> ⚠️ **L2 模式不写宿主 sysctl.d**（v2.86-PR20）。`net.ipv4.ip_forward` 是
+> per-netns 的，写进宿主 `/host-sysctl.d/99-ikev2.conf` 对容器内那个 netns
+> **毫无作用**，只会留下一条"看起来在起作用、实际作用于另一个 netns"的
+> 误导性配置。因此 `persist_sysctl()` 在 L2 模式直接返回 0。
+>
+> L2 模式下 forwarding 归谁负责见本节末的「L2 模式的 forwarding 归谁负责」。
 
 > ⚠️ **自愈从来就没成功过**（v2.86-PR19(A16) 实测，192.168.50.63）。
 >
@@ -1402,6 +1668,10 @@ enable_forwarding()  读 /proc/sys/net/ipv4|ipv6/conf/*/forwarding
 > compose 里的 `sysctls:` 块**不能**用来解决 —— host 网络模式下 runc 会以
 > `not allowed in host network namespace` 拒绝（v2-79.2 已实测）。
 
+**L2 模式（macvlan / ipvlan）的 forwarding 归谁负责**（v2.86-PR20）：
+容器有独立 netns，开关就在容器那个 netns 里。宿主 `sysctl -w` 改的是宿主 netns，
+对容器**无效**，所以必须由 Docker 在建容器时注入 —— 注入方式与实测结论见 §12.8.2。
+
 **v4 / v6 现在对等检查**（v2.86-PR19(A16) 起）。历史上 IPv6 侧被包在
 `if [ "$IKEV2_IPV6_ONLY" != "true" ]` 里，导致默认配置（`=true`）下 IPv6 forwarding
 恒为 0，且因为客户端拿不到 IPv6 地址（见 §13.1.3）而不显形。已移除该条件 ——
@@ -1420,6 +1690,140 @@ enable_forwarding()  读 /proc/sys/net/ipv4|ipv6/conf/*/forwarding
 排障时注意区分两类日志：
 `[persist] not mounted / not writable` 是**可忽略的**，
 `WARN: net.ipv6...cannot auto-enable` 和 `FATAL ... cannot auto-enable` 才是真问题。
+
+### 12.8.1 L2 模式的 IPv6 SLAAC 链路
+
+host 模式从宿主网卡上直接读地址；L2 模式下容器没有配 v6 地址，公网 IPv6 靠
+**上游路由器发 RA → 容器 SLAAC 自动配置 GUA** 这条链路。
+
+```
+上游路由器 ──RA──► 容器 eth0
+                    ├─ ① disable_ipv6=0   ← 由 networks 段 enable_ipv6: true 保证
+                    ├─ ② accept_ra=2      ← 见下方「为什么必须是 2」
+                    └─ ③ 地址收敛（DAD + 等一个 RA 周期）
+```
+
+**为什么 `accept_ra` 必须是 2**：内核的**功能性默认**是
+"forwarding 关闭时接受 RA、开启时不接受"。本项目必开 IP forwarding（§12.8），
+因此不显式写 `2`，内核会把处于默认态的 `accept_ra` 强制改成 `0`，
+**所有 RA 被静默丢弃**，症状是"容器起得来、v4 正常、就是拿不到 v6"。
+这个默认值不是 bug 而是设计（RFC 4861），所以必须显式覆盖。
+
+所需配置全部在 **L2 compose 文件里静态注入**：
+
+| 位置 | 配置 | 不设的后果 |
+|------|------|-----------|
+| `networks.ikev2-l2.enable_ipv6` | `true` | Docker 建端点时把 `disable_ipv6` 置 1，收不到任何 RA（实测 `dis6=1 gua=0`） |
+| service 段 `sysctls:` | `net.ipv4.conf.all.forwarding=1` | 容器 netns 不转发 → 客户端出不了网 → `exit 11` |
+| service 段 `sysctls:` | `net.ipv6.conf.all.forwarding=1` | v6 不转发（IPv6_ONLY 场景下是致命的） |
+| service 段 `sysctls:` | `net.ipv6.conf.default.accept_ra=2` | forwarding 一开，RA 被内核丢弃 |
+
+⚠️ **为什么 `disable_ipv6` 不写进 sysctls**：实测（Docker 28.5.2）
+它是 `1` 还是 `0` 完全由 `enable_ipv6: true` 决定，service 段 sysctls 改不动它。
+反过来 `accept_ra` 也不能靠 sysctls 写 `conf.eth0`（Docker 拒绝，见 §12.8.2），
+只能写 `conf.default` —— 因为容器 `eth0` 是 Docker 建端点时**新建**的，
+`conf.default` 决定的就是它新建那一刻的 RA 策略。
+
+**运行时回读复核**（entrypoint §3.2，仅 L2 模式）：静态注入是"声明"，复核才是
+"事实"。entrypoint 在 forwarding 处理完之后按 `net_mode_sysctl_checks()`
+逐条回读 `conf.IFNAME.forwarding` / `conf.IFNAME.accept_ra`：
+
+| 读到 | 行为 |
+|------|------|
+| 三条全对 | `[slaac] eth0: net/ipv4/conf/eth0/forwarding=1 net/ipv6/conf/eth0/forwarding=1 net/ipv6/conf/eth0/accept_ra=2 — RA/SLAAC 可用` |
+| 任一不符 | FATAL `exit 10` + 打印实际不符项与修复动作 |
+
+复核用 here-doc 而不是管道喂 `while`：管道会把循环体放进子 shell，
+循环内的赋值传不回来，"有不符合项"就会被**静默当成通过**。
+
+不加这个复核的话，若某个 Docker / kernel 组合静默忽略了这些注入，
+实例会"正常启动、v4 可用、v6 永远拿不到地址"——与 §11.1 里 `IKEV2_OUT_IF`
+同类的静默故障。
+
+⚠️ **`IKEV2_SERVER_ADDR_V6` 不是静态地址方案**：它只让 charon 把该地址填进
+`local_addrs`，**不负责把地址配到网卡上**。L2 模式下若上游不发 RA，指定
+`IKEV2_SERVER_ADDR_V6` 只会让 charon 去 bind 一个本机并不拥有的地址。
+正确的静态做法是在容器内用 `ip -6 addr add` 或 networkd 配置，而不是设这个变量。
+
+**地址收敛时序**（实测 Docker 28.5.2，macvlan，192.168.50.63 parent=ens18）：
+GUA 的出现时间取决于上游 RA 周期，叠加 DAD 后实测 **2~5 秒**（连续 3 次测量
+稳定在 2s，但留不出余量）。因此 L2 模式下公网 IPv6 探测走
+**6 次 × 3s = 最多 15 秒**有限重试（§0.2 / §1），
+host 模式保持单次（行为不变）。日志会打印实际收敛耗时：
+
+```
+[entrypoint] [auto-detect] Public IPv6 converged after ~3s (RA/SLAAC/DAD)
+```
+
+若 15 秒还没拿到，说明上游确实没发 RA 或被网络设备拦截，
+此时按 §1 的 `exit 10` 提示排查，不要盲目加长等待。
+
+### 12.8.2 L2 sysctl 的注入通道：为什么是 service 段 `sysctls`
+
+这一节记录 v2.86-PR20 的实测定论。结论是**只有 service 段 `sysctls:` 可用**，
+另外两条常见写法都是死路。测试环境：Docker Engine 28.5.2 / Compose v2.40.3，
+宿主 Debian 12，parent 接口 `ens18`，子网 `192.168.50.0/24`，上游路由器发 RA。
+
+| 写法 | 结果 |
+|------|------|
+| `networks.<name>.options.com.docker.network.endpoint.sysctls` | ❌ `docker compose config` 直接报 `additional properties 'options' not allowed` —— **不是合法 Compose 字段** |
+| 同一 driver option，逗号串格式 | ❌ 容器内 `v6fwd=0 ra=1 gua=0`，即**根本没生效** |
+| 同一 driver option，JSON 格式 | ❌ 同上，`v6fwd=0 ra=1 gua=0` |
+| service 段 `sysctls:` 写 `IFNAME` 占位符 | ❌ Docker 报 `open sysctl net.ipv4.conf.IFNAME.forwarding: unsafe procfs detected` |
+| service 段 `sysctls:` 写 `eth0` | ❌ Docker 报 `interface specific sysctl setting "net.ipv4.conf.eth0.forwarding" must be supplied using driver option ...` |
+| service 段 `sysctls:` 写 `conf.all` / `conf.default` + `networks` 段 `enable_ipv6: true` | ✅ `v4fwd=1 v6fwd=1 ra=2 gua=1` |
+
+**最终形态**：
+
+```yaml
+services:
+  ikev2-panel:
+    sysctls:
+      net.ipv4.conf.all.forwarding: "1"
+      net.ipv6.conf.all.forwarding: "1"
+      net.ipv6.conf.default.accept_ra: "2"
+
+networks:
+  ikev2-l2:
+    enable_ipv6: true
+```
+
+⚠️ **host 文件绝对不能有 service 段 `sysctls:`**：host 模式下容器与宿主共享
+netns，runc 会以 `not allowed in host network namespace` 拒绝，容器直接起不来。
+`tests/network_mode_test.sh` 的 NM-39 守护这一点。
+
+容器内 `/proc/sys` 是 **ro** 挂载（`proc /proc/sys proc ro,nosuid,nodev,noexec,relatime`），
+`NET_ADMIN` 也写不了 —— 所以这些值只能由 Docker 在建容器时注入，
+entrypoint 没有自愈余地，只能**回读复核**（§12.8.1）。
+
+### 12.8.3 nft 规则完整性校验：先判断"适不适用"，再决定要不要重试
+
+entrypoint §7.9 有一段重试循环：反复 `check_ikev2_rules`，不通过就
+`re_add_ikev2_rules` 再试，直到规则稳定为止。设计意图是好的 —— nft 表可能被
+docker 或 nft 服务重置，重试能自愈。
+
+但 v2.86-PR20 之前，这个循环是**无条件**执行的，而它校验的规则表
+（`ikev2` / `ikev26`）只在特定条件下才装载：§3.5 仅当
+`IKEV2_IPV6_ONLY=true` **且**探测到 `V4_GW` 时才装表。于是纯 IPv6 主机
+（无 IPv4 默认网关）走的是一条"压根不该有待校验的规则"的路径，却要跑满
+`10×1s + 50×5s = 260 秒`，然后写下一个 `iptables-warn.flag`，让面板 banner
+报「VPN 客户端无法访问公网」。
+
+> 这是**假告警**：不是规则不稳定，而是那条路径不适用。更糟的是首次部署的人
+> 只会看到容器启动卡 4 分钟，典型的"以为挂了"。
+
+修复方式是让 §3.5 在真正进入装载分支时置 `NFT_EXPECTED=1`，§7.9 据此守卫：
+
+```
+§3.5 装表分支  →  NFT_EXPECTED=1
+        ↓
+§7.9  if NFT_EXPECTED != 1  →  打一行 "not applicable ... skipping" 直接跳过
+        else                 →  原有 260 秒重试逻辑不变
+```
+
+日志里会明确写出跳过原因（`IPV6_ONLY` 与 `V4_GW` 的实际值），排查时一眼能确认
+是"不适用"还是"真的失败"。真正适用的路径重试行为与上限**完全没有改动** ——
+这是"该等的时候照等"，不是"把等待时间调短"。
 
 ### 12.9 前端两条硬边界：CSP 与模板转义
 
@@ -1774,6 +2178,11 @@ remote TS 就是 `10.10.0.1/32`，本来就不会产生 IPv6 内层流量。所�
 | ACME HTTP-01 的 80 端口被占 | 签发失败 | 本项目默认走 DNS-01，不受影响 |
 | IPv6 ESP 需要 kernel 5.8+ | 老内核上 IPv6 客户端连不上 | 换宿主内核或用双栈 |
 | 字节数超 2^53 | 面板流量显示精度丢失 | SQLite 侧是 int64 没问题；前端展示要做单位换算 |
+| 改了 `IKEV2_NETWORK_MODE` 但没重建容器 | 容器仍跑旧模式：设了 macvlan 却在 host netns 里 | entrypoint 检测到 `docker0` 可见会 WARN；**必须 `docker compose down && ./scripts/up.sh`** |
+| L2 模式下沿用宿主网卡名做 `IKEV2_OUT_IF` | 客户端能连 VPN 但出不了网（MASQUERADE 静默失效） | entrypoint 已 FATAL `exit 14` 拦截；修复是**删掉这一行让它自动探测**（容器内通常是 `eth0`） |
+| L2 模式下容器拿不到 v6 地址 | 容器起得来、v4 正常、就是没有 v6 | 查上游是否发 RA；entrypoint §3.2 已复核 sysctl，不符则 `exit 10`（[§12.8.1](#1281-l2-模式的-ipv6-slaac-链路)） |
+| macvlan / ipvlan 下容器 ping 不到宿主 | 内核层隔离，不是 bug | 需要宿主↔容器互通就建 shim，见 [README](../README.md#三网络模式与前置条件) |
+| `IKEV2_L2_SUBNET` 写了 v6 子网 | Docker 会接管 v6 并分 ULA，公网不可达 | `up.sh` / entrypoint 均 FATAL 拒绝；v6 一律走 RA/SLAAC |
 
 ### 13.5 架构性限制
 
@@ -1783,6 +2192,10 @@ remote TS 就是 `10.10.0.1/32`，本来就不会产生 IPv6 内层流量。所�
 | **限速只作用于上传** | tc filter 匹配 `src`，下载方向不限（[§12.6](#126-限速u32-与-flower-按-family-分支)） |
 | **DDNS 会自己建记录** | 记录不存在时自动 `AddDomainRecord`（需 RAM 有 `alidns:AddDomainRecord`）；想彻底停掉对外解析要在面板里关掉 DDNS 开关，删记录会被下个周期重新建回来 |
 | **govici 仍是 v0.x** | 锁定版本；用到的子集（`list-sas` / `terminate` / `version`）是稳定命令 |
+| **macvlan / ipvlan 只在 Linux 可用** | Docker Desktop（macOS / Windows）不支持；rootless 模式支持不完整（[§11.1](#111-网络模式host--macvlan--ipvlanv286-pr20)） |
+| **L2 模式下容器与宿主隔离** | 内核层隔离，需要互通得建 shim；这是选 L2 模式要付的代价 |
+| **L2 模式 IPv6 完全依赖上游 RA** | 上游不发 RA 就拿不到 GUA；`IKEV2_SERVER_ADDR_V6` 只填 charon 的 `local_addrs`，不负责配地址（[§12.8.1](#1281-l2-模式的-ipv6-slaac-链路)） |
+| **切换网络模式必须重建容器** | 环境变量改动只在创建时生效；entrypoint 会 WARN 提示，但正确做法永远是 `down` + `up` |
 
 ## 14. 本地开发与调试
 

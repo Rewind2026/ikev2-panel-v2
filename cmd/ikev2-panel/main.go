@@ -35,11 +35,39 @@ import (
 	"github.com/yourname/ikev2-panel-v2/internal/web"
 )
 
+// envConfigSnapshot v2.86 配置统一批次 D:Merge **之前**的纯 env 配置快照。
+//
+// 存在的唯一原因是 runtime.Runtime 内嵌 *config.Config 同一指针,
+// Merge 会穿过它写回 envCfg —— Merge 之后拿不到"env 原本的值"。
+// 面板设置卡要在 UI 上告诉用户"跟随 env 默认时当前是 X",靠的就是这份快照。
+type envConfigSnapshot struct {
+	displayTimezone        string
+	sessionTTL             time.Duration
+	cookieSecure           bool
+	trustedProxy           bool
+	defaultUserPasswordLen int
+}
+
 func main() {
 	envCfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
 		os.Exit(1)
+	}
+
+	// v2.86 配置统一批次 D:先快照"纯 env 值",再 Merge。
+	//
+	// 为什么必须在这里取:runtime.Runtime 内嵌的是 *config.Config **同一指针**,
+	// Merge 里的 `r.DisplayTimezone = ...` 是穿过内嵌指针写回 envCfg 的
+	// —— Merge 之后 envCfg 里已经是合并后的值,拿不到"env 原本是多少"。
+	// 面板设置卡需要 env 原值做对照(渲染"跟随 env 默认(当前 X)"的提示),
+	// 所以只能在 Merge 前取。
+	envSnapshot := envConfigSnapshot{
+		displayTimezone:        envCfg.DisplayTimezone,
+		sessionTTL:             envCfg.SessionTTL,
+		cookieSecure:           envCfg.CookieSecure,
+		trustedProxy:           envCfg.TrustedProxy,
+		defaultUserPasswordLen: envCfg.DefaultUserPasswordLen,
 	}
 
 	// v2.86-PR13.0:env + panelstate 合并集中在 runtime 包。
@@ -265,6 +293,20 @@ func main() {
 	} else {
 		logger.Info("mobileconfig defaults loaded")
 	}
+	// v2.86 配置统一批次 D:面板设置 settings.json。
+	// 预热只为让启动日志能看出"面板是否接管了这批设置";真正生效的是
+	// runtime.Merge 第 4 段(启动期已读过一次)+ handler 端的
+	// applyRuntimeSettings(运行期保存后热生效)。
+	settingsStore := panelstate.NewSettingsStore()
+	if st, err := settingsStore.LoadSettings(); err != nil {
+		logger.Warn("load panel settings", "err", err, "fallback", "env")
+	} else if st != nil && !st.IsZero() {
+		logger.Info("panel settings loaded from panelstate", "source", cfg.SettingsSource)
+	}
+	// v2.86 批次 D:把合并后的 trusted-proxy 同步给 auth 包。
+	// 以前 auth.isTrustedProxy 只读 env,面板改了也不认;现在由面板设置
+	// 卡统一裁决(启动期先同步一次,运行期保存后 handler 再调)。
+	auth.SetTrustedProxy(cfg.TrustedProxy)
 
 	// ---------- 模板 ----------
 	templatesDir := filepath.Join("web", "templates")
@@ -549,10 +591,40 @@ func main() {
 		// v2.86-PR12.22:管理员全局 mobileconfig 默认值,运行时热改无需重启。
 		MobileConfigDefaults:  mcDefaultsStore,
 		AliyunAccessKeySource: cfg.AliyunAccessKeySource,
+		// v2.86 配置统一批次 D:阿里云凭证的 env 启动值。
+		// handlers_ddns.ddnsCredentials() 用它兜底 panelstate aliyun.creds,
+		// 修掉"只在 .env 配了 AccessKey 时查询/创建记录按钮报未配置"的缺陷。
+		AliyunAccessKeyID:     cfg.AliyunAccessKeyID,
+		AliyunAccessKeySecret: cfg.AliyunAccessKeySecret,
 		// v2.86-PR12.5:证书配置来源(启动日志用)
 		CertConfigSource: cfg.CertConfigSource,
 		// v2.85-PR3:显示时区(handler 渲染 DDNS / mobileconfig 时间字符串用)
 		DisplayTimezone: cfg.DisplayTimezone,
+		// v2.86 配置统一批次 D:面板设置。
+		//   SettingsStore      → settings.json 的读写(卡片保存 / 清除 / status API)
+		//   Env*               → Merge 之前的纯 env 快照,面板用来渲染"跟随 env 默认(X)"
+		//   DefaultUserPasswordLen → 面板新建 / 重置用户时的随机密码长度
+		SettingsStore:             settingsStore,
+		EnvDisplayTimezone:        envSnapshot.displayTimezone,
+		EnvSessionTTL:             envSnapshot.sessionTTL,
+		EnvCookieSecure:           envSnapshot.cookieSecure,
+		EnvTrustedProxy:           envSnapshot.trustedProxy,
+		EnvDefaultUserPasswordLen: envSnapshot.defaultUserPasswordLen,
+		DefaultUserPasswordLen:    cfg.DefaultUserPasswordLen,
+		// v2.86 批次 E:这 8 项取 **cfg**(合并后)而不是 envSnapshot。
+		//
+		// 跟上面 5 项相反,原因是它们由 entrypoint.sh §-0.6 消费:
+		// entrypoint 读 settings.json → 覆盖 shell 变量 → export 回 env,
+		// 本进程继承到的 env 已经是最终值。所以 cfg 里的值就是"当前生效值",
+		// 而 envSnapshot 只会给出一个已经被面板自己改过的旧值。
+		EnvLogLevel:              cfg.LogLevel,
+		EnvLogFormat:             cfg.LogFormat,
+		EnvAuditRetentionDays:    cfg.AuditRetentionDays,
+		EnvConnLimitPerIP:        cfg.ConnLimitPerIP,
+		EnvHashLimitPerMin:       cfg.HashLimitPerMin,
+		EnvDisableMSSClamp:       cfg.DisableMSSClamp,
+		EnvDisableDDoSProtection: cfg.DisableDDoSProtection,
+		EnvNftFamily:             cfg.NftFamily,
 		// v2.85-PR8(U04):Prometheus-style metrics registry。
 		// middleware 计数 / handleMetrics 输出文本格式。
 		Metrics: metrics.New(),
@@ -804,8 +876,12 @@ func main() {
 				"reason", "Secure cookies are dropped by browsers on plain http",
 				"action", "set IKEV2_COOKIE_SECURE=true only if you do NOT use the HTTP entrypoint")
 		}
-		// 把 web.Server.Secure 同步刷新(handler 渲染 cookie 时会读)
-		srv.Secure = cfg.CookieSecure
+		// v2.86 批次 D:登记"明文入口存在"。这一句同时做三件事:
+		//   - srv.Secure = false(handler 渲染 cookie 时读)
+		//   - srv.PlainHTTPEnabled = true(面板设置卡禁止打开 Cookie Secure)
+		//   - 压掉 settingsRT 快照里的 cookie_secure
+		//     (否则 settings.json 里的 cookie_secure=true 会盖掉这里的强制关闭)
+		srv.EnablePlaintextHTTP()
 		logger.Warn("HTTP panel listening (plaintext); admin session cookie is now in cleartext",
 			"addr", cfg.HTTPListenAddr,
 			"safety", "bind to 127.0.0.1 or trusted LAN only; never expose to public internet",

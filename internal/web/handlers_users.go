@@ -96,11 +96,16 @@ type userDeleteConfirmData struct {
 
 // pageUsersList 用户列表页元数据常量。
 const (
-	pageUsersList      = "users_list"
-	pageUserNew        = "user_new"
-	pageUserDetail     = "user_detail"
-	pageDeleteConfirm  = "user_delete_confirm"
-	defaultSpeedMbps   = 10
+	pageUsersList     = "users_list"
+	pageUserNew       = "user_new"
+	pageUserDetail    = "user_detail"
+	pageDeleteConfirm = "user_delete_confirm"
+	defaultSpeedMbps  = 10
+	// defaultPasswordLen 随机密码长度的**兜底常量**。
+	// v2.86 批次 D 之前这里是唯一来源(两处 GeneratePassword 都直接用它),
+	// 导致 IKEV2_DEFAULT_USER_PASSWORD_LEN 只对首次管理员生效、面板新建/重置
+	// 用户永远是 12 位。现在真实取值走 s.randomPasswordLen()
+	// (启动期 env + 运行期面板设置),这个常量只在 Server 零值时兜底。
 	defaultPasswordLen = 12
 	maxNoteChars       = 200
 	maxSpeedMbps       = 1000
@@ -172,8 +177,9 @@ func (s *Server) handleUserCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 生成 12 位随机密码
-	password, err := auth.GeneratePassword(defaultPasswordLen)
+	// 生成随机密码(长度走 s.randomPasswordLen —— 启动期来自
+	// IKEV2_DEFAULT_USER_PASSWORD_LEN / 面板设置,不再写死 12)
+	password, err := auth.GeneratePassword(s.randomPasswordLen())
 	if err != nil {
 		s.Logger.Error("generate password", "err", err)
 		http.Error(w, "内部错误，请查看服务日志", http.StatusInternalServerError)
@@ -397,7 +403,7 @@ func (s *Server) handleUserResetPassword(w http.ResponseWriter, r *http.Request)
 	}
 	oldPassword := u.Password
 
-	newPw, err := auth.GeneratePassword(defaultPasswordLen)
+	newPw, err := auth.GeneratePassword(s.randomPasswordLen())
 	if err != nil {
 		http.Error(w, "内部错误，请查看服务日志", http.StatusInternalServerError)
 		return

@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/yourname/ikev2-panel-v2/internal/auth"
@@ -83,8 +84,71 @@ type Server struct {
 	// v2-83:阿里云凭证来源(从 main.go 注入,给面板显示用)
 	AliyunAccessKeySource string
 
+	// v2-83:阿里云凭证的 **env 启动值**(从 main.go 注入)。
+	// handler 侧 ddnsCredentials() 用它做 panelstate aliyun.creds 的兜底:
+	// 用户只在 .env 里配了 AccessKey、从没在面板保存过时,"查询阿里云记录值" /
+	// "在阿里云创建记录" 两个按钮原本直接报"凭证未配置"。
+	// 跟 PanelState(面板文件)是两套来源,优先级 panelstate > env。
+	AliyunAccessKeyID     string
+	AliyunAccessKeySecret string
+
+	// v2.86 配置统一批次 D:面板设置运行时持久化(时区/会话时长/Cookie Secure/
+	// 信任反代/默认密码长度)。优先级 panelstate settings.json > env > 代码默认。
+	// 读取走 Store 的内存缓存,保存后运行期立即生效(不依赖重启的部分见 handlers_settings.go)。
+	SettingsStore *panelstate.SettingsStore
+
+	// v2.86 配置统一批次 D:面板设置的 **env 启动值 / 出厂兜底值**。
+	// 面板渲染"当前值"和"来源"时需要它们做对照,跟 SettingsStore 的三态配合:
+	// key 缺失 → 显示这里;key 有值 → 显示 settings.json 的值。
+	EnvDisplayTimezone        string
+	EnvSessionTTL             time.Duration
+	EnvCookieSecure           bool
+	EnvTrustedProxy           bool
+	EnvDefaultUserPasswordLen int
+
+	// v2.86 批次 E:同一组"env 启动值 / 出厂兜底值",对应新增的 8 项。
+	//
+	// 这几项的特殊之处:它们真正的消费者是 entrypoint.sh(已把 settings.json
+	// 的值 export 回 env),所以 Env* 拿到的**已经是面板设置合并后的结果**,
+	// 不是纯 env 值 —— 与上面 5 项的语义不同,故单独注释说明。
+	EnvLogLevel              string
+	EnvLogFormat             string
+	EnvAuditRetentionDays    int
+	EnvConnLimitPerIP        int
+	EnvHashLimitPerMin       int
+	EnvDisableMSSClamp       bool
+	EnvDisableDDoSProtection bool
+	EnvNftFamily             string
+
+	// v2.86 配置统一批次 D:新建/重置用户时随机密码的长度。
+	// 之前 handlers_users.go 里写死常量 12,IKEV2_DEFAULT_USER_PASSWORD_LEN 只对
+	// 首次管理员生效 —— 这里改成启动期注入 + 面板可改。
+	DefaultUserPasswordLen int
+
+	// v2.86 配置统一批次 D:运行期生效的面板设置快照。
+	//
+	// 为什么单独存而不直接改 SessionTTL / Secure:
+	//   - SessionTTL / Secure 是导出字段,server_test.go:525 / pr8 / pr9 直接赋值,
+	//     改成 atomic 类型会连带改一堆测试(且破坏可读性)。
+	//   - 它们是普通字段,handler 运行期写入与其它 goroutine 的读取构成 data race
+	//     (ratelimit_race_test 就在同包跑 -race)。
+	// 所以:导出字段保持"启动期值"不变,运行期覆盖走这个 atomic 快照,
+	// handler 侧统一用 s.sessionTTL() / s.cookieSecure() / s.randomPasswordLen() 读。
+	//
+	// nil = 没有运行期覆盖(未从面板改过 / 未注入)→ accessor 回落到导出字段。
+	settingsRT atomic.Pointer[settingsRuntime]
+
 	// v2.86-PR12.5:证书配置来源(从 main.go 注入,启动日志 + 面板显示)
 	CertConfigSource string
+
+	// PlainHTTPEnabled v2.86 批次 D:是否启用了明文 HTTP 备用入口
+	// (env IKEV2_HTTP_LISTEN_ADDR,见 main.go 的 http-plain-listener 分支)。
+	//
+	// 用途:面板设置卡禁止在明文入口存在时打开 Cookie Secure。
+	// 浏览器在 http:// 下会拒收 Secure cookie,打开等于**把自己锁在门外**,
+	// 而且是那种"保存后刷新即登出、看不出原因"的故障。
+	// 启动期 main.go 已经强制把它关掉并 WARN,这里是补上运行期的闸门。
+	PlainHTTPEnabled bool
 
 	// v2.86-PR13.3:启动时生效的 IP 段(由 main.go 注入,合并 env+panelstate 后的最终值)。
 	// handlers_subnet.clear 用它作为"清除按钮立即生效"的目标,不需要重启容器。
@@ -221,6 +285,15 @@ func New(srv *Server, staticDir string) http.Handler {
 	mux.Handle("POST /api/subnet/save", protectPOST(http.HandlerFunc(srv.handleSubnetSave)))
 	mux.Handle("POST /api/subnet/clear", protectPOST(http.HandlerFunc(srv.handleSubnetClear)))
 
+	// v2.86 配置统一批次 D:面板设置卡 API(时区 / 会话时长 / Cookie Secure /
+	// 信任反代 / 随机密码长度)。这五项以前只能改 .env + 重建容器。
+	//   - GET  /api/settings/status  查询当前生效值 + 每项来源
+	//   - POST /api/settings/save    保存(运行期立即生效,时区除外)
+	//   - POST /api/settings/clear   清除 settings.json,全部回退 env / 出厂
+	mux.Handle("GET /api/settings/status", protect(http.HandlerFunc(srv.handleSettingsStatus)))
+	mux.Handle("POST /api/settings/save", protectPOST(http.HandlerFunc(srv.handleSettingsSave)))
+	mux.Handle("POST /api/settings/clear", protectPOST(http.HandlerFunc(srv.handleSettingsClear)))
+
 	// v2.86-PR12.22:管理员后台 mobileconfig 全局默认值。
 	//   - GET  /admin/mobileconfig-defaults         设置页
 	//   - POST /admin/mobileconfig-defaults         保存(admin 默认,运行时热改无需重启)
@@ -239,6 +312,71 @@ func New(srv *Server, staticDir string) http.Handler {
 	// trailingSlashRedirect 在 logging 之内、mux 之外,这样 301 响应也走 secureHeaders。
 	// 见 docs/architecture.md §7
 	return recoverPanic(srv.Logger)(secureHeaders()(logging(srv.Logger, srv.Metrics)(trailingSlashRedirect(mux))))
+}
+
+// settingsRuntime v2.86 配置统一批次 D:运行期生效的面板设置快照。
+//
+// 只含"读侧不依赖启动期捕获"的字段(见 Server.settingsRT 注释):
+// DisplayTimezone 不在内 —— 模板 FuncMap 闭包捕获,改它必须重启。
+type settingsRuntime struct {
+	sessionTTL             time.Duration
+	cookieSecure           bool
+	trustedProxy           bool
+	defaultUserPasswordLen int
+	// logLevel v2.86 批次 E:运行期可改的日志级别。
+	// 空串 = 不接管,回落到 config.CurrentLogLevel()(启动期 env 值)。
+	//
+	// 为什么不直接调 config.SetLogLevel 然后不记录:
+	// 清除面板设置时需要回到"env 原值",那要求我们知道 env 原值是什么。
+	logLevel string
+}
+
+// sessionTTL 当前生效的登录会话时长。
+//
+// 优先级:s.settingsRT 快照(面板改过)> s.SessionTTL(启动期注入 / 测试直赋)。
+func (s *Server) sessionTTL() time.Duration {
+	if rt := s.settingsRT.Load(); rt != nil {
+		return rt.sessionTTL
+	}
+	return s.SessionTTL
+}
+
+// cookieSecure 当前生效的 cookie Secure 标志。
+func (s *Server) cookieSecure() bool {
+	if rt := s.settingsRT.Load(); rt != nil {
+		return rt.cookieSecure
+	}
+	return s.Secure
+}
+
+// randomPasswordLen 当前生效的随机密码长度。
+//
+// 回落到 defaultPasswordLen 常量(12)而不是 0:Server 是零值可用的
+// (部分测试只填 Store 不填这个字段),0 长度会让 GeneratePassword 出空密码。
+func (s *Server) randomPasswordLen() int {
+	if rt := s.settingsRT.Load(); rt != nil && rt.defaultUserPasswordLen > 0 {
+		return rt.defaultUserPasswordLen
+	}
+	if s.DefaultUserPasswordLen > 0 {
+		return s.DefaultUserPasswordLen
+	}
+	return defaultPasswordLen
+}
+
+// EnablePlaintextHTTP v2.86 批次 D:登记"明文 HTTP 备用入口已启用"。
+//
+// 由 main.go 在准备起 http-plain-listener 前调用。浏览器在 http:// 下
+// 会拒收 Secure cookie,所以明文入口存在时 Secure 必须为 false ——
+// 以前 main.go 只改了 srv.Secure,现在面板设置卡也能改 cookie_secure,
+// 这里必须连运行期快照一起压平,否则用户在 UI 打开开关就把自己锁在门外。
+func (s *Server) EnablePlaintextHTTP() {
+	s.Secure = false
+	s.PlainHTTPEnabled = true
+	if rt := s.settingsRT.Load(); rt != nil {
+		forced := *rt
+		forced.cookieSecure = false
+		s.settingsRT.Store(&forced)
+	}
 }
 
 // cacheControlForStatic v2.86-PR19:给静态资源按扩展名设置 Cache-Control。

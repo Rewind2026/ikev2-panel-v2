@@ -102,12 +102,20 @@ type homeData struct {
 
 	// v2.86-pr23d:细粒度"是否真的会跑"派生字段,给顶部 metric + 右侧 HUD 用。
 	// 比 DDNSEnabled 更严:还要看 BaseDomain / AccessKey / 至少一个 checkbox。
-	DDNSHasDomain bool // BaseDomain != ""(env IKEV2_DDNS_DOMAIN 或 panelstate)
+	DDNSHasDomain bool // BaseDomain != ""(env ALIYUN_DOMAIN 或 panelstate)
 	DDNSHasCreds  bool // 阿里云 AccessKey 已配(panelstate / env 至少一处)
 	DDNSReady     bool // "真的能跑":Enabled && HasDomain && HasCreds && (EnableA || EnableAAAA)
 	// 当前 swanctl.conf 正在生效的值(独立于 panelstate,看运行态)
 	SubnetCurrentIPv4 string
 	SubnetCurrentIPv6 string
+
+	// v2.86 配置统一批次 D:面板设置状态(给 home 模板渲染「面板设置」卡)
+	Settings settingsStatusData
+
+	// v2.86 配置统一批次 D:面板设置卡的专属 flash slot(跟 aliyun / ddns 分开,
+	// 这样保存反馈就近显示在设置卡内部,不跟其它卡的 banner 抢位置)。
+	SettingsFlash     string
+	SettingsFlashKind string
 
 	// v2.85-PR2:默认密码横幅(/data/panel-state/INITIAL_ADMIN_PASSWORD.txt 存在 → 提示改密码)
 	IsDefaultPassword bool
@@ -161,6 +169,15 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// v2.86 批次 D:面板设置卡 flash slot(第三个 slot,互不覆盖)。
+	var settingsFlashMsg, settingsFlashKind string
+	if sess != nil && s.FlashStore != nil {
+		if f, err := s.FlashStore.ConsumeFor(sess.ID, "settings"); err == nil {
+			settingsFlashMsg = f.Message
+			settingsFlashKind = f.Kind
+		}
+	}
+
 	// P1-C: LE 续签告警
 	leWarning := loadLEWarning(s)
 
@@ -175,6 +192,9 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 
 	// v2.86-PR13.2:客户端虚拟 IP 段配置状态
 	subnetCfg := loadSubnetConfigStatus(s)
+
+	// v2.86 配置统一批次 D:面板设置状态(「面板设置」卡)
+	settingsCfg := loadSettingsStatus(s)
 
 	// v2.85-PR2:检测是否仍用启动时生成的默认密码
 	isDefaultPassword := loadIsDefaultPassword(s)
@@ -229,6 +249,10 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 		SubnetUpdatedAt:   subnetCfg.updatedAt,
 		SubnetCurrentIPv4: subnetCfg.currentIPv4,
 		SubnetCurrentIPv6: subnetCfg.currentIPv6,
+		// v2.86 配置统一批次 D:面板设置
+		Settings:          settingsCfg,
+		SettingsFlash:     settingsFlashMsg,
+		SettingsFlashKind: settingsFlashKind,
 		IsDefaultPassword: isDefaultPassword,
 		// v2.86-PR12.21:Visual-first topology
 		TopologyClients: buildHomeTopology(r.Context(), s, activeSAs),
@@ -260,7 +284,7 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 		data.DDNSPeriodSeconds = s.DDNSSync.PeriodSeconds()
 		data.DDNSIface = s.DDNSSync.Iface()
 		// v2.86-pr23d:细粒度"是否会真正 tick"派生字段。
-		// BaseDomain 来自 env IKEV2_DDNS_DOMAIN(必要时由 panelstate 覆盖);空字符串就是没配。
+		// BaseDomain 来自 env ALIYUN_DOMAIN(必要时由 panelstate 覆盖);空字符串就是没配。
 		data.DDNSHasDomain = data.DDNSBaseDomain != ""
 		// AccessKey 已配就等价于 aliyunConfigured(panelstate 文件 / env 任一处)。
 		data.DDNSHasCreds = aliyunConfigured

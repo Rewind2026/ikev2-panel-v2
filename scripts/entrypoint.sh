@@ -1,5 +1,5 @@
 #!/bin/bash
-# 容器入口：环境校验 → 网卡探测 → forwarding → MASQUERADE →
+# 容器入口：网络模式校验 → 网卡探测 → forwarding → MASQUERADE →
 #           swanctl.conf 占位符替换 → charon → swanctl 首次加载 → exec Go
 # 设计说明见 docs/architecture.md §3.1（启动数据流）与 §6.1（环境变量）
 #
@@ -7,18 +7,34 @@
 #   - 优先用环境变量；没传就自动探测；自动探测失败才报 FATAL
 #   - 用户部署时**可以什么都不传**（只要宿主有公网 IPv6 + 默认路由）
 #
+# v2.86-PR20 重大改动：网络模式从 host-only 扩展为 host / macvlan / ipvlan
+#   - 模式规格与校验集中在 scripts/network-mode.sh（唯一数据源），本文件只 source
+#   - host 模式行为**逐字节不变**；L2 两模式只是把「共享宿主 netns」换成「容器私有 netns」
+#
 # 退出码：
 #   0  正常
 #   10 IPv6 公网地址不存在（IPv6_ONLY=true 时）
 #   11 forwarding 启用失败
-#   12 charon 启动失败
+#   12 网络模式配置错误 / charon 启动失败
 #   13 swanctl --load-all 失败（多次重试后仍失败）
-#   14 探测不到对外网卡
+#   14 探测不到对外网卡（含 L2 模式下 IKEV2_OUT_IF 在容器内不存在）
 #   15 iptables MASQUERADE 添加失败
 #   16 swanctl.conf 占位符替换失败
 set -euo pipefail
 
 LOG_PREFIX="[entrypoint]"
+
+# ---------- 网络模式规格表（v2.86-PR20）----------
+# 只定义常量与函数，无副作用。找不到文件时降级为「只有 host 可用」，
+# 保证老镜像 / 手工构建的环境不会因缺文件而启动失败。
+NETMODE_LIB="/etc/ikev2-panel/scripts/network-mode.sh"
+if [ -f "$NETMODE_LIB" ]; then
+  # shellcheck disable=SC1090
+  . "$NETMODE_LIB"
+else
+  echo "${LOG_PREFIX} FATAL: $NETMODE_LIB not found (image build incomplete)" >&2
+  exit 12
+fi
 
 # v2.86-PR12.16:全面拥抱 nftables,不再用 iptables-nft 兼容壳
 #   - 自定义表 ikev2 (ip) + ikev26 (ip6):docker daemon 的 iptables-restore 不会碰
@@ -39,7 +55,7 @@ IKEV2_OUT_IF="${IKEV2_OUT_IF:-}"                   # 留空 → §0 自动探测
 IKEV2_SERVER_ADDR_V6="${IKEV2_SERVER_ADDR_V6:-}"   # 留空 → §1 自动探测
 IKEV2_SERVER_ADDR_V4="${IKEV2_SERVER_ADDR_V4:-}"   # 留空 → §1 自动探测
 IKEV2_SERVER_CN="${IKEV2_SERVER_CN:-}"             # 仅 LE 模式必填
-IKEV2_NETWORK_MODE="${IKEV2_NETWORK_MODE:-host}"   # v2.86-PR14 收敛：只支持 host。传 bridge/ipvlan 会 FATAL
+IKEV2_NETWORK_MODE="${IKEV2_NETWORK_MODE:-host}"   # v2.86-PR20:host | macvlan | ipvlan
 IKEV2_VPN_SUBNET="${IKEV2_VPN_SUBNET:-auto}"       # v2-79 新增：auto / 10.10.0.0/24 等
 
 # v2-76：改回 EAP-MSCHAPv2 模式，per-user 密码由 Go 进程写到 /etc/swanctl/conf.d/。
@@ -127,10 +143,122 @@ if [ -f "$SUBNET_CONF" ]; then
   fi
 fi
 
+# ---------- §-0.6: v2.86 批次 E:面板运行时「高级设置」(对称 cert.conf / subnet.conf)----------
+# 背景:批次 E 把日志格式、审计保留天数、限速阈值、MSS clamp、DDoS 开关、
+# nft 地址族这 6 项搬上面板。它们的消费者**全在 entrypoint 里**(nft 规则、
+# /etc/cron.d),Go 进程运行期改了没人读 —— 必须让 entrypoint 也认 settings.json,
+# 否则用户在面板里改完,重启容器后又被 env 覆盖回去,且没有任何提示。
+#
+# 优先级链(高 → 低),跟 §-1 / §-0.5 完全同构:
+#   1. /data/panel-state/settings.json (面板 UI 填的,运行时改,需重启容器生效)
+#   2. env(IKEV2_*)
+#   3. 本节里的 `:-` 兜底
+#
+# 三点跟 §-1 的差别:
+#   - log_level 不在这里处理:Go 进程自己的 logger 在 main.go 里构造,
+#     且 config.SetLogLevel 已经支持运行期热改,不需要 entrypoint 参与。
+#   - 数值项做了范围校验再采纳,越界只 WARN 不 exit —— 面板端已经拦过一次,
+#     这里防的是人工编辑 settings.json 的情况,不该让容器起不来。
+#   - 布尔项只认 "true"(其它一律当作没配),这跟 getbool 的宽松语义不同,
+#     但这里宁严勿松:写错成 "flase" 时,保持"防护开启"比误关掉安全规则好。
+PANEL_SETTINGS="/data/panel-state/settings.json"
+if [ -f "$PANEL_SETTINGS" ]; then
+  settings_get_str() {
+    grep -E "\"$1\"[[:space:]]*:" "$PANEL_SETTINGS" 2>/dev/null \
+      | sed -nE "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"([^\"]*)\".*/\1/p" | head -1 || true
+  }
+  settings_get_num() {
+    grep -E "\"$1\"[[:space:]]*:" "$PANEL_SETTINGS" 2>/dev/null \
+      | sed -nE "s/.*\"$1\"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p" | head -1 || true
+  }
+  settings_get_bool() {
+    grep -E "\"$1\"[[:space:]]*:" "$PANEL_SETTINGS" 2>/dev/null \
+      | sed -nE "s/.*\"$1\"[[:space:]]*:[[:space:]]*(true|false).*/\1/p" | head -1 || true
+  }
+  # 数值范围校验:非纯数字(空 / 负数 / 带小数)一律视为未配置
+  settings_num_ok() {
+    case "$1" in
+      ''|*[!0-9]*) return 1 ;;
+      *) return 0 ;;
+    esac
+  }
+
+  _v="$(settings_get_str log_format)"
+  if [ -n "$_v" ]; then IKEV2_LOG_FORMAT="$_v"; fi
+
+  _v="$(settings_get_num audit_retention_days)"
+  if settings_num_ok "$_v" && [ "$_v" -ge 1 ] && [ "$_v" -le 3650 ]; then
+    IKEV2_AUDIT_RETENTION_DAYS="$_v"
+  elif [ -n "$_v" ]; then
+    echo "${LOG_PREFIX} WARN: settings.json audit_retention_days=${_v} out of [1,3650], keeping env" >&2
+  fi
+
+  _v="$(settings_get_num connlimit_per_ip)"
+  if settings_num_ok "$_v" && [ "$_v" -ge 1 ] && [ "$_v" -le 10000 ]; then
+    IKEV2_CONNLIMIT_PER_IP="$_v"
+  elif [ -n "$_v" ]; then
+    echo "${LOG_PREFIX} WARN: settings.json connlimit_per_ip=${_v} out of [1,10000], keeping env" >&2
+  fi
+
+  _v="$(settings_get_num hashlimit_per_min)"
+  if settings_num_ok "$_v" && [ "$_v" -ge 1 ] && [ "$_v" -le 10000 ]; then
+    IKEV2_HASHLIMIT_PER_MIN="$_v"
+  elif [ -n "$_v" ]; then
+    echo "${LOG_PREFIX} WARN: settings.json hashlimit_per_min=${_v} out of [1,10000], keeping env" >&2
+  fi
+
+  _v="$(settings_get_bool disable_mss_clamp)"
+  if [ "$_v" = "true" ]; then IKEV2_DISABLE_MSS_CLAMP=true; fi
+
+  _v="$(settings_get_bool disable_ddos_protection)"
+  if [ "$_v" = "true" ]; then IKEV2_DISABLE_DDOS_PROTECTION=true; fi
+
+  _v="$(settings_get_str nft_family)"
+  if [ "$_v" = "v4" ] || [ "$_v" = "v6" ]; then IKEV2_FAMILY="$_v"; fi
+
+  # 回传给 Go 进程:Go 侧 status API 要显示"当前生效值",
+  # 而它只读 env,读不到上面这些 shell 局部赋值(见 §-0.6 结尾的 export)。
+  export IKEV2_LOG_FORMAT IKEV2_AUDIT_RETENTION_DAYS IKEV2_CONNLIMIT_PER_IP \
+         IKEV2_HASHLIMIT_PER_MIN IKEV2_DISABLE_MSS_CLAMP IKEV2_DISABLE_DDOS_PROTECTION \
+         IKEV2_FAMILY
+
+  echo "${LOG_PREFIX} [settings.json] applied: log_format=${IKEV2_LOG_FORMAT:-text} audit_days=${IKEV2_AUDIT_RETENTION_DAYS:-90} connlimit=${IKEV2_CONNLIMIT_PER_IP:-50} hashlimit=${IKEV2_HASHLIMIT_PER_MIN:-30} mss_clamp_disabled=${IKEV2_DISABLE_MSS_CLAMP:-false} ddos_disabled=${IKEV2_DISABLE_DDOS_PROTECTION:-false} family=${IKEV2_FAMILY:-auto}"
+fi
+
 # ====================================================================
 # §0 自动探测链（v2-79）
 # 任何"用户环境相关"的参数都不应该写死。探测顺序：环境变量 → 自动探测 → FATAL
 # ====================================================================
+
+# ---------- §0.0 网络模式归一化 + 校验（v2.86-PR20）----------
+# 必须排在 §0.1 之前：OUT_IF 的语义随模式变化（宿主网卡名 vs 容器网卡名），
+# §0.1 的存在性校验要用到模式信息。
+#
+# 校验逻辑全部在 scripts/network-mode.sh（唯一数据源），这里只负责：
+#   1. 归一化（大小写 / 空白）并回写 IKEV2_NETWORK_MODE
+#   2. 调用 net_mode_validate，失败 exit 12（语义与 v2.86-PR14 一致）
+#   3. 打印模式摘要
+IKEV2_NETWORK_MODE="$(net_mode_normalize "$IKEV2_NETWORK_MODE")"
+if ! net_mode_validate "$IKEV2_NETWORK_MODE"; then
+  echo "${LOG_PREFIX} FATAL: IKEV2_NETWORK_MODE=${IKEV2_NETWORK_MODE} 配置错误（详见上方 ERR）" >&2
+  exit 12
+fi
+
+# 声明的模式 vs 实际 netns 是否一致（防御"改了 .env 但忘了重建容器"）
+# 判据：host 模式必须有 DOCKER-USER 之外的特征 —— 直接比对 lo 之外的接口数
+# 不可靠（多网卡宿主会误判），改用 /proc/self/ns/net 与宿主是否同 inode 的
+# 近似手段代价太高；这里采用成本最低且足够可靠的方式：
+#   L2 模式必然看不到宿主上常见的 docker0 桥，且必然有一块非 ethX 命名的
+#   单网卡环境。真正强判据留给 §0.7（那里能拿到 OUT_IF 后再核对）。
+detect_actual_netns_kind() {
+  # 容器私有 netns 下，/proc/sys/net/ipv4/conf/all/rp_filter 的默认值与
+  # 宿主一致，不可靠。改用最朴素的判据：是否存在 docker0 桥。
+  if ip link show docker0 >/dev/null 2>&1; then
+    echo "host-shared"
+  else
+    echo "private"
+  fi
+}
 
 # ---------- §0.1 探测对外网卡（优先用 IKEV2_OUT_IF）----------
 detect_out_if() {
@@ -139,6 +267,17 @@ detect_out_if() {
     if ip link show "$IKEV2_OUT_IF" >/dev/null 2>&1; then
       echo "$IKEV2_OUT_IF"
       return 0
+    fi
+    # v2.86-PR20：非 host 模式下，用户极可能沿用 host 时代的宿主网卡名
+    # （如 ens18 / enp0s3）。这个值在容器 netns 内不存在，nft 模板会生成一条
+    # 永不匹配的 oifname 规则 → MASQUERADE 静默失效 → 客户端能连 VPN 但没网。
+    # 这是本次改造唯一会「启动成功但功能不可用」的静默故障，必须 FATAL。
+    if net_mode_has_own_ip "$IKEV2_NETWORK_MODE"; then
+      echo "${LOG_PREFIX} FATAL: IKEV2_OUT_IF=${IKEV2_OUT_IF} 在容器内不存在" >&2
+      echo "${LOG_PREFIX}   当前网络模式: ${IKEV2_NETWORK_MODE}（容器有独立 netns，网卡名与宿主不同）" >&2
+      echo "${LOG_PREFIX}   修复 1（推荐）: 从 .env 删掉 IKEV2_OUT_IF 这一行，让脚本自动探测（容器内通常是 eth0）" >&2
+      echo "${LOG_PREFIX}   修复 2: 改成容器内的实际网卡名 —— docker exec <ctr> ip -br link 后填对应名字" >&2
+      exit 14
     fi
     echo "${LOG_PREFIX} WARN: IKEV2_OUT_IF=$IKEV2_OUT_IF not found, falling back to auto-detect" >&2
   fi
@@ -173,25 +312,124 @@ if [ -z "$OUT_IF" ]; then
 fi
 echo "${LOG_PREFIX} [auto-detect] Outbound interface: ${OUT_IF}"
 
+# ⚠️ 必须回写 env（v2.86-PR20 审查修复）。
+#
+# 探测结果之前只是个 shell 局部变量，下游消费者拿不到：
+#   1. scripts/ikev2-updown 由 charon 在 SA up/down 时拉起，读的是继承的
+#      IKEV2_OUT_IF，兜底 `:-eth0`。宿主网卡叫 ens18/enp0s3 时 tc 全部失败，
+#      而命令后面跟着 `|| true` → 日志照样打 "Applied 100Mbps"，
+#      限速功能静默失效。
+#   2. Go 侧 cmd/ikev2-panel/main.go 两处 os.Getenv("IKEV2_OUT_IF")
+#      （DDNS Iface、ipv6watch Iface）同样拿不到。
+#   3. internal/config/config.go 的 OutIf 默认值是 "eth0"，一样是错的。
+# 回写之后三个下游与 entrypoint 自身看到的是同一个网卡，语义统一。
+export IKEV2_OUT_IF="$OUT_IF"
+
 # ---------- §0.2 探测 IPv6 公网地址（2000::/3，避开 ULA/Link-local）----------
+#
+# /proc/net/if_inet6 每行 6 个字段（实测 v2.86-PR20 复核）：
+#   $1 addr(32hex)  $2 ifindex(dec)  $3 prefixlen(hex)
+#   $4 scope(hex)   $5 flags(hex)    $6 devname
+#
+# ⚠️ v2.86-PR20 重写。原实现有**两个**独立缺陷，都只在 L2 模式暴露：
+#
+# 【缺陷 1】把 scope 当成 flags
+#   原过滤条件是 `$4=="01" || $4=="00"`，$4 是 scope 而非 flags。
+#   scope=00 恰好等价于 global scope，所以平时「看起来能用」，
+#   但 `01` 根本不是合法 scope 值（合法值是 00/10/20/40/80/c0），
+#   真正的地址状态位在 $5 —— 于是 tentative / dadfailed 从未被排除。
+#   实测 flags 位（veth 上制造 DAD 中 / DAD 冲突两种状态交叉验证）：
+#     80        稳定 global
+#     82        nodad（跳过 DAD，稳定）
+#     c0        DAD 进行中（tentative）    ← 原实现会误选
+#     c8        DAD 冲突（dadfailed + tentative）← 原实现会误选
+#     含 0x20   deprecated
+#   L2 模式下 RA 触发的地址必然先经过 DAD，不过滤就会把一个「还不能用」的
+#   地址写进 swanctl.conf 的 local_addrs → charon 绑定失败或客户端握手异常。
+#
+# 【缺陷 2】每张网卡只取第一条地址（影响更大）
+#   原实现外层 `awk '...{print $6}'` 逐行打印**网卡名**（同一张网卡出现几次
+#   就打印几次），内层 `awk -v d=$dev '$6==d && ...{print $1; exit}'` 的 exit
+#   只取该网卡上的**第一条**匹配地址。
+#   macvlan/ipvlan 的容器 eth0 上，Docker 分的 ULA（fd48:...）总是先于
+#   SLAAC 拿到的 GUA 出现；内层拿到 ULA → case 2xxx: 匹配不上 → continue，
+#   而外层下一轮喂的还是同一张网卡名 → 又拿到同一条 ULA → 永远走不到 GUA。
+#   实测：同一份 if_inet6，把 ULA 行挪到 GUA 前面，原实现输出从
+#   `2408:832e:...` 变成**空字符串**。也就是 L2 模式下 IKEV2_SERVER_ADDR_V6
+#   经常探测不到，只能靠 .env 手工兜底 —— 正是本次要消灭的隐式行为。
+#
+# 判定方式刻意用 ip(8) 的权威文字标签（tentative/dadfailed/deprecated）
+# 而不是硬编码 flags 位 —— 位含义随内核版本演进，文字标签是稳定契约。
+# 顺带天然解决缺陷 2：ip -6 addr show 按地址逐行输出，不做「每网卡取第一条」。
+# 输出格式（ip -6 addr show，每地址一行）:
+#   inet6 2001:db8::2/64 scope global
+#   inet6 2001:db8::1/64 scope global nodad
+#   inet6 2001:db8::1/64 scope global dadfailed tentative
+#   inet6 fe80::1/64 scope link proto kernel_ll
+# $1=inet6 $2=cidr $3=scope $4=scope值 其后为可选状态标签
 detect_public_ipv6() {
-  # /proc/net/if_inet6 是最稳定的方式（不依赖 iproute2）
-  awk '$4=="01" || $4=="00" {print $6}' /proc/net/if_inet6 2>/dev/null | while read -r dev; do
-    local hex
-    hex=$(awk -v d="$dev" '$6==d && ($4=="01" || $4=="00") {print $1; exit}' /proc/net/if_inet6 2>/dev/null)
-    [ -z "$hex" ] && continue
-    # 32 hex chars → IPv6
-    local ip
-    ip=$(echo "$hex" | sed 's/\(....\)/\1:/g; s/:$//')
-    # 只保留 2000::/3
-    case "$ip" in
-      2[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]:*) echo "$ip"; return 0 ;;
-    esac
-  done | head -n1
+  ip -6 addr show 2>/dev/null \
+    | awk '
+        $1 == "inet6" {
+          ip = $2
+          sub(/\/.*/, "", ip)
+          bad = 0
+          for (i = 4; i <= NF; i++) {
+            if ($i == "tentative" || $i == "dadfailed" || $i == "deprecated") bad = 1
+          }
+          if (bad) next
+          # 只保留 global unicast 2000::/3，即 2000:: ~ 3fff::
+          # （首 hextet 的首位是 2 或 3；fe80::/10 与 fd00::/8 天然不匹配）
+          if (ip ~ /^[23][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]:/) print ip
+        }' \
+    | head -n1
+}
+
+# v2.86-PR20：macvlan / ipvlan 模式下 IPv6 来自 RA + SLAAC，
+# 新配的地址要过 DAD（Duplicate Address Detection），
+# 在收敛前会被内核标记 tentative / dadfailed（见 §0.2 的 detect_public_ipv6）。
+#
+# 这里做有限次重试而不是一次即判死：L2 模式下 DAD 未收敛是**正常时序**，
+# 不是配置错误。host 模式下地址早已收敛，保持单次探测（行为不变）。
+#
+# v2.86-PR20 实测修正（Docker 28.5.2，macvlan，192.168.50.63 parent=ens18）：
+# 原来 3 次 × 2 秒 = 最多等 4 秒，**不够**。实测时间线：
+#     t=0s   只有 Docker 自带的 ULA fd48:...::2（SLAAC 还没拿到 GUA）
+#     t=4s   GUA 2408:832e:8ae:a170:... 才以 preferred 出现
+# 原因是 RA 由上游路由器按周期发送（该网段 RA 间隔约 10s 级），
+# 叠加 DAD 约 1s，最坏要等一个完整 RA 周期。
+# 改成 6 次 × 3 秒 = 最多 15 秒，覆盖绝大多数 RA 周期。
+# 这是启动期一次性等待，不影响运行期性能。
+#
+# ⚠️ 修好 §0.2 之后，这个循环的语义变了，要重新理解它「退出」的条件：
+#   旧实现：只要网卡上**有任意一条** 2000::/3 地址就返回 ——
+#           ULA 排在前面时反而返回空，拿到 GUA 后又太早返回（DAD 中）。
+#           两个方向的错都有。
+#   新实现：只有「存在一条 DAD 已收敛的 GUA」才返回 —— 这才是本循环
+#           真正想等的那个状态。L2 模式下 RA 周期 ~10s + DAD ~1s，
+#           6×3s=15s 的上限正好覆盖一个完整 RA 周期。
+# 换句话说：循环从「可有可无的重试」变成了「L2 模式启动的关键路径」。
+detect_public_ipv6_with_retry() {
+  local tries=1 interval=2
+  if net_mode_has_own_ip "$IKEV2_NETWORK_MODE"; then
+    tries=6
+    interval=3
+  fi
+  local i addr
+  for i in $(seq 1 "$tries"); do
+    addr="$(detect_public_ipv6 || true)"
+    if [ -n "$addr" ]; then
+      [ "$i" -gt 1 ] && echo "${LOG_PREFIX} [auto-detect] Public IPv6 converged after ~$(( (i-1)*interval ))s (RA/SLAAC/DAD)" >&2
+      echo "$addr"
+      return 0
+    fi
+    [ "$i" -lt "$tries" ] && sleep "$interval"
+  done
+  return 1
 }
 
 if [ -z "$IKEV2_SERVER_ADDR_V6" ] && [ "$IKEV2_IPV6_ONLY" = "true" ]; then
-  IPV6_ADDR_DETECTED="$(detect_public_ipv6 || true)"
+  IPV6_ADDR_DETECTED="$(detect_public_ipv6_with_retry || true)"
   if [ -n "$IPV6_ADDR_DETECTED" ]; then
     IKEV2_SERVER_ADDR_V6="$IPV6_ADDR_DETECTED"
     echo "${LOG_PREFIX} [auto-detect] Public IPv6: ${IKEV2_SERVER_ADDR_V6}"
@@ -348,14 +586,24 @@ IPV6_ADDR="$IKEV2_SERVER_ADDR_V6"
 if [ "$IKEV2_IPV6_ONLY" = "true" ]; then
   if [ -z "$IPV6_ADDR" ]; then
     # 最后再试一次主动探测（覆盖 §0.2 失败场景）
-    IPV6_ADDR="$(detect_public_ipv6 || true)"
+    IPV6_ADDR="$(detect_public_ipv6_with_retry || true)"
     IKEV2_SERVER_ADDR_V6="$IPV6_ADDR"
   fi
 
   if [ -z "${IPV6_ADDR:-}" ]; then
     echo "${LOG_PREFIX} FATAL: no global IPv6 address found" >&2
     echo "${LOG_PREFIX} This project REQUIRES a public IPv6 address when IKEV2_IPV6_ONLY=true" >&2
-    echo "${LOG_PREFIX} Configure IPv6 on the host network first, or set IKEV2_IPV6_ONLY=false" >&2
+    if net_mode_has_own_ip "$IKEV2_NETWORK_MODE"; then
+      # L2 模式专属排障：IPv6 走 RA/SLAAC，失败原因基本收敛到这四条
+      echo "${LOG_PREFIX} 当前模式=${IKEV2_NETWORK_MODE}，IPv6 依赖上游路由器的 RA + SLAAC，请逐条排查：" >&2
+      echo "${LOG_PREFIX}   1) 上游路由器是否真的在发 RA（tcpdump -i ${IKEV2_L2_PARENT:-eth0} icmp6 and ip6[40]==134）" >&2
+      echo "${LOG_PREFIX}   2) 容器网卡 disable_ipv6 是否为 0：docker exec <ctr> cat /proc/sys/net/ipv6/conf/${OUT_IF}/disable_ipv6" >&2
+      echo "${LOG_PREFIX}   3) 容器网卡 accept_ra 是否为 2：docker exec <ctr> cat /proc/sys/net/ipv6/conf/${OUT_IF}/accept_ra" >&2
+      echo "${LOG_PREFIX}      （本项目必开 IP forwarding，内核会把 accept_ra 抑制掉；L2 compose 文件已注入 net.ipv6.conf.default.accept_ra=2）" >&2
+      echo "${LOG_PREFIX}   4) 宿主/云厂商是否拦截了来自新 MAC 的 RA（macvlan 特有，见 README 前置条件）" >&2
+    else
+      echo "${LOG_PREFIX} Configure IPv6 on the host network first, or set IKEV2_IPV6_ONLY=false" >&2
+    fi
     exit 10
   fi
   echo "${LOG_PREFIX} Using IPv6 address: ${IPV6_ADDR}"
@@ -364,41 +612,58 @@ fi
 # v2-79：把自动探测结果导出，供 §5 占位符替换使用
 export IKEV2_SERVER_ADDR_V6 IKEV2_SERVER_ADDR_V4 IKEV2_VPN_SUBNET VPN_SUBNET_BASE VPN_SERVER_VIP IKEV2_VPN_SUBNET_V6
 
-# ---------- §0.7 网络模式校验（v2.86-PR14 收敛）----------
-# 唯一支持 host 网络:
-#   - docker-compose.yml 已写死 network_mode: host
-#   - 传 IKEV2_NETWORK_MODE=bridge|ipvlan 即非 host → FATAL 退出(明确报错,
-#     防止 v2-79~v2-85 时期的旧 yml/.env 残留误用)
-#   - 传 host 或留空 → OK,正常往下走
+# ---------- §0.7 网络模式运行时确认（v2.86-PR20）----------
+# 合法性与必填项的校验已在 §0.0 完成（net_mode_validate，失败 exit 12）。
+# 本段负责两件事：
+#   1. 打印模式摘要（可观测性：出问题时第一眼看这一行）
+#   2. 「声明的模式 vs 实际 netns」交叉核对 —— 防御改了 .env 但忘了重建容器
+#
+# 删除了 v2.86-PR14 的硬编码 case，也删除了死变量 IKEV2_ACTUAL_NETWORK_MODE
+# （导出后全库无消费者），改为写入 /run/ikev2-panel/netmode.env。
+NETMODE_ENV_DIR="/run/ikev2-panel"
+mkdir -p "$NETMODE_ENV_DIR"
+{
+  printf 'MODE=%s\n'        "$IKEV2_NETWORK_MODE"
+  printf 'OUT_IF=%s\n'      "$OUT_IF"
+  printf 'DRIVER=%s\n'     "$(net_mode_driver_desc "$IKEV2_NETWORK_MODE")"
+  printf 'HAS_OWN_IP=%s\n'  "$(net_mode_has_own_ip "$IKEV2_NETWORK_MODE" && echo 1 || echo 0)"
+  printf 'PROCSYS_RW=%s\n'  "$(net_mode_procsys_rw "$IKEV2_NETWORK_MODE" && echo 1 || echo 0)"
+  printf 'DDOS_CHAIN=%s\n'  "$(net_mode_ddos_chain "$IKEV2_NETWORK_MODE")"
+} > "$NETMODE_ENV_DIR/netmode.env"
+chmod 644 "$NETMODE_ENV_DIR/netmode.env"
+
 case "$IKEV2_NETWORK_MODE" in
-  host|"")
-    IKEV2_NETWORK_MODE="host"
-    echo "${LOG_PREFIX} [network-mode] host (only supported mode)"
+  host)
+    echo "${LOG_PREFIX} [network-mode] host (shares host netns; UDP 500/4500 + TCP 8443 on host ports)"
     ;;
-  *)
-    echo "${LOG_PREFIX} FATAL: IKEV2_NETWORK_MODE=${IKEV2_NETWORK_MODE} is not supported" >&2
-    echo "${LOG_PREFIX}   v2.86-PR14 收敛:仅支持 host 网络(参见 docker-compose.yml 注释)" >&2
-    echo "${LOG_PREFIX}   解决:从 .env 删掉 IKEV2_NETWORK_MODE 那一行(或改成 host)" >&2
-    exit 12
+  macvlan|ipvlan)
+    echo "${LOG_PREFIX} [network-mode] ${IKEV2_NETWORK_MODE} ($(net_mode_driver_desc "$IKEV2_NETWORK_MODE"))"
+    echo "${LOG_PREFIX} [network-mode] parent=${IKEV2_L2_PARENT} subnet=${IKEV2_L2_SUBNET} gateway=${IKEV2_L2_GATEWAY}"
+    echo "${LOG_PREFIX} [network-mode] container iface=${OUT_IF} (IKEV2_OUT_IF 语义为容器网卡名，不是宿主网卡名)"
+    echo "${LOG_PREFIX} [network-mode] IPv6 via RA/SLAAC; injected sysctls: $(net_mode_sysctls | tr '\n' ' ')"
+    # 交叉核对：容器私有 netns 下看不到宿主常见的 docker0 桥。
+    # 反过来若声明 L2 却看到了 docker0，几乎必然是忘了重建容器。
+    _actual_kind="$(detect_actual_netns_kind)"
+    if [ "$_actual_kind" = "host-shared" ]; then
+      echo "${LOG_PREFIX} WARN: declared ${IKEV2_NETWORK_MODE} but the container still shares the host netns (docker0 visible)." >&2
+      echo "${LOG_PREFIX}   → 几乎必然是改了 IKEV2_NETWORK_MODE 但没重建容器。执行: docker compose down && ./scripts/up.sh" >&2
+    fi
+    unset _actual_kind
     ;;
 esac
-export IKEV2_ACTUAL_NETWORK_MODE="host"
 
 # ---------- 3. 检查 IP forwarding（v2-79 三层兜底：compose sysctls → entrypoint 自愈 → FATAL）----------
 #  必需：容器作为 VPN 路由器，VPN 客户端流量要从容器转发到公网。
 #  IPv6：net.ipv6.conf.all.forwarding=1
 #  IPv4：net.ipv4.ip_forward=1
 #
-# 单一路径（设计说明见 docs/architecture.md §12.8）：
-#   1) docker-compose.yml 的 sysctls: —— docker daemon 起容器时改宿主内核
-#      （依赖 docker daemon 权限，多数发行版默认就有 CAP_SYS_ADMIN）
-#   2) entrypoint 自愈 —— 上一步失败时，host 模式下 privileged: true 会让
-#      容器内 /proc/sys 可写，直接 echo 1 即可（host 模式下容器和宿主共享 net ns）
-#   3) FATAL —— 自愈也失败（说明宿主机 sysctl 是真 read-only），报清晰错误
+# 网络模式差异（v2.86-PR20）：
+#   host    : 容器与宿主共享 netns，且 /proc/sys 是 ro 挂载 → 自愈**不生效**，
+#             forwarding 必须由宿主保证（v2.86-PR19 A16 实测结论，见下）
+#   macvlan / ipvlan : 容器有独立 netns，/proc/sys 可写 → 自愈**能真正生效**，
+#             这是 L2 模式相对 host 模式的一个实质改善
 #
 # 镜像里没有 sysctl 二进制（debian-slim），所以这里用 echo 直写 /proc/sys。
-# 区分 host vs bridge：bridge 模式容器内 /proc/sys 是 RO，写不进去——失败正常，
-# 不影响功能（bridge 模式下根本不需要 forwarding key）。
 #
 # v2-79.2 增强：自愈成功后**同时把值持久化到宿主 /etc/sysctl.d/99-ikev2.conf**。
 # 实现：docker-compose.yml 把宿主 /etc/sysctl.d bind mount 到 /host-sysctl.d（rw）。
@@ -407,10 +672,21 @@ export IKEV2_ACTUAL_NETWORK_MODE="host"
 #   - 宿主重启 → systemd-sysctl.service 加载 /etc/sysctl.d/*.conf → 持久保留
 #   - 下次部署到新机器，第一次启动也会自愈 + 持久化
 # 无 99-ikev2.conf 也不要紧：自愈成功后才写，不会覆盖宿主已有配置。
+#
+# v2.86-PR20：L2 模式下容器是独立 netns，写宿主 /etc/sysctl.d 只会改**宿主**
+# 的 forwarding，对容器 netns 无效（sysctl 的 forwarding 是 per-netns 的）。
+# 所以 L2 模式跳过持久化，避免给宿主写一条"看起来在起作用、实际只作用于
+# 另一个 netns"的配置造成误判。
 persist_sysctl() {
   local key="$1" value="$2"   # key = 完整 sysctl 名（如 net.ipv6.conf.all.forwarding）
   local host_dir="/host-sysctl.d"
   local host_conf="${host_dir}/99-ikev2.conf"
+
+  if net_mode_has_own_ip "$IKEV2_NETWORK_MODE"; then
+    # 容器私有 netns：写宿主 sysctl.d 对本容器无效，不做（避免误导）
+    return 0
+  fi
+
   # 没挂载宿主 /etc/sysctl.d → 跳过持久化（容器内 sysctl 仍然生效，但宿主重启会丢）
   [ -d "$host_dir" ] || { echo "${LOG_PREFIX} [persist] $host_dir not mounted, skipping host-side persist"; return 0; }
   [ -w "$host_dir" ] || { echo "${LOG_PREFIX} [persist] $host_dir not writable, skipping host-side persist"; return 0; }
@@ -444,7 +720,11 @@ enable_forwarding() {
   # 没开 / 不存在（系统自检）→ 尝试自愈
   if [ -w "$path" ] 2>/dev/null; then
     if echo 1 > "$path" 2>/dev/null; then
-      echo "${LOG_PREFIX} [auto-heal] ${path} set to 1 (host net ns, effective on host)" >&2
+      if net_mode_has_own_ip "$IKEV2_NETWORK_MODE"; then
+        echo "${LOG_PREFIX} [auto-heal] ${path} set to 1 (container net ns, L2 mode)" >&2
+      else
+        echo "${LOG_PREFIX} [auto-heal] ${path} set to 1 (host net ns, effective on host)" >&2
+      fi
       persist_sysctl "$sysctl_name" "1"
       return 0
     fi
@@ -495,22 +775,80 @@ if [ -e /proc/sys/net/ipv6/conf/all/forwarding ]; then
   if ! enable_forwarding ipv6; then
     echo "${LOG_PREFIX} WARN: net.ipv6.conf.all.forwarding=0 and cannot auto-enable — IPv6 内层转发不可用,客户端会回退 IPv4" >&2
     echo "${LOG_PREFIX}   影响：客户端拿到 fd00:1:: 地址后会先试 IPv6,被内核静默丢弃后回退 IPv4(能上网但慢一拍);已推送的 IPv6 DNS 不可达" >&2
-    echo "${LOG_PREFIX}   宿主侧修复：sudo sysctl -w net.ipv6.conf.all.forwarding=1" >&2
-    echo "${LOG_PREFIX}   持久化    ：echo 'net.ipv6.conf.all.forwarding=1' | sudo tee /etc/sysctl.d/99-ikev2.conf" >&2
-    echo "${LOG_PREFIX}   若 /proc/sys 是 ro 挂载(容器内常见),NET_ADMIN 也无法写,只能从宿主执行上面两条" >&2
+    if net_mode_has_own_ip "$IKEV2_NETWORK_MODE"; then
+      # L2 模式：容器有独立 netns，/proc/sys 可写，失败说明容器真的没 NET_ADMIN
+      echo "${LOG_PREFIX}   当前模式=${IKEV2_NETWORK_MODE}，容器 netns 内 /proc/sys 应当可写" >&2
+      echo "${LOG_PREFIX}   排查：docker inspect ikev2-panel --format '{{.HostConfig.CapAdd}}' 应含 NET_ADMIN" >&2
+    else
+      echo "${LOG_PREFIX}   宿主侧修复：sudo sysctl -w net.ipv6.conf.all.forwarding=1" >&2
+      echo "${LOG_PREFIX}   持久化    ：echo 'net.ipv6.conf.all.forwarding=1' | sudo tee /etc/sysctl.d/99-ikev2.conf" >&2
+      echo "${LOG_PREFIX}   若 /proc/sys 是 ro 挂载(容器内常见),NET_ADMIN 也无法写,只能从宿主执行上面两条" >&2
+    fi
   fi
 else
   echo "${LOG_PREFIX} WARN: kernel built without IPv6, skipping net.ipv6.conf.all.forwarding" >&2
 fi
 if ! enable_forwarding ipv4; then
   echo "${LOG_PREFIX} FATAL: net.ipv4.ip_forward=0 and cannot auto-enable" >&2
-  echo "${LOG_PREFIX} 提示 1：sudo sysctl -w net.ipv4.ip_forward=1" >&2
-  echo "${LOG_PREFIX} 提示 2：echo 'net.ipv4.ip_forward=1' | sudo tee /etc/sysctl.d/99-ikev2.conf（宿主侧持久化）" >&2
-  echo "${LOG_PREFIX} 提示 3：若 /proc/sys 是 ro 挂载(容器内常见),NET_ADMIN 也无法写,只能从宿主执行上面两条" >&2
+  if net_mode_has_own_ip "$IKEV2_NETWORK_MODE"; then
+    echo "${LOG_PREFIX} 当前模式=${IKEV2_NETWORK_MODE}，容器 netns 内 /proc/sys 应当可写" >&2
+    echo "${LOG_PREFIX} 排查 1：docker inspect ikev2-panel --format '{{.HostConfig.CapAdd}}' 应含 NET_ADMIN" >&2
+    echo "${LOG_PREFIX} 排查 2：docker exec ikev2-panel sh -c 'echo 1 > /proc/sys/net/ipv4/ip_forward' 看是否 Permission denied" >&2
+  else
+    echo "${LOG_PREFIX} 提示 1：sudo sysctl -w net.ipv4.ip_forward=1" >&2
+    echo "${LOG_PREFIX} 提示 2：echo 'net.ipv4.ip_forward=1' | sudo tee /etc/sysctl.d/99-ikev2.conf（宿主侧持久化）" >&2
+    echo "${LOG_PREFIX} 提示 3：若 /proc/sys 是 ro 挂载(容器内常见),NET_ADMIN 也无法写,只能从宿主执行上面两条" >&2
+  fi
   echo "${LOG_PREFIX} 提示 4：IPv4 forwarding=0 时所有客户端都出不了网,这里不降级" >&2
   exit 11
 fi
 echo "${LOG_PREFIX} IP forwarding OK (v4=$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null), v6=$(cat /proc/sys/net/ipv6/conf/all/forwarding 2>/dev/null))"
+
+# ---------- 3.2 SLAAC 状态复核（仅 L2 模式，v2.86-PR20）----------
+# 为什么必须在开 forwarding **之后**复核：
+#   内核 accept_ra 的功能性默认是「forwarding 关闭时启用、开启时禁用」。
+#   §3 刚把 forwarding 打开 → 内核会走 addrconf_forward_change()，
+#   把处于**默认态**的接口 accept_ra 强制刷成 0。
+#   L2 compose 用 sysctls 写了 net.ipv6.conf.default.accept_ra=2（显式值不是
+#   默认态，内核不会再改写），但那是"应该成立"，不是"一定成立"——
+#   一旦用户改了 compose 文件、漏了 enable_ipv6、或换了不同 Docker 版本，
+#   就会静默失效，表现为"客户端能连 VPN 但没有 IPv6 出口"。
+#   这里显式回读一次：被改写就 FATAL，给出可执行的修复动作，而不是让用户
+#   在 §1 拿到一个含糊的 "no global IPv6 address"。
+#
+# 期望值取自 net_mode_sysctl_checks()，与 compose 的 sysctls 块同源。
+# 注意 disable_ipv6 不在复核列表里：它由 networks 段的 enable_ipv6: true 保证
+# （实测不开就是 1，且没有任何 sysctl 能把它从 service 段改回来），
+# 真出问题会表现为下面的 accept_ra=2 仍然拿不到 GUA，由地址探测兜住。
+if net_mode_has_own_ip "$IKEV2_NETWORK_MODE" && [ -e "/proc/sys/net/ipv6/conf/${OUT_IF}/accept_ra" ]; then
+  _slaac_bad=""
+  _slaac_shown=""
+  # 用 here-doc + 重定向而不是管道：管道会把 while 放进子 shell，
+  # 循环内的赋值传不回来，"有不符合项"就会被静默当成通过。
+  while IFS='|' read -r _sc_path _sc_want; do
+    [ -n "$_sc_path" ] || continue
+    _sc_real="${_sc_path//IFNAME/$OUT_IF}"
+    _sc_got="$(cat "/proc/sys/${_sc_real}" 2>/dev/null || echo '?')"
+    _slaac_shown="${_slaac_shown} ${_sc_real}=${_sc_got}"
+    [ "$_sc_got" = "$_sc_want" ] || _slaac_bad="${_slaac_bad} ${_sc_real}=${_sc_got}(期望 ${_sc_want})"
+  done <<EOF
+$(net_mode_sysctl_checks)
+EOF
+
+  if [ -z "$_slaac_bad" ]; then
+    echo "${LOG_PREFIX} [slaac] ${OUT_IF}:${_slaac_shown} — RA/SLAAC 可用"
+  else
+    echo "${LOG_PREFIX} FATAL: ${OUT_IF} sysctl 不符合预期 → IPv6 SLAAC 不可用" >&2
+    echo "${LOG_PREFIX}   不符项：${_slaac_bad}" >&2
+    echo "${LOG_PREFIX}   期望（net_mode_sysctl_checks）：" >&2
+    net_mode_sysctl_checks | sed 's/^/     /' >&2
+    echo "${LOG_PREFIX}   常见原因：L2 compose 文件被改动，或 networks 段漏了 enable_ipv6: true" >&2
+    echo "${LOG_PREFIX}   排查：docker inspect ikev2-panel --format '{{.HostConfig.Sysctls}}'" >&2
+    echo "${LOG_PREFIX}   修复：docker compose -f docker-compose.${IKEV2_NETWORK_MODE}.yml down && docker compose -f docker-compose.${IKEV2_NETWORK_MODE}.yml up -d" >&2
+    exit 10
+  fi
+  unset _slaac_bad _slaac_shown _sc_path _sc_want _sc_real _sc_got
+fi
 
 # ---------- 3.5. 修 IPv4 出向路由 + FORWARD ACCEPT（v2-78 + v2-79 自动化）----------
 # 背景：v2-76 拨号成功后客户端能拿到 IP 但无法访问公网。
@@ -576,6 +914,9 @@ if [ "$IKEV2_IPV6_ONLY" = "true" ]; then
     if [ -f "$NFT_TEMPLATE" ]; then
       NFT_RUNTIME="/run/ikev2-panel/ikev2.nft"
       mkdir -p /run/ikev2-panel
+      # 标记「本次启动确实要装这张表」。§7.9 的完整性校验循环据此决定
+      # 是真去补救，还是压根不该跑（见 §7.9 开头说明）。
+      NFT_EXPECTED=1
       sed -e "s|@OUT_IF4@|${OUT_IF}|g" \
           -e "s|@OUT_IF6@|${OUT_IF}|g" \
           -e "s|@VPN_SUBNET4@|${IKEV2_VPN_SUBNET}|g" \
@@ -700,7 +1041,7 @@ fi
 #   - 容器重启 = /data 还在 = account 复用 = 不会触发 LE rate-limit
 # 跟 nginx-proxy/acme-companion / mailcow 等成熟项目做法一致。
 
-# ---------- 4.6. DDoS 防护（v2.86-PR9 修正：改用 DOCKER-USER + trap 兜底）----------
+# ---------- 4.6. DDoS 防护（v2.86-PR9 修正；v2.86-PR20 按模式选链）----------
 # 背景：
 #   - 审计 Top-10 #10 + 2024 多起 IKE_SA_INIT flood 把家用 VPS charon 拍挂
 #   - v2.86-PR9 原始方案：往 INPUT 链 -I connlimit/hashlimit
@@ -713,7 +1054,14 @@ fi
 #      - 容器 down → DOCKER-USER 还在但规则被 daemon 重新生成时刷掉 → **天然幂等**
 #      - 不用动 INPUT/FORWARD，宿主防火墙不被污染
 #   2. 加 trap EXIT/TERM/INT 兜底：即便 docker kill -9 让 trap 拿不到，
-#      下次容器启动时 §4.7 cleanup-on-startup 会清 DOCKER-USER 里残留的旧规则
+#      次日容器启动时 §4.7 cleanup-on-startup 会清 DOCKER-USER 里残留的旧规则
+#
+# v2.86-PR20 模式差异：
+#   host    → 目标链 DOCKER-USER（共享宿主 netns，docker daemon 建这条链）
+#   macvlan / ipvlan → 目标链 INPUT（容器私有 netns，docker daemon 不在容器内建链；
+#                     走容器自己的 INPUT 链，同样覆盖到入站 UDP 500/4500，
+#                     且规则随容器销毁而消失，天然无残留）
+#   两种模式都用同一个 §4.7 清理函数，按 net_mode_ddos_chain 取链名。
 #
 # 设计权衡：
 #   - connlimit：每 IP 最大 50 并发 SA（家用 1-50 人，每人 ≤ 2 设备 = 100 并发上限）
@@ -724,16 +1072,19 @@ fi
 #
 # v2.86-PR9：默认阈值，可通过 IKEV2_CONNLIMIT_PER_IP / IKEV2_HASHLIMIT_PER_MIN 调。
 
+DDOS_CHAIN="$(net_mode_ddos_chain "$IKEV2_NETWORK_MODE")"
+
 apply_ddos_protection() {
   local iptables_bin="$1"
+  local chain="$DDOS_CHAIN"
   if ! command -v "$iptables_bin" >/dev/null 2>&1; then
     echo "${LOG_PREFIX} WARN: $iptables_bin not found, skipping DDoS protection" >&2
     return 0
   fi
 
-  # DOCKER-USER 链可能不存在（host 网络模式下 docker daemon 不一定建）
+  # host 模式下 DOCKER-USER 链可能不存在（docker daemon 不一定建）
   # 不存在 → 跳过（host 网络本身没 docker 网桥,这条规则意义不大）
-  if ! "$iptables_bin" -nL DOCKER-USER >/dev/null 2>&1; then
+  if [ "$chain" = "DOCKER-USER" ] && ! "$iptables_bin" -nL "$chain" >/dev/null 2>&1; then
     echo "${LOG_PREFIX} $iptables_bin DOCKER-USER chain not present (host net?), skipping DDoS protection"
     return 0
   fi
@@ -743,29 +1094,65 @@ apply_ddos_protection() {
 
   # 幂等：检查规则是否已存在（用 comment 锚点定位我们自己的规则）
   # 不用 -C 因为 connlimit/hashlimit 的全规则匹配会因为 comment 不同漏判
-  if "$iptables_bin" -nL DOCKER-USER 2>/dev/null | grep -q "v2.86-PR9 connlimit per-IP SA cap"; then
-    echo "${LOG_PREFIX} $iptables_bin connlimit (DOCKER-USER) already present"
+  if "$iptables_bin" -nL "$chain" 2>/dev/null | grep -q "v2.86-PR9 connlimit per-IP SA cap"; then
+    echo "${LOG_PREFIX} $iptables_bin connlimit (${chain}) already present"
   else
-    "$iptables_bin" -I DOCKER-USER 1 -p udp --dport 500 \
+    "$iptables_bin" -I "$chain" 1 -p udp --dport 500 \
       -m connlimit --connlimit-above "$CONNLIMIT_PER_IP" --connlimit-mask 32 \
       -m comment --comment "v2.86-PR9 connlimit per-IP SA cap" \
       -j DROP \
-      && echo "${LOG_PREFIX} $iptables_bin connlimit (UDP/500, DOCKER-USER) added" \
+      && echo "${LOG_PREFIX} $iptables_bin connlimit (UDP/500, ${chain}) added" \
       || echo "${LOG_PREFIX} WARN: failed to add $iptables_bin connlimit" >&2
   fi
 
-  if "$iptables_bin" -nL DOCKER-USER 2>/dev/null | grep -q "v2.86-PR9 new-SA rate per IP"; then
-    echo "${LOG_PREFIX} $iptables_bin hashlimit (DOCKER-USER) already present"
+  if "$iptables_bin" -nL "$chain" 2>/dev/null | grep -q "v2.86-PR9 new-SA rate per IP"; then
+    echo "${LOG_PREFIX} $iptables_bin hashlimit (${chain}) already present"
   else
-    "$iptables_bin" -I DOCKER-USER 2 -p udp --dport 500 \
+    "$iptables_bin" -I "$chain" 2 -p udp --dport 500 \
       -m hashlimit --hashlimit-above "${HASHLIMIT_PER_MIN}/min" --hashlimit-burst 10 \
       --hashlimit-mode srcip --hashlimit-name ikev2_ddos \
       -m comment --comment "v2.86-PR9 new-SA rate per IP" \
       -j DROP \
-      && echo "${LOG_PREFIX} $iptables_bin hashlimit (UDP/500, DOCKER-USER) added" \
+      && echo "${LOG_PREFIX} $iptables_bin hashlimit (UDP/500, ${chain}) added" \
       || echo "${LOG_PREFIX} WARN: failed to add $iptables_bin hashlimit" >&2
   fi
 }
+
+# ---------- 4.5c. §4.7.1 启动清理（必须早于 §4.6 加规则）----------
+# 顺序很关键：这里清的是"上一轮容器留下的"锚点规则。放在 §4.6 之后的话，
+# 刚加进去的规则会被自己刚跑完的清理按同样的 comment 锚点删掉 —— 表现为
+# entrypoint 日志打印 "connlimit ... added"，重启后 DOCKER-USER 却是空的。
+# 背景与设计权衡见 §4.7（退出时 trap 与本函数对称）。
+cleanup_ikev2_iptables_rules() {
+  local iptables_bin="$1"
+  local chain="$DDOS_CHAIN"
+  if ! command -v "$iptables_bin" >/dev/null 2>&1; then
+    return 0
+  fi
+  # 1) 清目标链里带 v2.86-PR9 锚点的规则(DDoS 防护)
+  if "$iptables_bin" -nL "$chain" >/dev/null 2>&1; then
+    local line_nums
+    line_nums=$("$iptables_bin" -nL "$chain" --line-numbers 2>/dev/null \
+      | awk '/v2.86-PR9 connlimit per-IP SA cap/ {print $1}' \
+      | tac)
+    for n in $line_nums; do
+      "$iptables_bin" -D "$chain" "$n" 2>/dev/null || true
+    done
+    line_nums=$("$iptables_bin" -nL "$chain" --line-numbers 2>/dev/null \
+      | awk '/v2.86-PR9 new-SA rate per IP/ {print $1}' \
+      | tac)
+    for n in $line_nums; do
+      "$iptables_bin" -D "$chain" "$n" 2>/dev/null || true
+    done
+  fi
+}
+
+if command -v "$NFT_CMD" >/dev/null 2>&1; then
+  $NFT_CMD delete table ip ikev2  2>/dev/null || true
+  $NFT_CMD delete table ip6 ikev26 2>/dev/null || true
+fi
+cleanup_ikev2_iptables_rules "iptables" 2>/dev/null || true
+cleanup_ikev2_iptables_rules "ip6tables" 2>/dev/null || true
 
 if [ "${IKEV2_DISABLE_DDOS_PROTECTION:-false}" = "true" ]; then
   echo "${LOG_PREFIX} DDoS protection disabled (IKEV2_DISABLE_DDOS_PROTECTION=true)"
@@ -777,54 +1164,25 @@ else
 fi
 
 # ---------- 4.7. 启动时清理残留 + 退出时 trap 清理 ----------
-# 目的:解决"容器 restart 循环 + iptables INPUT 残留"的污染问题。
+# 目的:解决"容器 restart 循环 + iptables 规则残留"的污染问题。
 #
 # v2.86-PR12.16 重大改动:不再清理 iptables FORWARD / nat / mangle 链(我们的规则
 # 全在自定义 nft 表 ikev2 / ikev26 里,docker daemon 不碰 → 无残留风险)。
-# 只需清 §4.6 DDoS 加的 DOCKER-USER 规则(DOCKER-USER 是 daemon 管的链,会被
-# daemon 重写 → 我们的 connlimit/hashlimit 会残留 → 必须显式清)。
+# 只需清 §4.6 DDoS 加的链规则(host 模式是 DOCKER-USER,daemon 会重写 → 我们的
+# connlimit/hashlimit 会残留 → 必须显式清)。
+#
+# v2.86-PR20:L2 模式下目标链是容器自己的 INPUT,容器销毁即消失,理论上无残留;
+# 但 docker exec 里手工加过规则、或 kill -9 后 netns 被复用的极端情况仍需清理,
+# 所以统一按 DDOS_CHAIN 清理,行为对称。
 #
 # 两层防护:
-#   1. **启动时清理**:清 DOCKER-USER 链里属于本项目的旧规则(v2.86-PR9 注释锚点)
-#      + nft delete table ip ikev2 / ip6 ikev26(双保险,kill -9 兜底)
+#   1. **启动时清理**(§4.5c,在 §4.6 加规则之前跑):清目标链里属于本项目的旧规则
+#      (v2.86-PR9 注释锚点)+ nft delete table ip ikev2 / ip6 ikev26(双保险,kill -9 兜底)
 #      - 处理 docker kill -9 场景(trap 没机会跑,下次启动补清)
-#   2. **退出时 trap**:docker stop SIGTERM / docker kill 优雅退出时清 DOCKER-USER + nft
+#   2. **退出时 trap**(这里):docker stop SIGTERM / docker kill 优雅退出时清规则 + nft
 #      - 兼顾正常 docker-compose down / restart
 
-cleanup_ikev2_iptables_rules() {
-  local iptables_bin="$1"
-  if ! command -v "$iptables_bin" >/dev/null 2>&1; then
-    return 0
-  fi
-  # 1) 清 DOCKER-USER 链里带 v2.86-PR9 锚点的规则(DDoS 防护)
-  if "$iptables_bin" -nL DOCKER-USER >/dev/null 2>&1; then
-    local line_nums
-    line_nums=$("$iptables_bin" -nL DOCKER-USER --line-numbers 2>/dev/null \
-      | awk '/v2.86-PR9 connlimit per-IP SA cap/ {print $1}' \
-      | tac)
-    for n in $line_nums; do
-      "$iptables_bin" -D DOCKER-USER "$n" 2>/dev/null || true
-    done
-    line_nums=$("$iptables_bin" -nL DOCKER-USER --line-numbers 2>/dev/null \
-      | awk '/v2.86-PR9 new-SA rate per IP/ {print $1}' \
-      | tac)
-    for n in $line_nums; do
-      "$iptables_bin" -D DOCKER-USER "$n" 2>/dev/null || true
-    done
-  fi
-}
-
-# §4.7.1 启动时清理(kill -9 兜底)
-#   - 删自定义 nft 表(双保险,kill -9 残留也清掉)
-#   - 清 DOCKER-USER 残留的 §4.6 DDoS 规则
-if command -v "$NFT_CMD" >/dev/null 2>&1; then
-  $NFT_CMD delete table ip ikev2  2>/dev/null || true
-  $NFT_CMD delete table ip6 ikev26 2>/dev/null || true
-fi
-cleanup_ikev2_iptables_rules "iptables" 2>/dev/null || true
-cleanup_ikev2_iptables_rules "ip6tables" 2>/dev/null || true
-
-# §4.7.2 退出时 trap(优雅退出兜底)
+# ---------- 4.7b. 退出时 trap（优雅退出兜底）----------
 # 注意:trap 的命令会在脚本任意退出点触发,包括 §12 exec 后的子进程继承。
 # 用函数包一层,避免 trap 影响 charon / Go 进程启动。
 _on_exit_cleanup() {
@@ -906,7 +1264,11 @@ if [ -f /etc/swanctl/swanctl.conf ]; then
   fi
   sed -i "s|%IKEV2_SERVER_CN%|${SWAN_LOCAL_ID}|g" "$SWAN_TMP_CONF"
   echo "${LOG_PREFIX} local.id = ${SWAN_LOCAL_ID} (cert CN)"
-  sed -i "s|%IKEV2_OUT_IF%|${OUT_IF}|g" "$SWAN_TMP_CONF"
+  # v2.86-PR20:这里原先还有一行 `sed -i "s|%IKEV2_OUT_IF%|${OUT_IF}|g"`，
+  # 已删除 —— 模板 configs/swanctl-ipv6-only.conf 里从来没有这个占位符
+  # （实测 grep 命中 0 次），是个从不生效的空转 sed。
+  # OUT_IF 真正的传递方式是环境变量：§0.1 export IKEV2_OUT_IF，
+  # 由 ikev2-updown / DDNS / ipv6watch 读取，swanctl.conf 不需要它。
 
   # 证书文件名：LE 模式用 $DOMAIN.pem，自签模式用 server.cert.pem
   if [ "${IKEV2_CERT_MODE:-self-signed}" = "letsencrypt" ] && [ -n "${IKEV2_DOMAIN:-}" ]; then
@@ -1302,8 +1664,19 @@ check_ikev2_rules() {
 #       "用户自定义规则"插入点,不会被 docker 自己清理。
 #
 # 幂等:先 -C 检查再 -I,避免重复累积。
+#
+# v2.86-PR20:仅 host 模式需要这一步。
+#   host    : 容器共享宿主 netns,docker daemon 的 FORWARD policy=drop 会拦下
+#             ipsec0 转发流量,必须往 DOCKER-USER 插 ACCEPT。
+#   L2 模式 : 容器私有 netns,FORWARD 链 policy=accept(容器自己的 netns 里
+#             docker daemon 不插规则),nft ikev2 表里的 accept 已经是终态,
+#             **不需要**也不能往 DOCKER-USER 插 —— 容器内根本没有这条链。
 # ---------------------------------------------------------------------------
 ensure_docker_user_accept() {
+  # L2 模式:私有 netns 里没有 DOCKER-USER 链,直接返回(不是错误)
+  if ! net_mode_has_docker_user "$IKEV2_NETWORK_MODE"; then
+    return 0
+  fi
   _ipt="$(command -v iptables || true)"
   _ip6t="$(command -v ip6tables || true)"
   # -i ipsec0:客户端解封后的包进入宿主机转发
@@ -1345,45 +1718,74 @@ re_add_ikev2_rules() {
   return 1
 }
 
-while true; do
-  if check_ikev2_rules; then
-    echo "${LOG_PREFIX} nft ikev2/ikev26 ruleset verified after $IPTABLES_RETRY retries"
-    rm -f "$IPTABLES_HEALTHZ_DIR/iptables-warn.flag" 2>/dev/null || true
-    break
-  fi
-  IPTABLES_RETRY=$((IPTABLES_RETRY + 1))
-  if [ "$IPTABLES_PHASE2" = "0" ] && [ "$IPTABLES_RETRY" -ge "$IPTABLES_RETRY_PHASE1" ]; then
-    IPTABLES_PHASE2=1
-    echo "${LOG_PREFIX} phase1 retry exhausted, entering slow retry phase (5s interval, max ${IPTABLES_RETRY_PHASE2} more)" >&2
-  fi
-  if [ "$IPTABLES_RETRY" -ge $((IPTABLES_RETRY_PHASE1 + IPTABLES_RETRY_PHASE2)) ]; then
-    echo "${LOG_PREFIX} ERROR: nft ikev2/ikev26 ruleset not stable after $IPTABLES_RETRY retries" >&2
-    echo "${LOG_PREFIX}   → VPN SA 协商可能正常,但客户端无法访问公网(转发被 DROP)" >&2
-    echo "${LOG_PREFIX}   → 可疑根因:nft 服务异常 / docker 切换 iptables=false" >&2
-    echo "${LOG_PREFIX}   → 排查: docker exec <ctr> nft list table ip ikev2" >&2
-    # sentinel 文件,Go 进程 healthz 检测后 banner 提示
-    printf 'iptables_unstable=true retries=%s timestamp=%s\n' \
-      "$IPTABLES_RETRY" "$(date -u +%FT%TZ)" \
-      > "$IPTABLES_HEALTHZ_DIR/iptables-warn.flag" 2>/dev/null || true
-    break
-  fi
-  echo "${LOG_PREFIX} nft ruleset missing, re-applying (retry $IPTABLES_RETRY)"
-  if ! re_add_ikev2_rules; then
-    echo "${LOG_PREFIX}   re_add_ikev2_rules returned non-zero, will retry" >&2
-  fi
-  if [ "$IPTABLES_PHASE2" = "1" ]; then sleep 5; else sleep 1; fi
-done
+# v2.86-PR20 审查修复：先看 §3.5 到底有没有打算装这张表。
+#
+# §3.5 的 nft 装载被两层条件包住：
+#     if [ "$IKEV2_IPV6_ONLY" = "true" ]; then
+#       if [ -z "$V4_GW" ]; then ...skip... else ...装表... fi
+#     fi
+# 所以以下两种配置下 **从头到尾就不该有这张表**：
+#   - IKEV2_IPV6_ONLY=false（双栈 / 纯 IPv4 部署）
+#   - IKEV2_IPV6_ONLY=true 但宿主没有 IPv4 默认路由（纯 IPv6 主机，很常见）
+#
+# 而本循环原来是无条件执行的。check_ikev2_rules 永远返回非 0 →
+# 跑满 phase1+phase2 = 10×1s + 50×5s = **260 秒**才退出，
+# 还会写一个 iptables-warn.flag 假告警，让面板 banner 报
+# 「VPN 客户端无法访问公网」—— 而实际是这条路径压根不适用。
+# 表现为纯 IPv6 主机启动卡 4 分钟，是很典型的「首次部署以为挂了」。
+#
+# NFT_EXPECTED 由 §3.5 在真正进入装载分支时置 1。
+if [ "${NFT_EXPECTED:-0}" != "1" ]; then
+  echo "${LOG_PREFIX} nft ikev2/ikev26 not applicable (IPV6_ONLY=${IKEV2_IPV6_ONLY}, V4_GW=${V4_GW:-none}), skipping integrity check"
+else
+  while true; do
+    if check_ikev2_rules; then
+      echo "${LOG_PREFIX} nft ikev2/ikev26 ruleset verified after $IPTABLES_RETRY retries"
+      rm -f "$IPTABLES_HEALTHZ_DIR/iptables-warn.flag" 2>/dev/null || true
+      break
+    fi
+    IPTABLES_RETRY=$((IPTABLES_RETRY + 1))
+    if [ "$IPTABLES_PHASE2" = "0" ] && [ "$IPTABLES_RETRY" -ge "$IPTABLES_RETRY_PHASE1" ]; then
+      IPTABLES_PHASE2=1
+      echo "${LOG_PREFIX} phase1 retry exhausted, entering slow retry phase (5s interval, max ${IPTABLES_RETRY_PHASE2} more)" >&2
+    fi
+    if [ "$IPTABLES_RETRY" -ge $((IPTABLES_RETRY_PHASE1 + IPTABLES_RETRY_PHASE2)) ]; then
+      echo "${LOG_PREFIX} ERROR: nft ikev2/ikev26 ruleset not stable after $IPTABLES_RETRY retries" >&2
+      echo "${LOG_PREFIX}   → VPN SA 协商可能正常,但客户端无法访问公网(转发被 DROP)" >&2
+      echo "${LOG_PREFIX}   → 可疑根因:nft 服务异常 / docker 切换 iptables=false" >&2
+      echo "${LOG_PREFIX}   → 排查: docker exec <ctr> nft list table ip ikev2" >&2
+      # sentinel 文件,Go 进程 healthz 检测后 banner 提示
+      printf 'iptables_unstable=true retries=%s timestamp=%s\n' \
+        "$IPTABLES_RETRY" "$(date -u +%FT%TZ)" \
+        > "$IPTABLES_HEALTHZ_DIR/iptables-warn.flag" 2>/dev/null || true
+      break
+    fi
+    echo "${LOG_PREFIX} nft ruleset missing, re-applying (retry $IPTABLES_RETRY)"
+    if ! re_add_ikev2_rules; then
+      echo "${LOG_PREFIX}   re_add_ikev2_rules returned non-zero, will retry" >&2
+    fi
+    if [ "$IPTABLES_PHASE2" = "1" ]; then sleep 5; else sleep 1; fi
+  done
+fi
 
-# ---------- 7b. v2.86-PR19(A12):DOCKER-USER ACCEPT ----------
+# ---------- 7b. v2.86-PR19(A12):DOCKER-USER ACCEPT（仅 host 模式）----------
 # nft 自定义表的 accept 不终止跨 chain 遍历(见 ensure_docker_user_accept 注释),
 # 必须额外往 iptables 的 DOCKER-USER 链插 ACCEPT 才能真正放行 ipsec0 转发。
 # 放在规则校验循环之后 —— DOCKER-USER 链由 docker daemon 创建,首次启动时
 # 可能还没就绪,这里已确保前面的循环至少跑过一轮。
-ensure_docker_user_accept
-if command -v iptables >/dev/null 2>&1 && iptables -C DOCKER-USER -i ipsec0 -j ACCEPT 2>/dev/null; then
-  echo "${LOG_PREFIX} DOCKER-USER ACCEPT rules present (ipsec0 in/out, v4+v6)"
+#
+# v2.86-PR20:L2 模式下这一步整体跳过(见函数内注释)。此时容器私有 netns 的
+# FORWARD 链 policy=accept,nft ikev2/ikev26 表里的 iifname ipsec0 accept
+# 就是终态,不需要任何 iptables hack。
+if net_mode_has_docker_user "$IKEV2_NETWORK_MODE"; then
+  ensure_docker_user_accept
+  if command -v iptables >/dev/null 2>&1 && iptables -C DOCKER-USER -i ipsec0 -j ACCEPT 2>/dev/null; then
+    echo "${LOG_PREFIX} DOCKER-USER ACCEPT rules present (ipsec0 in/out, v4+v6)"
+  else
+    echo "${LOG_PREFIX} WARN: failed to install DOCKER-USER ACCEPT; VPN clients may not reach the internet" >&2
+  fi
 else
-  echo "${LOG_PREFIX} WARN: failed to install DOCKER-USER ACCEPT; VPN clients may not reach the internet" >&2
+  echo "${LOG_PREFIX} [network-mode] ${IKEV2_NETWORK_MODE}: skipping DOCKER-USER ACCEPT (private netns, FORWARD policy=accept)"
 fi
 
 # ---------- 8. exec Go 进程（接管 PID 1，收到信号时优雅关闭）----------

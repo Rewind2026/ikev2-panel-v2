@@ -262,6 +262,9 @@ COPY scripts/ikev2-updown                     /usr/local/bin/ikev2-updown
 COPY scripts/renew-cert.sh                    /etc/ikev2-panel/scripts/renew-cert.sh
 COPY scripts/ikev2-reload.sh                  /usr/local/bin/ikev2-reload.sh
 COPY scripts/ikev2.nft.template               /etc/ikev2-panel/scripts/ikev2.nft.template
+# v2.86-PR20:网络模式规格表（host / macvlan / ipvlan 的唯一数据源）。
+# entrypoint.sh 在容器内 source 这个路径，缺文件会 exit 12。
+COPY scripts/network-mode.sh                  /etc/ikev2-panel/scripts/network-mode.sh
 COPY configs/swanctl-ipv6-only.conf           /etc/swanctl/swanctl.conf
 COPY configs/strongswan-filelog.conf          /etc/strongswan.d/filelog.conf
 # v2.86-PR13.2:logrotate 配置
@@ -280,10 +283,12 @@ RUN set -eux; \
     test -x /usr/lib/ipsec/charon || { echo "FATAL: missing /usr/lib/ipsec/charon"; exit 1; }; \
     test -f /usr/lib/ipsec/plugins/libstrongswan-vici.so || { echo "FATAL: missing vici plugin"; exit 1; }; \
     test -f /usr/lib/ipsec/plugins/libstrongswan-kernel-libipsec.so || { echo "FATAL: missing kernel-libipsec"; exit 1; }; \
+    test -f /etc/ikev2-panel/scripts/network-mode.sh || { echo "FATAL: missing network-mode.sh"; exit 1; }; \
     chmod +x /usr/local/bin/entrypoint.sh \
              /usr/local/bin/ikev2-updown \
              /usr/local/bin/ikev2-reload.sh \
-             /etc/ikev2-panel/scripts/renew-cert.sh
+             /etc/ikev2-panel/scripts/renew-cert.sh && \
+    chmod a+r /etc/ikev2-panel/scripts/network-mode.sh
 
 # 运行时目录
 RUN mkdir -p /etc/swanctl/conf.d \
@@ -401,6 +406,12 @@ VOLUME ["/data"]
 EXPOSE 500/udp 4500/udp 8443/tcp
 
 # tini 作 PID 1，负责信号转发与僵尸回收
-# docker compose 配：默认 host 网络（公网 IPv6 必须共享宿主网卡），可选 bridge+ipvlan
-#   + cap_add NET_ADMIN/NET_BIND_SERVICE/SYS_ADMIN + /dev/net/tun（commit 24）
+# docker compose 配（v2.86-PR20）：
+#   默认 host 网络（network_mode: host，公网 IPv6 必须共享宿主网卡）
+#   可选 macvlan / ipvlan（docker-compose.{macvlan,ipvlan}.yml 提供，L2 独立 IP）
+#   cap_add NET_ADMIN / NET_RAW / NET_BIND_SERVICE / CHOWN / DAC_OVERRIDE / FOWNER
+#   + /dev/net/tun（commit 24）
+#
+# 注意：早期注释写的 SYS_ADMIN 已在 v2.86-PR11 移除（删除 privileged: true 时一并去掉）。
+# 三种模式都不需要 SYS_ADMIN：forwarding 自愈只需 NET_ADMIN 写 /proc/sys。
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]

@@ -18,6 +18,513 @@ hotfix。升级前请重点看目标版本的「⚠️ 行为变更」。
 
 ---
 
+## v2.87（2026-10-20）— 配置统一：面板设置页 + 前端校验 + entrypoint 顺序修复
+
+把原先只能手改 `.env` / compose 的配置项搬进面板。三批改动：批次 D（17 项已有项
+可视化）、批次 E（8 项部署级参数）、以及本轮实机验收中发现并修掉的 3 个 bug。
+
+### 核心：配置优先级链
+
+```
+panelstate(/data/panel-state/settings.json) > env(IKEV2_*) > 代码 factory 默认值
+```
+
+**三态语义**：`key` 缺失 / 指针 `nil` = 跟随 env；`key` 存在且为 `false`/`0` =
+面板显式覆盖。不使用 `null`（无法区分「未设置」与「显式清空」），全部字段带
+`omitempty`。`schema_version` 兼容老文件 —— 旧配置不会因本次升级突然失效。
+
+### 批次 D — 17 项已有 env 参数进面板
+
+`internal/panelstate/settings.go` 是唯一真相源：字段 + 常量 + `Validate()`。
+`internal/runtime.Merge()` 负责 env → 覆盖值的合并。
+
+### 批次 E — 8 项新参数
+
+`log_level` / `log_format` / `audit_retention_days` / `connlimit_per_ip` /
+`hashlimit_per_min` / `disable_mss_clamp` / `disable_ddos_protection` / `nft_family`
+
+**生效方式分两类**（`log_level` 用 `slog.LevelVar` 运行期立即生效，其余需重启）：
+
+| 字段 | 生效 | 原因 |
+|------|------|------|
+| `log_level` | 运行期立即 | `slog.LevelVar` + `config.SetLogLevel` |
+| `log_format` | 需重启 | slog handler 类型启动时定死 |
+| `audit_retention_days` | 需重启 | entrypoint 写 cron |
+| `connlimit_per_ip` / `hashlimit_per_min` | 需重启 | entrypoint 写 iptables/nft |
+| `disable_mss_clamp` | 需重启 | entrypoint §4 |
+| `disable_ddos_protection` | 需重启 | entrypoint §5 |
+| `nft_family` | 需重启 | entrypoint §4.5 |
+
+其余 17 项部署级参数（网卡 / 数据目录 / 监听端口等）只读展示在
+「部署级参数（只读）」折叠区 —— 运行时改它们要么不生效，要么直接把面板改成
+连不上自己，所以只展示当前值并指向 `.env`。
+
+### 前端校验
+
+三层拦截，任何一层都不依赖「浏览器恰好支持某特性」：
+
+1. **模板** `data-val-int` / `min` / `max` / `data-val-enum` / `data-val-bool`，
+   上下界从 `.Settings.ConnLimitMin` 等常量渲染，与后端同源，不在 JS 里写死
+2. **`initSettingsValidation()`**（`layout.html`，唯一 nonce 脚本块）——
+   `submit` capture 阶段逐项校验，有错 `preventDefault()` + 聚焦首个错误字段
+3. **服务端** `optInt` 对非整数直接返回 error → 400，整张表单不落盘
+
+表单刻意加 `novalidate`：「留空 = 跟随 env」是合法状态，且原生气泡文案随浏览器
+语言走。另有回归测试钉住「空串枚举必须放行」和「hidden 兜底必须排在 checkbox
+前面」两个易踩的坑。
+
+### ⚠️ 修掉的 3 个 bug
+
+**1. entrypoint 启动清理排在加规则之后（最严重）**
+
+原顺序是 §4.6 `apply_ddos_protection` 先加 `connlimit` / `hashlimit` 规则，
+§4.7.1 启动清理再**按同样的 comment 锚点**把规则删掉。表现是 entrypoint 日志
+打印 `connlimit (UDP/500, DOCKER-USER) added`，重启后 `DOCKER-USER` 链却是空的
+—— 面板的 `connlimit_per_ip` / `hashlimit_per_min` **保存后完全不生效**。
+
+两段用同一个锚点，所以顺序错了自己不会报错。修复：把清理前移到 §4.5c，
+函数定义与调用顺序同步调整，退出时 trap 留在 §4.7 保持对称。
+回归保护见 `internal/panelstate/entrypoint_order_test.go`。
+
+**2. `optInt` 静默吞掉非法值**
+
+原实现解析失败时返回 `nil`（= 跟随 env）而不报错，非法输入被当「没填」静默丢弃。
+改为返回 error → 400。
+
+**3. 部署级参数表头压住第一行**
+
+全局 `thead th` 有 `position:sticky; top:var(--ikev2-topbar-h)`（48px），本意是
+让主列表表头吸顶。但 `.deploy-only-table-wrap` 带 `overflow-x:auto` —— 一个
+`auto` 的 X 轴会把 Y 轴也计算成 `auto`（CSS 规范行为），wrapper 成了滚动容器，
+表头改为相对它定位、被往下推 48px，正好压在第一行 `IKEV2_NETWORK_MODE` 上。
+
+修复：`.deploy-only-table th` 显式 `position:static`。
+
+### 验收
+
+`192.168.50.63` 实机，**host / macvlan / ipvlan 三种网络模式 × 8 项参数**全量
+真实浏览器测试：修改 → 保存 → 生效。macvlan/ipvlan 的限速规则落容器自己的
+`INPUT` 链（host 模式落宿主 `DOCKER-USER`），三种模式均实测到阈值生效。
+
+三种 compose（`docker-compose.yml` / `.macvlan.yml` / `.ipvlan.yml`）的
+`image` / `capabilities` / `volumes` / `tmpfs` / `environment` 一致性由
+`tests/network_mode_test.sh`（NM-30~NM-36）强制校验。
+
+---
+
+## v2.86-PR20（2026-10-16）— 网络模式抽象：host / macvlan / ipvlan
+
+在只有 host 的基础上增加 **macvlan** 与 **ipvlan** 两种 L2 独立 IP 模式，
+解决 host 覆盖不到的场景：宿主上 500/4500/8443 已被别的服务占用、需要多实例、
+需要容器在二层上有独立身份。
+
+**host 模式零改动兼容** —— 不改 `.env`、不改 `docker-compose.yml` 的
+`network_mode: host`，`docker compose up -d` 与改造前逐字节一致。
+
+### 设计：三个独立完整的 compose 文件 + 一张模式规格表
+
+| 文件 | 角色 |
+|------|------|
+| `docker-compose.yml` | **host 模式**（用默认文件名，老用户 `docker compose up -d` 零改动） |
+| `docker-compose.macvlan.yml` | **macvlan 模式**，完整独立 |
+| `docker-compose.ipvlan.yml` | **ipvlan 模式**，完整独立 |
+| `scripts/network-mode.sh` | **网络模式规格表**（唯一数据源），entrypoint source |
+| `scripts/up.sh` | 分发封装：读 `IKEV2_NETWORK_MODE` 选文件 + 建 `./logs` |
+
+**三个文件都是完整的，不做叠加**。这意味着：
+
+- ✅ 不需要 `!reset` / `!override` 标签 → **任何 Docker Compose 版本都能用，
+  不设版本下限**（早期设计用 override 时要求 ≥ 2.24.4，已取消）
+- ✅ 用户可以直接用 docker 官方命令，不需要经过 `up.sh`
+- ⚠️ 代价：三份服务定义（image / capabilities / volumes / tmpfs / environment）
+  必须保持一致，**改一处漏两处**是唯一的结构性风险
+
+针对最后这条，`tests/network_mode_test.sh` 的 **NM-29~NM-36** 强制校验三份一致：
+
+| 用例 | 校验内容 | 漏掉的后果 |
+|------|---------|-----------|
+| NM-29 | image / container_name / restart / pull_policy | 版本漂移 |
+| NM-30 | cap_add / cap_drop / devices / security_opt | 缺 FOWNER → chmod 失败 → 无限重启 |
+| NM-31 | 顶层卷名锁定 `ikev2-panel-data`、无 `external:` | **静默新建空卷 → panel.db / LE 证书全丢** |
+| NM-32 | 三条挂载（`/data`、`./logs`、`/host-sysctl.d`） | 数据或日志不落盘 |
+| NM-33 | tmpfs 三份一致 | 容器内进程写不进去 → 500 |
+| NM-34 | environment 键集合三份一致 | 某个模式下变量没透传 |
+| NM-35 | 14 个关键变量三份都在 | 同上 |
+| NM-36 | `IKEV2_NETWORK_MODE` **硬编码**且等于文件自身模式 | `.env` 覆盖 → 声明与实际 netns 不一致 |
+
+NM-31 尤其重要：`v2-72` 和 `PR19` 已各真实踩过一次「静默建空卷、panel.db 与
+LE 证书消失但面板照常显示」的坑，注释里还留着事故记录。这三份文件必须由测试守住。
+
+### 三模式的差异（全部收在 network-mode.sh）
+
+entrypoint 只 source `network-mode.sh`，里面定义能力开关（用返回码而非全局
+变量，规避 `set -euo pipefail`）、`net_mode_validate()` 全量校验、以及
+Docker 侧的差异（各 compose 文件的 networks 段）。
+
+| 关注点 | host | macvlan / ipvlan |
+|--------|------|------------------|
+| `IKEV2_OUT_IF` 语义 | 宿主网卡名 | **容器网卡名**（通常 `eth0`） |
+| DDoS 规则链 | `DOCKER-USER` | 容器私有 netns 内的 `INPUT` |
+| forwarding 持久化 | 写宿主 `/host-sysctl.d/99-ikev2.conf` | **不写**（per-netns，写宿主无效） |
+| IPv6 地址收敛 | 单次探测 | 3 次 × 2s 重试（等 DAD） |
+
+### ⚠️ 行为变更
+
+1. **L2 模式下 `IKEV2_OUT_IF` 的语义变成「容器网卡名」**。沿用宿主网卡名
+   （如 `ens18`）会 **FATAL `exit 14`**：该值在容器 netns 内不存在，
+   nft 模板会生成一条永不匹配的 `oifname` 规则 → MASQUERADE 静默失效 →
+   客户端能连 VPN 但出不了网。这是本次改造唯一「启动成功但功能不可用」的坑，
+   所以选择 FATAL 而非 WARN。**L2 模式下建议删掉这一行让脚本自动探测。**
+2. **L2 模式不再写宿主的 `/etc/sysctl.d/99-ikev2.conf`**。forwarding 是
+   per-netns 的，写宿主对容器那个 netns 毫无作用，只会留下误导性配置。
+3. **L2 模式的 DDoS 防护链从 `DOCKER-USER` 改为容器自己的 `INPUT`** ——
+   L2 模式容器是私有 netns，里面没有 `DOCKER-USER` 链，沿用会静默跳过防护。
+4. **换网络模式 = 换 compose 文件**，且必须重建容器。
+5. **`IKEV2_NETWORK_MODE` 在每份 compose 文件里硬编码为自身模式，不接受 `.env` 覆盖。**
+   网络由文件决定，变量只用于 entrypoint 内部的行为分支。早期用
+   `${IKEV2_NETWORK_MODE:-macvlan}` 有洞：`.env` 里残留的 `IKEV2_NETWORK_MODE=host`
+   会覆盖默认值，造成「容器在 macvlan netns 里、entrypoint 按 host 分支跑」——
+   DDoS 去找不存在的 `DOCKER-USER` 链（静默跳过防护）、`persist_sysctl` 误写宿主
+   sysctl.d、L2 的 SLAAC 运行时复核整个被跳过。NM-36 专门守这一条。
+6. **L2 模式下公网 IPv6 探测改为 3 次 × 2s 有限重试**（等 DAD 完成），
+   host 模式仍是单次，行为不变。
+7. `.env` 里已有 `IKEV2_NETWORK_MODE=bridge` 的用户不受影响 —— `bridge`
+   仍会被 FATAL 拒绝（v2.86-PR14 起已移除），只是报错文案更新。
+
+### 安全设计：把静默故障提前变成启动失败
+
+L2 模式引入了两处「能启动成功但功能不可用」的路径，都加了硬拦截：
+
+| 检查 | 失败行为 | 拦截的理由 |
+|------|---------|-----------|
+| `IKEV2_OUT_IF` 在容器 netns 内是否存在 | FATAL `exit 14` | 不校验会退化成 MASQUERADE 静默失效 |
+| L2 三条 sysctl 运行时回读（v4/v6 forwarding + `accept_ra`） | FATAL `exit 10` | 不复核则 sysctl 被静默忽略时 v4 正常、v6 永远拿不到 |
+
+`accept_ra=2` 是关键：内核的功能性默认是「forwarding 关闭时接受 RA、开启时不接受」，
+而本项目必开 forwarding，不显式覆盖就会丢掉所有 RA。
+所需配置在 L2 compose 文件里静态注入 —— 容器内 `/proc/sys` 是 ro，entrypoint 改不了。
+
+原设计中的 `IKEV2_L2_IPV6_SYSCTL` 开关被**删除**：compose 的配置是静态的，
+容器内也无法事后改这些 sysctl，这个开关只会制造「以为关掉了」的错觉。
+改为「始终强制注入 + 运行时回读复核」。
+
+### 实机验证修正（Docker 28.5.2 / Compose v2.40.3，192.168.50.63）
+
+在真实二层环境（parent=`ens18`，`192.168.50.0/24`，上游发 RA）验证后，
+修正了三处**静态审查发现不了**的问题：
+
+1. **sysctl 注入通道从 networks 段改为 service 段 `sysctls:`**
+   原方案的 `networks.ikev2-l2.options.com.docker.network.endpoint.sysctls`
+   有两个独立问题：
+   - `networks.<name>.options` **不是合法 Compose 字段**，
+     `docker compose config` 直接报 `additional properties 'options' not allowed`，
+     两个 L2 文件都起不来；
+   - 即便绕过 Compose 直接用 `docker network create -o`，该 driver option
+     在 macvlan/ipvlan 上实测**完全不生效**（容器内 `v6fwd=0 ra=1 gua=0`）。
+   改为 service 段 `sysctls:` 后实测 `v4fwd=1 v6fwd=1 ra=2 gua=1`。
+   逐条失败现象见 architecture.md §12.8.2。
+   之前注释里「service 段 sysctls 会被 runc 拒绝」的说法**只对 host 模式成立**
+   （host 模式共享 netns），已更正。
+
+2. **新增 `networks.ikev2-l2.enable_ipv6: true`**
+   不开的话 Docker 建端点时把 `disable_ipv6` 置 1，接口上收不到任何 RA
+   （实测 `dis6=1 gua=0`）。且这个值**无法**用 service 段 sysctls 改回来。
+
+3. **SLAAC 等待时长从 3 次 × 2s 改为 6 次 × 3s（最多 15s）**
+   原值最多等 4 秒，实测 GUA 收敛需要 2~5 秒（上游 RA 周期 + DAD），
+   4 秒不够，会间歇性 `exit 10`。
+
+另修复两个 entrypoint / 脚本缺陷：
+
+- **SLAAC 复核的子 shell 陷阱**：用 `net_mode_sysctl_checks | while read`
+  会把循环体放进子 shell，循环内的赋值传不回来 ——
+  「有不符合项」会被**静默当成通过**。改为 here-doc 重定向。
+- **`up.sh --no-detect` 会导致启动失败**：脚本声称该参数是 no-op，
+  但只 warn 没剔除，参数一路透传给 `docker compose up`，
+  Docker Compose v2.40.3 直接报 `unknown flag: --no-detect`。
+  现在真正消费掉该参数；其余参数用数组透传，避免引号污染。
+
+### 实机验证结果
+
+| 验证项 | 结果 |
+|--------|------|
+| `docker compose config` × 3 份文件 | 全部 rc=0 |
+| 镜像构建（Dockerfile 含 network-mode.sh 检查） | 成功 |
+| host 模式启动 | 正常，500/4500/8443 占用，`RestartCount=0`，FOWNER 已含 |
+| macvlan 全链路 | 正常，GUA 3s 收敛，v4/v6 forwarding=1，`RestartCount=0` |
+| ipvlan | 配置正确，但测试宿主 `ens18` 是 virtio 网卡，macvlan/ipvlan 均报 `device or resource busy`（同接口 macvlan 亦失败；改用 `docker0` 作 parent 时 ipvlan 正常）→ 属宿主限制，非配置问题 |
+| 退出码 12（7 个非法配置用例） | 全部正确拦截 |
+| 退出码 14（`IKEV2_OUT_IF` 不存在） | 正确拦截 |
+| `up.sh --no-detect` / 参数透传（6 用例） | 全部正确 |
+
+### 其他
+
+- 删除死变量 `IKEV2_ACTUAL_NETWORK_MODE`，改为真正写
+  `/run/ikev2-panel/netmode.env`（MODE / OUT_IF / DRIVER / HAS_OWN_IP /
+  PROCSYS_RW / DDOS_CHAIN 六个键），供 `docker exec` 排查。
+- `up.sh` 新增 `--help`，并把实际执行的 `docker compose` 命令原样打出来。
+- entrypoint 缺失 `network-mode.sh` 时 FATAL `exit 12`（镜像构建不完整）。
+- 退出码语义扩展：`12` 覆盖全量模式校验，`14` 覆盖 L2 模式的网卡不存在，
+  `10` 覆盖 L2 模式的 SLAAC 复核。原有语义不变。
+- 文档：architecture.md §11.1 改写为三模式、新增 §11.1.1 规格表说明与
+  §12.8.1 SLAAC 链路、§11.2 补 `FOWNER`、§11.4 补退出码；
+  TROUBLESHOOTING.md §1.3 拆为四个子节、新增 §1.7 L2 专项；
+  README.md 补三模式部署章节与 L2 前置条件。
+
+### 文档补漏（virtio 限制 + 限速作用域）
+
+补齐两处此前只在 CHANGELOG 里提过、但用户查不到的限制：
+
+| 缺口 | 补在哪 |
+|------|-------|
+| **父接口是 virtio 时 macvlan / ipvlan 都起不来** | `README.md` L2 前置条件表新增一行 + `ip -d link show` / `docker network create` 两条自查命令；`TROUBLESHOOTING.md` 新增 §1.7.6 专节（含 docker0 对照实验表、解法优先级） |
+| **L2 模式下 tc 限速作用域在容器 netns 内** | `README.md` 限速章节补充：宿主上 `tc qdisc show dev eth0` 查不到是正常的，排查一律用 `docker compose exec` |
+
+同时区分了两个容易混淆的报错：`device or resource busy`（父接口 virtio）
+与 `could not find an available, non-overlapping IPv4 address pool`
+（`IKEV2_L2_SUBNET` 与已有 Docker 网段重叠）。
+
+**仍未验证**：客户端连上 VPN 后经 IPv6 出口的**完整数据面出网**（已验证 GUA 获取、
+forwarding、SLAAC 复核，但未跑端到端 iperf）；macvlan 与 ipvlan 的
+**多用户并发丢包率对比**（§9.4 P-06）。后者需要一台非 virtio 父接口的宿主，
+当前测试机的 `ens18` 是 virtio（见上表）。
+
+**已验证**：见上方「实机验证结果」表 —— host 与 macvlan 两条路径已端到端跑通，
+单元测试 80/80，4 个文件语法检查通过。后续审查发现的缺陷与修复见下方
+[PR20 审查修复](#v286-pr20-审查修复2026-10-19)。
+
+---
+
+## v2.86-PR20 审查修复（2026-10-19）
+
+对 PR20 的三模式实现做了一次完整代码审查（合理性 / 可复用性 / 可优化空间）。
+结论是**设计成立、实现有洞**：三模式共用一张规格表、compose 显式内联、
+sysctl 注入通道这三项判断都站得住；但探测链和失败处理上有 4 个 P0、
+3 个 P1，外加 `up.sh` 维护了第二份校验实现。
+
+这 4 个 P0 有个共同点：**症状都是"启动成功、面板全绿、日志里没有任何异常"**，
+只能靠逐个功能试出来 —— 这也是它们此前一直没被发现的原因。
+
+### ⚠️ 行为变更
+
+| 变更 | 之前 | 之后 |
+|------|------|------|
+| **公网 IPv6 探测** | 从 `/proc/net/if_inet6` 取**每张网卡的第一条** `2000::/3` 地址，不看 DAD 状态 | 从 `ip -6 addr show` 取**任一** DAD 已收敛的 `2000::/3` 地址 |
+| **运行时 IPv6 监控**（`ipv6watch` / DDNS） | 同样把 scope 当 flags，`tentative`/`dadfailed` 地址会被选中 | 按位掩码过滤，只接受 DAD 已收敛的地址 |
+| **`IKEV2_OUT_IF` 下发** | 只存在于 entrypoint 局部变量，**从不 export** | `export`，容器内三个下游消费者都能读到 |
+| **L2 网段校验** | 不查每段是否 ≤255，也不拒前导 0 | `_nm_valid_octet` 严格 0-255 且无前导 0 |
+| **nft 规则校验** | 无条件执行，最多等 260 秒 | 仅在 §3.5 真的装了表时才执行 |
+| **纯 IPv6 主机启动** | 卡 260 秒后写 `iptables-warn.flag`（假告警） | 打印一行 `not applicable ... skipping` 后继续 |
+
+前三条会让**原本"看起来正常"的实例变成真的能用**：限速套错网卡、DDNS 指错接口、
+把未收敛地址写进 `local_addrs` 这类问题此前日志里没有任何异常，只能靠逐个功能试出来。
+
+### P0-1 — `detect_public_ipv6` 有两个独立缺陷
+
+**缺陷一：把 scope 当成了 flags。** 原实现判 `$4=="01" || $4=="00"`，
+而 `/proc/net/if_inet6` 的 `$4` 是 scope（`01`=loopback / `00`=global），
+flags 在 **`$5`**。所以 `tentative`（DAD 未完成）和 `dadfailed`（DAD 冲突）
+的地址从未被排除 —— 容器刚启动时会把一个**还没确认可用**的地址交给 charon。
+
+**缺陷二（本轮新发现，影响更大）：每张网卡只取第一条地址。** 内层
+`awk ... {print $1; exit}` 的 `exit` 只拿网卡上的第一条。而 macvlan/ipvlan 的
+容器 `eth0` 上，Docker 分配的 ULA（`fd48:...`）**必然先于** SLAAC 获得的 GUA 出现：
+
+```
+内层取到 fd48:...  →  外层 case 2xxx: 匹配不上 → 跳过
+                  →  外层下一轮仍喂同一网卡名 → 又取到同一条 ULA
+                  →  永远走不到 GUA，函数返回空
+```
+
+也就是说 **L2 模式下公网 IPv6 探测恒返回空** —— 而 L2 恰恰是最需要它的模式。
+实测对照（左 = 原实现，右 = 修复后）：
+
+| 场景 | 原实现 | 修复后 |
+|------|--------|--------|
+| L2：ULA 排在 GUA 之前 | `∅`（返回空） | `2408:832e:8a5:be0:...` ✅ |
+| L2：GUA 处于 `tentative` | 返回未收敛的地址 ❌ | `∅`（继续等） ✅ |
+| L2：GUA 处于 `dadfailed` | 返回冲突地址 ❌ | `∅` ✅ |
+| host：稳定 GUA | 正常 | 正常（不变） ✅ |
+| host：GUA 已 `deprecated` | 返回过期地址 ❌ | `∅` ✅ |
+
+**修复**是改用 `ip -6 addr show`，一次解决两个问题：它按**地址**逐行输出，
+不存在"每网卡取第一条"；并且输出里带 `tentative` / `dadfailed` / `deprecated`
+**文字标签**，直接匹配即可。
+
+> 刻意用文字标签而不是硬编码 `$5` 的位掩码（`0x20`=deprecated、
+> `0x40`=tentative、`0x80`=home/valid 等）—— 内核位含义可能随版本演进，
+> 文字标签才是稳定契约。`nodad`（跳过 DAD）是稳定态，**应当接受**。
+
+顺带修正 `2000::/3` 的上界：此前只匹配 `2xxx:`，漏掉 `3000::`–`3fff::`。
+
+### P0-2 — 探测到的 `OUT_IF` 从未 export，下游全部退回默认值
+
+§0.1 探测出网卡名后只写进了自己的局部变量，**没有 `export IKEV2_OUT_IF`**。
+三个下游消费者因此一直读各自的硬编码默认值：
+
+| 消费者 | 位置 | 此前实际用的值 |
+|--------|------|----------------|
+| `ikev2-updown` 的 `tc` 限速 | `scripts/ikev2-updown` | `IKEV2_OUT_IF:-eth0` → 恒为 `eth0` |
+| DDNS `Iface` | `cmd/ikev2-panel/main.go` | `os.Getenv(...)` → 空 |
+| `ipv6watch` `Iface` | `cmd/ikev2-panel/main.go` | 同上 |
+| `config.OutIf` | `internal/config/config.go` | `getenv(..., "eth0")` → `eth0` |
+
+host 模式下 `eth0` 恰好常常是对的（容器网卡就叫 eth0），所以**没人发现**；
+macvlan/ipvlan 模式下容器私有没有别的接口名可猜，症状是"限速好像没生效"、
+"DDNS 不更新"，且**日志里没有任何异常**。
+
+补上 `export IKEV2_OUT_IF="$OUT_IF"` 后，这条链路上容器内外读到同一个值。
+
+### P0-3 — `ipv6watch` 把 scope 当成 flags（与 P0-1 同型）
+
+`internal/swanctl/ipv6watch.go` 的 `detectGlobalV6` 里有和 P0-1 **完全同型**的
+字段索引错误，但发生在另一处 —— 而且这次影响的是**运行时**：
+
+```go
+addr32 := fields[0]
+dev    := fields[5]
+flags  := fields[3]   // ← 这是 scope，flags 在 fields[4]
+if flags == "10" { continue }
+```
+
+`/proc/net/if_inet6` 的第 4 字段是 **scope**（`00`=global / `20`=link / `10`=compat），
+第 5 字段才是 **flags**。本机实测：
+
+| addr | scope | flags | dev |
+|------|-------|-------|-----|
+| `::1` | `10` | `80` | lo |
+| `2408:...` | `00` | `00` | ens18 |
+| `fe80::...` | `20` | `80` | ens18 |
+| `2001:db8:...` | `00` | `c0` | veth-probe1 |
+
+所以原代码有两重失效：
+
+1. **`tentative` / `dadfailed` 从未被排除** —— 注释说"忽略 deprecated (0x10)"
+   实际是在拿 scope 跟字符串 `"10"` 比，flags 为 `0x10` 的 `deprecated` 地址
+   （scope 是 `00`）照样被选中。
+2. **scope 为 `10` 的地址被误杀** —— 只有 loopback 的 `::1` 命中，纯属巧合正确。
+
+后果落在 `ipv6watch` 与 DDNS 两处：ISP 重拨前缀后，本可能拿到一个**尚未 DAD 收敛**
+的地址写进 `local_addrs`，客户端连得上却拿不到地址，且**日志里没有任何异常**。
+DDNS 侧同理，会把一个不可用地址同步到 DNS。
+
+**修复**：把解析抽成纯函数 `parseIfInet6Line`，按位掩码过滤
+（`DADFAILED 0x08` / `DEPRECATED 0x10` / `TENTATIVE 0x40`），并保留
+`TEMPORARY 0x20`（隐私地址是稳定态，应当接受）。抽成纯函数是为了能脱离真实网卡
+做单元测试 —— 状态过滤是这个函数的全部价值，而它恰好是最容易写错索引的地方。
+
+顺带修正 `isGlobalV6`：只判首字符 `2`，漏掉 `3xxx::`–`3fff::` 整段
+（与 P0-1 同一个上界问题）。
+
+### P0-4 — L2 网段校验放过超范围 IPv4
+
+`network-mode.sh` 的 `_nm_valid_ipv4_cidr` 只查字符集与段数，**不查每段是否 ≤255**，
+于是 `IKEV2_L2_SUBNET=999.0.113.0/24` 能一路通过校验，直到 Docker 建网段才失败 ——
+而那时的报错完全指不到 `.env` 的哪一行。
+
+更隐蔽的是**前导 0**：POSIX sh 的 `$((010))` 按**八进制**求值得 8，
+Docker 侧按**十进制**得 10。同一份配置在两处算出不同的网络，且**不报错**，
+只表现为"网关莫名其妙不在子网内"。现在 `_nm_valid_octet` 显式拒绝前导 0
+（Go 1.17+ 的 `net.ParseIP` 同样拒绝，两边判定一致），早拒好过让用户拿到
+一条语焉不详的 docker 报错。
+
+### P1 三项一致性
+
+| 编号 | 问题 | 处理 |
+|------|------|------|
+| P1-1 | §7.9 规则完整性校验**无条件**执行，但表只在 `IPV6_ONLY=true` 且有 `V4_GW` 时才装 | §3.5 装表时置 `NFT_EXPECTED=1`，§7.9 据此守卫。真正适用的路径重试行为与上限**完全不变** |
+| P1-2 | `net_mode_out_if_is_host()` **零生产调用**，且语义与 `net_mode_has_docker_user()` 完全相同 | 直接删除（连带 NM-20），模式差异改由 §0.1 的存在性校验 + `export` 统一处理 |
+| P1-3 | `sed -i "s\|%IKEV2_OUT_IF%\|...\|g"` —— 模板里**从来没有**这个占位符（grep 命中 0 次） | 删除空转 sed，补注释说明 `OUT_IF` 走环境变量而非模板占位符 |
+
+P1-1 修掉的是纯 IPv6 主机上"启动卡 4 分钟 + 面板 banner 报『客户端无法访问
+公网』"的假告警 —— 不是规则不稳定，是那条路径压根不适用。
+
+### `up.sh` 复用 `network-mode.sh`：消除第二份校验实现
+
+`up.sh` 原先自带一份 `require_l2_env()`，与 `net_mode_validate()` 是同一件事的
+两份实现。规则一改就漂移 —— `net_mode_validate` 后加的 `PARENT != lo`、
+`GATEWAY` 必须落在 `SUBNET` 内、`macvlan_mode=passthru` 拦截，`up.sh` 全都不知道，
+只能等容器起来才 `exit 12`。现在 `up.sh` 在 `docker compose` **之前**就能报出与
+容器内完全一致的错误。
+
+沙箱行为测试 20/20 通过，其中三项是旧版会静默放行、新版能提前拦下的：
+
+| 场景 | 旧 `up.sh` | 新 `up.sh` |
+|------|-----------|-----------|
+| gateway 不在 subnet 内 | 放行 → 容器 `exit 12` | 启动前 ERR |
+| `parent=lo` | 放行 → 容器 `exit 12` | 启动前 ERR |
+| `macvlan_mode=passthru` | 放行 → 容器 `exit 12` | 启动前 ERR |
+
+细节：`network-mode.sh` 是纯 POSIX sh、零副作用，直接 `.` source；
+模式专属开关（`IKEV2_MACVLAN_MODE` / `IKEV2_IPVLAN_MODE` / `IKEV2_IPVLAN_FLAG`）
+只读取不 `export`，避免 `env_get` 与 Compose 自身 `.env` 解析的差异污染插值。
+
+### 测试：80 → 111
+
+新增 **NM-40~NM-56**。两条关键设计：
+
+**entrypoint 无法整体 source**（1200+ 行 + 大量顶层副作用），所以测试用 `awk`
+**原样抠出真实函数**，再用覆盖 `PATH` 的假 `ip` 喂 fixture —— 测的是**生产代码本身**：
+
+```sh
+DP6_SRC="$(awk '/^detect_public_ipv6\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$ENTRY_SH")"
+```
+
+**`ipv6watch` 同理**：把解析从 `detectGlobalV6`（依赖真实网卡）里抽成纯函数
+`parseIfInet6Line`，测试直接喂 `/proc/net/if_inet6` 的原始行文本。
+样本的 dev/scope/flags 三列取自本机真实文件，地址的 hex→冒号展开经 `cut`
+逐 4 字符核对（第一版测试期望是我手算的，结果算错了两处，被机械核对抓出来）。
+
+| 用例 | 覆盖 |
+|------|------|
+| NM-41~47 | `tentative` / `dadfailed` / `deprecated` 被跳过；`nodad` / `dynamic` 被接受；`3fff::` 上界；link-local / ULA / loopback 排除 |
+| NM-48 | entrypoint 存在 `export IKEV2_OUT_IF="$OUT_IF"` |
+| NM-49 | 模板无 `%IKEV2_OUT_IF%`，entrypoint 无对应死 `sed` |
+| NM-50~51 | `up.sh` source `network-mode.sh`、调用 `net_mode_validate`、已删除 `require_l2_env` |
+| NM-52 | **ULA 排在 GUA 前面时不遮蔽 GUA**（缺陷二的回归防护） |
+| NM-53~54 | `_nm_valid_ipv4` / `_nm_valid_ipv4_cidr` 的段数、≤255、前导 0 |
+| NM-55~56 | 超范围/前导 0 的子网必须由 **SUBNET 校验**拒下 |
+| Go: `TestParseIfInet6Line_DADFlags` | 12 条：稳定/temporary 接受，tentative/dadfailed/deprecated/link-local/loopback/ULA/网卡不匹配/字段不足/非 hex 全拒 |
+| Go: `TestParseIfInet6Line_SkipsTentativeAndFindsStable` | 逐行扫描时跳过不可用状态继续找 |
+
+**守护必须匹配具体报错文案，不能只 grep 变量名**。NM-55/56 一开始写成
+`grep -q 'IKEV2_L2_SUBNET'`，结果网关那条报错
+（`GATEWAY 不在 IKEV2_L2_SUBNET 内`）里也含这个变量名 —— 变异测试里
+两道关全被拆掉，用例照样通过。改成 `grep -q 'SUBNET=.*不是合法 IPv4 CIDR'`
+后，变异才会如实失败。同理 NM-49/50/51 只扫**可执行代码**
+（`code_only()` 先剥掉注释行），否则本文件里解释"为什么删掉那行 sed"的
+注释会让自己失败。
+
+**变异测试**验证过这些守护不是空跑：
+
+| 变异 | 失败数 |
+|------|--------|
+| `_nm_valid_ipv4` 退化成 `return 0` | 11 |
+| `_nm_valid_octet` 放开前导 0 | 3 |
+| `detect_public_ipv6` 还原为真实原始实现 | 7 |
+
+### 文档
+
+- architecture.md §11.1 —— "唯一静默故障"的表述已修正。原写法只提存在性校验，
+  会让人以为 `OUT_IF` 语义对了就没事；实际 P0-2 证明**不 export 更严重**。
+- architecture.md 新增 §12.8.3 —— nft 规则校验的 `NFT_EXPECTED` 守卫。
+- architecture.md §10 新增"§0.2 为什么要按 DAD 状态过滤" —— 记录
+  `/proc/net/if_inet6` 的真实字段布局与两个缺陷，避免后人重写回错版本。
+- architecture.md §11.1.1 —— 函数表删除 `net_mode_out_if_is_host`，
+  补 `up.sh` 复用说明；§1 / §11.1 的重试参数同步为 `6 次 × 3s`。
+
+### 本轮明确不改的
+
+无。上一版这里记的两处（`ipv6watch` 的 `fields[3]` 索引错误、
+`_nm_valid_ipv4_cidr` 不校验 ≤255）已在本轮作为 P0-3 / P0-4 修复。
+
+唯一保留的已知取舍：`ipv6watch` 的行解析仍走 `/proc/net/if_inet6` 而不是 netlink。
+这是刻意的 —— netlink 要引入 `golang.org/x/sys/unix` 依赖，而
+`/proc/net/if_inet6` 是内核长期稳定的 ABI，且与 entrypoint §0.2 的修复前
+实现同源，改一处只需记一次。
+
+---
+
 ## v2.86-pr24（2026-10-13）— 前端文本选择策略 + eye 按钮按压错位 + 文档体系重组
 
 `v2.86-pr23p` 之后攒了 7 个提交，本次一并定版。范围跨三块：一次全站 UI 审计的收尾

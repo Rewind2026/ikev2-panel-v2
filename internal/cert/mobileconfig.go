@@ -740,8 +740,8 @@ func xmlEscape(s string) string {
 //     logrotate / DDNS jitter retry
 //   - Sprint 3: VICI SA lifecycle 审计
 //
-// 详见 docs/CHANGELOG.md（v2.86）。
-const PanelVersion = "v2.86"
+// 详见 docs/CHANGELOG.md（v2.87）。
+const PanelVersion = "v2.87"
 
 // generateUUID RFC 4122 v4 随机 UUID。
 // mobileconfig 的 PayloadUUID/ProfileUUID 必须全局唯一，否则 iOS 覆盖会乱。

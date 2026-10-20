@@ -254,6 +254,35 @@
     </details>
 
     {{/*
+      v2.86 配置统一批次 D:面板设置卡。
+      放在 aliyun-card 之后、审计时间线之前 —— 它是"面板自身行为"的设置,
+      不属于证书 / 网络 / 凭证任何一类,单独一张卡避免塞进已有的卡里找不着。
+    */}}
+    <details class="settings-card" id="settings-card">
+      <summary>
+        <span class="settings-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+          </svg>
+        </span>
+        <span>面板设置</span>
+        <small class="header-note">
+          {{if .Settings.Configured}}
+            <span class="chip ok no-dot">面板接管</span>
+            · <code>{{.Settings.DisplayTimezone}}</code> · 会话 <code>{{.Settings.SessionTTL}}</code>
+          {{else}}
+            <span class="chip no-dot">跟随部署默认</span>
+            · <code>{{.Settings.EnvDisplayTimezone}}</code> · 会话 <code>{{.Settings.EnvSessionTTL}}</code>
+          {{end}}
+        </small>
+      </summary>
+      <div class="settings-body">
+        {{template "settings-card-content" .}}
+      </div>
+    </details>
+
+    {{/*
       v2.86-pr23a:DDNS 同步独立卡删除 — 配置完全并入 "阿里云 API" 卡末尾。
       原因:DDNS 跟 AccessKey 是同一个阿里云 DNS API 的子功能,用户认知里
       不应该有两个独立管理入口。访问路径:aliyun-card 展开 → 看到 AccessKey
@@ -508,7 +537,7 @@
   {{/* 配置表单 — 一站式 Domain/RR/EnableA/EnableAAAA/Period */}}
   <form method="POST" action="/api/ddns/config" id="ddns-config-form">
     <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-    {{/* v2.86-pr23f:主域名 — 之前只能从 env IKEV2_DDNS_DOMAIN 启动值读,
+    {{/* v2.86-pr23f:主域名 — 之前只能从 env ALIYUN_DOMAIN 启动值读,
        面板现在能改,持久化到 statefile(覆盖 env 启动值)。 */}}
     <div class="form-section">
       <label class="form-label" for="ddns-domain">主域名
@@ -750,7 +779,7 @@
 <pre style="background: rgba(0,0,0,0.35); padding: 0.6rem 0.8rem; border-radius: 4px; font-size: 0.75rem; margin: 0.4rem 0; overflow-x: auto;">
 environment:
   - IKEV2_DDNS_ENABLED=true        # 启用 DDNS 同步
-  - IKEV2_DDNS_DOMAIN=example.com   # 阿里云主域名</pre>
+  - ALIYUN_DOMAIN=example.com      # 阿里云主域名</pre>
         <p style="margin-top: 0.4rem;">
           改完 <code>docker compose up -d</code> 重启容器，这个「DNS 同步」块就会出现并可配置。
         </p>
@@ -799,5 +828,358 @@ environment:
       <button type="submit" class="btn-primary">保存并立即生效</button>
     </div>
   </form>
+</div>
+{{end}}
+
+{{/*
+  v2.86 配置统一批次 D/E:面板设置卡表单。
+
+  三种控件各自表达"跟随部署默认"的方式(服务端 optString / optBool / optInt 解析):
+    - 枚举  <select> 首项 "跟随 env 默认"(value="")
+    - 数值  <input type=number> 留空
+    - 布尔  checkbox 只能表达 开/关 两态,所以额外给一个
+           "跟随 env 默认"复选框;勾上它 → 服务端写 null(该 key 不落盘)
+
+  ⚠️ 明文 HTTP 入口存在时 Cookie Secure 开关禁用:浏览器在 http:// 下
+  拒收 Secure cookie,打开等于把自己锁在门外。
+
+  批次 E 新增:日志级别 / 日志格式 / 审计保留天数 / 限速阈值 ×2 /
+  MSS clamp / DDoS 防护 / nft 地址族。
+  其中只有「日志级别」运行期生效,其余由 entrypoint.sh 消费,需重启容器。
+*/}}
+{{define "settings-card-content"}}
+<div class="settings-body" style="padding: 0; background: transparent; border: 0;">
+  <p class="text-muted" style="margin-top: 0; font-size: 0.8125rem;">
+    这几项以前只能改 <code>.env</code> 再 <code>docker compose up -d</code>。
+    现在直接在这里改 —— 除了<strong>显示时区</strong>，其余保存后<strong>立即生效</strong>，不用重启容器。
+    <br>
+    <small>
+      配置来源：<code>{{if .Settings.Configured}}panelstate{{else}}env-default{{end}}</code>
+      · 留空 / 选「跟随 env 默认」即继续跟部署默认值走
+    </small>
+  </p>
+
+  {{/*
+    novalidate:刻意关掉浏览器原生校验。
+
+    原生约束在 min/max 越界时会弹浏览器自带的气泡,文案跟着浏览器语言走
+    (英文环境直接给一句 "Value must be less than or equal to 10000"),
+    和页面其余中文提示割裂;而且 type=number 的原生校验只在 submit 时触发,
+    用户改到一半就已经看到红框却不知道为什么。
+
+    关掉之后统一交给 initSettingsValidation():中文文案、即时反馈、
+    错误落在字段旁边而不是浮在屏幕中央。服务端 panelstate.Validate
+    仍是最终防线 —— 前端校验只是让人不必靠一次失败往返就知道填错了。
+  */}}
+  <form method="POST" action="/api/settings/save" data-settings-form novalidate>
+    <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+
+    <div class="form-section">
+      <label class="form-label" for="settings-tz">显示时区
+        <small style="color: var(--ikev2-fg-muted); font-weight: 400;">（面板时间、DDNS 记录时间、描述文件描述）</small>
+      </label>
+      <select id="settings-tz" name="display_timezone">
+        {{range .Settings.TimezoneOptions}}
+        <option value="{{.Value}}" {{if .Selected}}selected{{end}}>{{.Label}}</option>
+        {{end}}
+      </select>
+      <p class="form-hint">
+        当前：<code>{{.Settings.DisplayTimezone}}</code>
+        {{if .Settings.SetDisplayTimezone}}(面板设置)
+        {{else}}(跟随 <code>IKEV2_DISPLAY_TIMEZONE</code>，当前 <code>{{.Settings.EnvDisplayTimezone}}</code>)
+        {{end}}
+        · <strong>改完需 <code>docker compose restart</code> 生效</strong>
+      </p>
+    </div>
+
+    <div class="form-section">
+      <label class="form-label" for="settings-ttl">登录会话时长
+        <small style="color: var(--ikev2-fg-muted); font-weight: 400;">（多久不重新登录就失效）</small>
+      </label>
+      <select id="settings-ttl" name="session_ttl">
+        {{range .Settings.SessionTTLOptions}}
+        <option value="{{.Value}}" {{if .Selected}}selected{{end}}>{{.Label}}</option>
+        {{end}}
+      </select>
+      <p class="form-hint">
+        当前：<code>{{.Settings.SessionTTL}}</code>
+        {{if .Settings.SetSessionTTL}}(面板设置)
+        {{else}}(跟随 <code>IKEV2_SESSION_TTL</code>，当前 <code>{{.Settings.EnvSessionTTL}}</code>)
+        {{end}}
+        · 只影响<strong>新登录</strong>的会话，已登录的不受影响
+      </p>
+    </div>
+
+    <div class="form-section">
+      <span class="form-label">安全开关</span>
+
+      {{/*
+        hidden 空值兜底:未勾选时浏览器仍会提交 name=cookie_secure,值为 "",
+        服务端据此区分"显式关闭"与"没提交"。
+        明文 HTTP 入口存在时**不渲染**这个 hidden —— 浏览器不会提交 disabled
+        的 checkbox,两者都没有 → 服务端拿到 nil → 本项保持"跟随 env 默认",
+        不会因为用户来改个时区就把 cookie_secure=false 写死进文件。
+      */}}
+      <div class="switch-row">
+        {{if not .Settings.PlainHTTP}}<input type="hidden" name="cookie_secure" value="">{{end}}
+        <input type="checkbox" id="settings-cookie-secure" name="cookie_secure" value="true"
+               {{if .Settings.CookieSecure}}checked{{end}}
+               {{if .Settings.PlainHTTP}}disabled{{end}}>
+        <label for="settings-cookie-secure">
+          <span class="switch-label">Cookie Secure</span>
+          <small class="form-hint">
+            开启后登录 cookie 带 Secure 标志，只有 HTTPS 才回传。
+            {{if .Settings.PlainHTTP}}
+              <strong style="color: var(--ikev2-danger-fg);">已启用明文 HTTP 入口，浏览器会拒收 Secure cookie，本项锁定为关闭。</strong>
+            {{end}}
+          </small>
+        </label>
+      </div>
+      {{if .Settings.SetCookieSecure}}
+      <div class="switch-row switch-row--sub">
+        <input type="checkbox" id="settings-cookie-secure-follow" name="cookie_secure_follow" value="1">
+        <label for="settings-cookie-secure-follow">
+          <span class="switch-label switch-label--muted">跟随 env 默认</span>
+          <small class="form-hint">勾选后本项不再由面板接管，回到 <code>IKEV2_COOKIE_SECURE</code>（当前 <code>{{if .Settings.EnvCookieSecure}}true{{else}}false{{end}}</code>）</small>
+        </label>
+      </div>
+      {{end}}
+
+      <div class="switch-row">
+        <input type="hidden" name="trusted_proxy" value="">
+        <input type="checkbox" id="settings-trusted-proxy" name="trusted_proxy" value="true"
+               {{if .Settings.TrustedProxy}}checked{{end}}>
+        <label for="settings-trusted-proxy">
+          <span class="switch-label">信任反向代理</span>
+          <small class="form-hint">
+            面板前面有 nginx / 云负载均衡时才开启。开启后按
+            <code>X-Forwarded-For</code> 判定来源 IP（登录失败锁定按这个 IP 计）。
+            <strong style="color: var(--ikev2-warn-fg);">公网直连时开启等于允许任意客户端伪造来源 IP 绕过锁定。</strong>
+          </small>
+        </label>
+      </div>
+      {{if .Settings.SetTrustedProxy}}
+      <div class="switch-row switch-row--sub">
+        <input type="checkbox" id="settings-trusted-proxy-follow" name="trusted_proxy_follow" value="1">
+        <label for="settings-trusted-proxy-follow">
+          <span class="switch-label switch-label--muted">跟随 env 默认</span>
+          <small class="form-hint">勾选后本项不再由面板接管，回到 <code>IKEV2_TRUSTED_PROXY</code>（当前 <code>{{if .Settings.EnvTrustedProxy}}true{{else}}false{{end}}</code>）</small>
+        </label>
+      </div>
+      {{end}}
+    </div>
+
+    <div class="form-section">
+      <label class="form-label" for="settings-pwlen">随机密码长度
+        <small style="color: var(--ikev2-fg-muted); font-weight: 400;">（新建 / 重置用户时生成的长度）</small>
+      </label>
+      <input id="settings-pwlen" type="number" name="default_user_password_len"
+             min="{{.Settings.PasswordLenMin}}" max="{{.Settings.PasswordLenMax}}" step="1"
+             data-val-int data-val-min="{{.Settings.PasswordLenMin}}" data-val-max="{{.Settings.PasswordLenMax}}"
+             data-val-name="随机密码长度"
+             placeholder="跟随 env（当前 {{.Settings.EnvDefaultUserPasswordLen}}）"
+             value="{{if .Settings.SetDefaultUserPasswordLen}}{{.Settings.DefaultUserPasswordLen}}{{end}}">
+      <p class="form-error" data-error-for="default_user_password_len" hidden></p>
+      <p class="form-hint">
+        取值 {{.Settings.PasswordLenMin}} ~ {{.Settings.PasswordLenMax}}。留空 = 跟随
+        <code>IKEV2_DEFAULT_USER_PASSWORD_LEN</code>（当前 <code>{{.Settings.EnvDefaultUserPasswordLen}}</code>）。
+        只影响之后新建 / 重置的用户，已有密码不变。
+      </p>
+    </div>
+
+    {{/* ---------- 批次 E:日志 ---------- */}}
+    <div class="form-section">
+      <span class="form-label">日志</span>
+
+      <label class="form-label form-label--sub" for="settings-loglevel">日志级别</label>
+      <select id="settings-loglevel" name="log_level" data-val-enum="debug info warn error">
+        {{range .Settings.LogLevelOptions}}
+        <option value="{{.Value}}" {{if .Selected}}selected{{end}}>{{.Label}}</option>
+        {{end}}
+      </select>
+      <p class="form-error" data-error-for="log_level" hidden></p>
+      <p class="form-hint">
+        当前：<code>{{.Settings.LogLevel}}</code>
+        {{if .Settings.SetLogLevel}}(面板设置){{else}}(跟随 <code>IKEV2_LOG_LEVEL</code>，当前 <code>{{.Settings.EnvLogLevel}}</code>){{end}}
+        · <strong>保存后立即生效</strong>，不必重启
+      </p>
+
+      <label class="form-label form-label--sub" for="settings-logformat">日志格式</label>
+      <select id="settings-logformat" name="log_format" data-val-enum="text json">
+        {{range .Settings.LogFormatOptions}}
+        <option value="{{.Value}}" {{if .Selected}}selected{{end}}>{{.Label}}</option>
+        {{end}}
+      </select>
+      <p class="form-error" data-error-for="log_format" hidden></p>
+      <p class="form-hint">
+        当前：<code>{{.Settings.LogFormat}}</code>
+        {{if .Settings.SetLogFormat}}(面板设置){{else}}(跟随 <code>IKEV2_LOG_FORMAT</code>){{end}}
+        · <strong>需重启容器生效</strong>（slog handler 类型在进程启动时就定死了）
+      </p>
+    </div>
+
+    {{/* ---------- 批次 E:防火墙 / 限速 ---------- */}}
+    <div class="form-section">
+      <span class="form-label">防火墙与限速
+        <small style="color: var(--ikev2-warn-fg); font-weight: 400;">（本节全部需重启容器生效）</small>
+      </span>
+
+      <label class="form-label form-label--sub" for="settings-connlimit">每 IP 并发连接上限</label>
+      <input id="settings-connlimit" type="number" name="connlimit_per_ip"
+             min="{{.Settings.ConnLimitMin}}" max="{{.Settings.ConnLimitMax}}" step="1"
+             data-val-int data-val-min="{{.Settings.ConnLimitMin}}" data-val-max="{{.Settings.ConnLimitMax}}"
+             data-val-name="每 IP 并发连接上限"
+             placeholder="跟随 env（当前 {{.Settings.ConnLimitPerIP}}）"
+             value="{{if .Settings.SetConnLimitPerIP}}{{.Settings.ConnLimitPerIP}}{{end}}">
+      <p class="form-error" data-error-for="connlimit_per_ip" hidden></p>
+      <p class="form-hint">
+        <code>IKEV2_CONNLIMIT_PER_IP</code>，当前 <code>{{.Settings.ConnLimitPerIP}}</code>。
+        家用 1–50 人、每人 ≤ 2 设备时默认 50 够用；调低会误杀多设备用户。
+      </p>
+
+      <label class="form-label form-label--sub" for="settings-hashlimit">每 IP 每分钟新连接上限</label>
+      <input id="settings-hashlimit" type="number" name="hashlimit_per_min"
+             min="{{.Settings.HashLimitMin}}" max="{{.Settings.HashLimitMax}}" step="1"
+             data-val-int data-val-min="{{.Settings.HashLimitMin}}" data-val-max="{{.Settings.HashLimitMax}}"
+             data-val-name="每 IP 每分钟新连接上限"
+             placeholder="跟随 env（当前 {{.Settings.HashLimitPerMin}}）"
+             value="{{if .Settings.SetHashLimitPerMin}}{{.Settings.HashLimitPerMin}}{{end}}">
+      <p class="form-error" data-error-for="hashlimit_per_min" hidden></p>
+      <p class="form-hint">
+        <code>IKEV2_HASHLIMIT_PER_MIN</code>，当前 <code>{{.Settings.HashLimitPerMin}}</code>。
+        调试阶段连接被限速、怀疑误伤时可以临时调高。
+      </p>
+
+      <div class="switch-row">
+        <input type="hidden" name="disable_ddos_protection" value="">
+        <input type="checkbox" id="settings-ddos" name="disable_ddos_protection" value="true"
+               data-val-bool data-val-name="关闭 DDoS 防护"
+               {{if .Settings.DisableDDoSProtection}}checked{{end}}>
+        <label for="settings-ddos">
+          <span class="switch-label">关闭 DDoS 防护</span>
+          <small class="form-hint">
+            默认<strong>保持开启</strong>。仅在调试连接被上面的限速规则误伤、
+            且确认不是真实攻击时临时关掉。
+          </small>
+        </label>
+      </div>
+      <p class="form-error" data-error-for="disable_ddos_protection" hidden></p>
+      {{if .Settings.SetDisableDDoSProtection}}
+      <div class="switch-row switch-row--sub">
+        <input type="checkbox" id="settings-ddos-follow" name="disable_ddos_protection_follow" value="1">
+        <label for="settings-ddos-follow">
+          <span class="switch-label switch-label--muted">跟随 env 默认</span>
+          <small class="form-hint">勾选后回到 <code>IKEV2_DISABLE_DDOS_PROTECTION</code>（当前 <code>{{if .Settings.EnvDisableDDoSProtection}}true{{else}}false{{end}}</code>）</small>
+        </label>
+      </div>
+      {{end}}
+
+      <div class="switch-row">
+        <input type="hidden" name="disable_mss_clamp" value="">
+        <input type="checkbox" id="settings-mss" name="disable_mss_clamp" value="true"
+               data-val-bool data-val-name="关闭 MSS Clamping"
+               {{if .Settings.DisableMSSClamp}}checked{{end}}>
+        <label for="settings-mss">
+          <span class="switch-label">关闭 MSS Clamping</span>
+          <small class="form-hint">
+            默认<strong>保持开启</strong>。这是 PMTUD 黑洞的常规修复手段，
+            只有在你的链路已有其它 clamp 方案时才关。
+          </small>
+        </label>
+      </div>
+      <p class="form-error" data-error-for="disable_mss_clamp" hidden></p>
+      {{if .Settings.SetDisableMSSClamp}}
+      <div class="switch-row switch-row--sub">
+        <input type="checkbox" id="settings-mss-follow" name="disable_mss_clamp_follow" value="1">
+        <label for="settings-mss-follow">
+          <span class="switch-label switch-label--muted">跟随 env 默认</span>
+          <small class="form-hint">勾选后回到 <code>IKEV2_DISABLE_MSS_CLAMP</code>（当前 <code>{{if .Settings.EnvDisableMSSClamp}}true{{else}}false{{end}}</code>）</small>
+        </label>
+      </div>
+      {{end}}
+
+      <label class="form-label form-label--sub" for="settings-nftfamily">nftables 处理地址族</label>
+      <select id="settings-nftfamily" name="nft_family" data-val-enum="v4 v6">
+        {{range .Settings.NftFamilyOptions}}
+        <option value="{{.Value}}" {{if .Selected}}selected{{end}}>{{.Label}}</option>
+        {{end}}
+      </select>
+      <p class="form-error" data-error-for="nft_family" hidden></p>
+      <p class="form-hint">
+        <code>IKEV2_FAMILY</code>，当前 <code>{{if .Settings.NftFamily}}{{.Settings.NftFamily}}{{else}}自动判断{{end}}</code>。
+        一般不用管——留空即按 <code>IKEV2_IPV6_ONLY</code> 自动判断；
+        双栈部署想只对某个族做限速时才显式指定。
+      </p>
+    </div>
+
+    {{/* ---------- 批次 E:审计 ---------- */}}
+    <div class="form-section">
+      <label class="form-label" for="settings-auditdays">审计日志保留天数
+        <small style="color: var(--ikev2-fg-muted); font-weight: 400;">（cron 每天 04:00 清理）· <strong style="color: var(--ikev2-warn-fg);">需重启容器生效</strong></small>
+      </label>
+      <input id="settings-auditdays" type="number" name="audit_retention_days"
+             min="{{.Settings.AuditDaysMin}}" max="{{.Settings.AuditDaysMax}}" step="1"
+             data-val-int data-val-min="{{.Settings.AuditDaysMin}}" data-val-max="{{.Settings.AuditDaysMax}}"
+             data-val-name="审计日志保留天数"
+             placeholder="跟随 env（当前 {{.Settings.AuditRetentionDays}}）"
+             value="{{if .Settings.SetAuditRetentionDays}}{{.Settings.AuditRetentionDays}}{{end}}">
+      <p class="form-error" data-error-for="audit_retention_days" hidden></p>
+      <p class="form-hint">
+        <code>IKEV2_AUDIT_RETENTION_DAYS</code>，当前 <code>{{.Settings.AuditRetentionDays}}</code> 天。
+        取值 {{.Settings.AuditDaysMin}} ~ {{.Settings.AuditDaysMax}}；
+        合规要求留档就调大，磁盘紧张就调小（<strong>删掉不可恢复</strong>）。
+      </p>
+    </div>
+
+    <p class="settings-error-summary" data-settings-error-summary hidden role="alert"></p>
+
+    <div class="settings-actions settings-actions-end">
+      {{if .Settings.Configured}}
+        <button type="submit" class="btn-secondary" formaction="/api/settings/clear">全部恢复默认</button>
+      {{end}}
+      <button type="submit" class="btn-primary">保存面板设置</button>
+    </div>
+  </form>
+
+  {{/* ---------- 批次 E:部署级参数只读清单 ---------- */}}
+  <details class="deploy-only">
+    <summary>
+      <span class="settings-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"></rect><line x1="3" y1="9" x2="21" y2="9"></line><line x1="9" y1="21" x2="9" y2="9"></line></svg>
+      </span>
+      <span>部署级参数（只读）</span>
+      <small class="header-note"><span class="chip no-dot">改 .env</span>· 共 {{len .Settings.DeployOnly}} 项</small>
+    </summary>
+    <div class="deploy-only-body">
+      <p class="text-muted" style="margin-top: 0; font-size: 0.8125rem;">
+        这些参数描述的是<strong>容器的部署形态</strong>（挂哪张网卡、数据放哪、监听哪个端口），
+        而不是"面板怎么跑"。运行时改它们要么不生效，要么直接把面板改成连不上自己，
+        所以这里只展示当前值，改法仍是编辑 <code>.env</code> 后 <code>docker compose up -d</code>。
+      </p>
+      <div class="deploy-only-table-wrap">
+        <table class="deploy-only-table">
+          <thead>
+            <tr><th>环境变量</th><th>当前值</th><th>说明</th></tr>
+          </thead>
+          <tbody>
+            {{range .Settings.DeployOnly}}
+            <tr>
+              <td><code>{{.Env}}</code></td>
+              <td><code>{{if .Value}}{{.Value}}{{else}}<span class="deploy-only-default">{{.Default}}</span>{{end}}</code></td>
+              <td class="deploy-only-why">{{.Why}}</td>
+            </tr>
+            {{end}}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </details>
+
+  {{if .SettingsFlash}}
+    {{$bannerKind := "info"}}
+    {{if eq .SettingsFlashKind "error"}}{{$bannerKind = "error"}}{{end}}
+    {{if eq .SettingsFlashKind "success"}}{{$bannerKind = "success"}}{{end}}
+    {{template "banner" (dict "Kind" $bannerKind "Msg" .SettingsFlash "Dismissible" true "DismissKey" "settings-flash" "ExtraClass" "settings-action-flash")}}
+  {{end}}
 </div>
 {{end}}

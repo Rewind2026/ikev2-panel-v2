@@ -328,8 +328,33 @@ func isTrustedProxy() bool {
 // 永远走 isTrustedProxy() 读 env。
 var trustedProxyOverride atomic.Pointer[bool]
 
+// trustedProxyRuntime v2.86 配置统一批次 D:面板设置运行期覆盖。
+//
+// 背景:以前 TrustedProxy 只能在 env 里设,面板既看不到也改不了
+// (env 在进程启动后不可变)。现在面板「面板设置」卡有开关,保存后调
+// SetTrustedProxy 让 ClientIP 立即按新值判定 —— 不用重启容器。
+//
+// 优先级:trustedProxyOverride(测试) > trustedProxyRuntime(面板) > env。
+var trustedProxyRuntime atomic.Pointer[bool]
+
+// SetTrustedProxy 设置是否信任 X-Forwarded-For / X-Real-IP,运行期立即生效。
+//
+// 由 internal/web 的面板设置保存 handler 调用(applyRuntimeSettings)。
+// 传 false 是**显式关闭**,优先级高于 env 的 true —— 这正是三态设置
+// "我明确要关掉"要表达的意思。
+//
+// 注意:本函数只影响 ClientIP 的来源判定,不改任何限速阈值。
+func SetTrustedProxy(v bool) {
+	b := new(bool)
+	*b = v
+	trustedProxyRuntime.Store(b)
+}
+
 func ClientIP(r *http.Request) string {
 	trusted := isTrustedProxy()
+	if v := trustedProxyRuntime.Load(); v != nil {
+		trusted = *v
+	}
 	if v := trustedProxyOverride.Load(); v != nil {
 		trusted = *v
 	}

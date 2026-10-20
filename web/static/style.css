@@ -1182,6 +1182,10 @@ main#main, .main-area{
   margin-top:0.85rem;
   /* banner 现在 align-items:center,文字 + × + icon 都居中,与按钮行节奏一致。 */
 }
+/* v2.86 批次 D:面板设置卡的保存反馈,同样贴在按钮排下方(同 .ddns-action-flash)。 */
+.settings-action-flash{
+  margin-top:0.85rem;
+}
 
 /* onboarding */
 .onboarding{
@@ -1308,6 +1312,180 @@ main#main, .main-area{
 }
 .form-section > .form-hint{ font-size:0.75rem; color:var(--ikev2-fg-muted); margin-top:0.35rem;}
 .form-section > .form-error{ font-size:0.75rem; color:var(--ikev2-danger); margin-top:0.35rem;}
+
+/* ---------------------------------------------------------------------------
+   18b. Switch row — 布尔设置项(v2.86 批次 D「面板设置」卡)
+
+   为什么不用裸 checkbox:这批开关(信任反向代理 / Cookie Secure)后果不可逆,
+   旁边必须挂一段说明文字;原生 checkbox 只能一行 label,塞不下多行风险提示。
+   这里把 checkbox 提到 label 之前,用 flex 让 label 占满剩余宽度并允许换行。
+
+   结构:<div class="switch-row"><input type=checkbox id=x><label for=x>
+           <span class="switch-label">…</span><small class="form-hint">…</small>
+         </label></div>
+--------------------------------------------------------------------------- */
+.switch-row{
+  display:flex;
+  align-items:flex-start;
+  gap:0.6rem;
+  padding:0.55rem 0.7rem;
+  border:1px solid var(--ikev2-bg-rule);
+  border-radius:6px;
+  background:rgba(0,0,0,0.18);
+  margin-top:0.5rem;
+}
+.switch-row + .switch-row{ margin-top:0.4rem;}
+/* 「跟随 env 默认」次级行:缩进 + 虚线边框,视觉上从属于上面那个开关 */
+.switch-row--sub{
+  margin-left:1.6rem;
+  border-style:dashed;
+  background:transparent;
+}
+.switch-row > input[type="checkbox"]{
+  width:1rem; height:1rem;
+  accent-color:var(--ikev2-brand);
+  margin:0.2rem 0 0;
+  flex:0 0 auto;
+  cursor:pointer;
+}
+.switch-row > input[type="checkbox"]:disabled{
+  cursor:not-allowed;
+}
+.switch-row > label{
+  margin:0;
+  font-size:0.8125rem;
+  min-width:0;
+  cursor:pointer;
+}
+.switch-row > input:disabled + label{ cursor:not-allowed; }
+.switch-label{
+  display:block;
+  font-weight:600;
+  color:var(--ikev2-fg-strong);
+}
+.switch-label--muted{
+  font-weight:400;
+  color:var(--ikev2-fg-muted);
+}
+.switch-row .form-hint{
+  display:block;
+  font-size:0.75rem;
+  color:var(--ikev2-fg-muted);
+  margin-top:0.2rem;
+}
+
+/* ---------------------------------------------------------------------------
+   18c. 批次 E 表单校验的视觉反馈
+
+   两层:
+     - 边框变红(--ikev2-danger)+ 红晕,让"哪个框有问题"一眼可见;
+     - 字段下方的 .form-error 写明原因和合法范围。
+
+   刻意不用原生 :invalid —— 页面开了 novalidate,且这些字段"留空 = 跟随
+   env 默认"是合法状态,浏览器自带的红框会把合法的空值也标成错误。
+   .is-invalid 由 initSettingsValidation 显式挂上/摘掉,与校验结果一一对应。
+   box-shadow 而非 outline:不改变布局,不会把相邻的 label 挤歪。
+--------------------------------------------------------------------------- */
+.form-section input.is-invalid,
+.form-section select.is-invalid{
+  border-color:var(--ikev2-danger);
+  box-shadow:0 0 0 2px rgba(220,80,80,0.18);
+}
+.form-section select.is-invalid{
+  /* select 的原生箭头会盖住红框,补一层内阴影把边缘显出来 */
+  box-shadow:0 0 0 2px rgba(220,80,80,0.18),inset 0 0 0 1px rgba(220,80,80,0.35);
+}
+.form-section .form-error[hidden]{ display:none; }
+.form-section .form-error::before{
+  content:"⚠ ";
+  font-size:0.9em;
+}
+
+/* 提交被拦下时的汇总条。放在按钮上方,滚动到视野内就能看到
+   "这次没有保存",而不是只留下一个被拦下的按钮让人猜。 */
+.settings-error-summary{
+  margin:0.75rem 0 0;
+  padding:0.55rem 0.75rem;
+  border:1px solid var(--ikev2-danger);
+  border-left-width:3px;
+  border-radius:6px;
+  background:rgba(220,80,80,0.10);
+  color:var(--ikev2-danger);
+  font-size:0.8125rem;
+  line-height:1.5;
+}
+.settings-error-summary[hidden]{ display:none; }
+
+/* v2.86 批次 E:同一 form-section 内的次级 label(日志 / 防火墙分组里
+   一个分组下挂多个字段时用)。跟 .form-label 的区别只是字号更小、
+   上边距更紧,视觉上从属于上面的分组标题。 */
+.form-label--sub{
+  display:block;
+  font-size:0.8125rem;
+  font-weight:500;
+  color:var(--ikev2-fg);
+  margin-top:0.75rem;
+}
+.form-label--sub:first-of-type{ margin-top:0.35rem; }
+
+/* ---------- 批次 E:部署级参数只读清单 ---------- */
+.deploy-only{
+  margin-top:1rem;
+  border:1px solid var(--ikev2-bg-rule);
+  border-radius:8px;
+  background:rgba(0,0,0,0.18);
+}
+.deploy-only > summary{
+  display:flex;
+  align-items:center;
+  gap:0.5rem;
+  padding:0.7rem 0.9rem;
+  cursor:pointer;
+  font-size:0.875rem;
+  font-weight:600;
+  color:var(--ikev2-fg-strong);
+  list-style:none;
+}
+.deploy-only > summary::-webkit-details-marker{ display:none; }
+.deploy-only[open] > summary{ border-bottom:1px solid var(--ikev2-bg-rule); }
+.deploy-only-body{ padding:0.9rem; }
+.deploy-only-table-wrap{ overflow-x:auto; }
+.deploy-only-table{
+  width:100%;
+  border-collapse:collapse;
+  font-size:0.8125rem;
+}
+.deploy-only-table th{
+  text-align:left;
+  font-weight:600;
+  color:var(--ikev2-fg-muted);
+  padding:0.35rem 0.6rem 0.35rem 0;
+  border-bottom:1px solid var(--ikev2-bg-rule);
+  white-space:nowrap;
+  /* 必须解除全局 thead th 的 position:sticky。
+     .deploy-only-table-wrap 有 overflow-x:auto → 自己就是滚动容器，
+     而全局 sticky 用的 top:var(--ikev2-topbar-h)(48px) 是给页面级滚动用的。
+     两者叠加，表头会被往下推 48px 压在第一行数据上。 */
+  position:static;
+}
+.deploy-only-table td{
+  padding:0.4rem 0.6rem 0.4rem 0;
+  border-bottom:1px solid var(--ikev2-bg-rule);
+  vertical-align:top;
+}
+.deploy-only-table tr:last-child td{ border-bottom:0; }
+.deploy-only-table code{ white-space:nowrap; }
+/* 未在 env 里显式设置 → 展示的是代码/entrypoint 默认值,弱化显示,
+   避免被误读成"用户配成了这个值"。 */
+.deploy-only-default{
+  color:var(--ikev2-fg-muted);
+  font-style:italic;
+}
+.deploy-only-why{
+  color:var(--ikev2-fg-muted);
+  min-width:16rem;
+}
+
 .form-row{
   display:grid; grid-template-columns:minmax(0, 1fr) minmax(0, 1.15fr); gap:0.75rem;
 }

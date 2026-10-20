@@ -191,7 +191,7 @@ func boolStr(b bool) string {
 // Both zero values are valid defaults(调用方决定何时用 env fallback)。
 //
 // Domain:v2.86-pr23f 新增 — 主域名(如 "example.com")。
-// 此前 Domain 只能从 env IKEV2_DDNS_DOMAIN 启动值读取,容器跑起来后无法修改;
+// 此前 Domain 只能从 env ALIYUN_DOMAIN 启动值读取,容器跑起来后无法修改;
 // pr23f 让面板也能改,并持久化到 statefile(用户显式配的 source of truth)。
 // 空字符串 = 用 env fallback(向后兼容老 env-only 部署)。
 type stateRecord struct {

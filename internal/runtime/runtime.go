@@ -12,6 +12,7 @@ package runtime
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/yourname/ikev2-panel-v2/internal/config"
 	"github.com/yourname/ikev2-panel-v2/internal/panelstate"
@@ -32,6 +33,9 @@ type Runtime struct {
 	// v2.86-PR13.3:客户端虚拟 IP 段配置来源标记(对称 cert.conf / aliyun.creds)。
 	// 启动日志 / 面板显示告诉用户"现在用的 IP 段是哪来的"。
 	SubnetConfigSource string // "panelstate" / "env-default" / ""
+	// v2.86 配置统一批次 D:面板设置来源标记。
+	// panelstate = settings.json 里有显式值;env-default = 全部跟随 env / 出厂。
+	SettingsSource string // "panelstate" / "env-default" / ""
 }
 
 // Merge 合并 env 配置和 panelstate 文件,返回最终 Runtime。
@@ -101,6 +105,77 @@ func Merge(env *config.Config) (*Runtime, error) {
 		r.IPv4Subnet = env.IPv4Subnet
 		r.IPv6Subnet = env.IPv6Subnet
 		r.SubnetConfigSource = env.SubnetConfigSource
+	}
+
+	// 4. v2.86 配置统一批次 D:面板设置(panelstate → env → 出厂)。
+	//
+	// 这一段与前三段的差别:前三段是 pickStr(空串回落),这里是**指针三态**。
+	// settings.json 里字段为 nil = 用户没在面板设过 → 保持 env 值不动;
+	// 非 nil(包括显式的 false / 0)→ 覆盖 env。
+	// 这让 UI 能表达"我明确要关掉 Cookie Secure",而不是只能"不填=用默认"。
+	settingsStore := panelstate.NewSettingsStore()
+	if st, err := settingsStore.LoadSettings(); err == nil && st != nil {
+		if st.DisplayTimezone != nil {
+			r.DisplayTimezone = *st.DisplayTimezone
+		}
+		if st.SessionTTL != nil {
+			// WriteSettings 的 Validate 已保证能解析;这里再判一次是防御性
+			// (文件可能被人工编辑过)。
+			if d, perr := time.ParseDuration(*st.SessionTTL); perr == nil {
+				r.SessionTTL = d
+			} else {
+				stderrWarn("panelstate settings.json session_ttl invalid", perr)
+			}
+		}
+		if st.CookieSecure != nil {
+			r.CookieSecure = *st.CookieSecure
+		}
+		if st.TrustedProxy != nil {
+			r.TrustedProxy = *st.TrustedProxy
+		}
+		if st.DefaultUserPasswordLen != nil {
+			r.DefaultUserPasswordLen = *st.DefaultUserPasswordLen
+		}
+		// v2.86 批次 E。
+		//
+		// LogLevel / LogFormat 写回 Config 是有意义的:main.go 在 Merge 之后
+		// 才调 cfg.NewLogger(),所以这里改完,启动期的 logger 就用新级别 /
+		// 新格式,不需要"重启两次"。
+		//
+		// 其余 6 项写回 Config 只是为了 status API 能显示"当前生效值";
+		// 它们真正的消费者是 entrypoint.sh(启动时读 settings.json),
+		// Go 进程运行期改它们没有意义 —— UI 上已标注需重启。
+		if st.LogLevel != nil {
+			r.LogLevel = *st.LogLevel
+		}
+		if st.LogFormat != nil {
+			r.LogFormat = *st.LogFormat
+		}
+		if st.AuditRetentionDays != nil {
+			r.AuditRetentionDays = *st.AuditRetentionDays
+		}
+		if st.ConnLimitPerIP != nil {
+			r.ConnLimitPerIP = *st.ConnLimitPerIP
+		}
+		if st.HashLimitPerMin != nil {
+			r.HashLimitPerMin = *st.HashLimitPerMin
+		}
+		if st.DisableMSSClamp != nil {
+			r.DisableMSSClamp = *st.DisableMSSClamp
+		}
+		if st.DisableDDoSProtection != nil {
+			r.DisableDDoSProtection = *st.DisableDDoSProtection
+		}
+		if st.NftFamily != nil {
+			r.NftFamily = *st.NftFamily
+		}
+		r.SettingsSource = "panelstate"
+	} else {
+		// 文件不存在(err==nil, st==nil) 或 解析失败(err!=nil) → 用 env
+		if err != nil {
+			stderrWarn("panelstate settings.json parse failed", err)
+		}
+		r.SettingsSource = "env-default"
 	}
 
 	return r, nil

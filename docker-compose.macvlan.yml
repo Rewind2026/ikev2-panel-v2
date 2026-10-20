@@ -1,0 +1,471 @@
+# docker-compose.macvlan.yml —— 【macvlan 网络模式】
+# 运行期配置的唯一权威。设计说明见 docs/architecture.md §11。
+#
+# ⚠️ 三个网络模式 = 三个**独立完整**的 compose 文件，各管各的，不用叠加：
+#
+#   docker-compose.yml            host 模式（老用户 `docker compose up -d` 零改动）
+#   docker-compose.macvlan.yml       macvlan 模式 ← 本文件
+#   docker-compose.ipvlan.yml        ipvlan 模式
+#
+#   本文件是**完整**的，不是 override —— 不需要 `!reset` / `!override` 标签，
+#   **任何 Docker Compose 版本都能用**（不设版本下限）。
+#
+#   三份服务定义（image / capabilities / volumes / tmpfs / environment）**必须保持一致**，
+#   由 tests/network_mode_test.sh 的 NM-30~NM-36 强制校验，改一处漏两处会被测试挡住。
+#   唯一允许的差异是网络相关的那几行（network_mode vs networks + 文件末尾的 networks 段）。
+#
+# 启动方式：
+#   docker compose -f docker-compose.macvlan.yml up -d    直接用 docker 官方命令
+#   ./scripts/up.sh                                       等价封装（额外建 ./logs 目录）
+#
+#   macvlan 是什么：容器**独占一个 MAC**，直挂物理二层网络。
+#   500/4500 绑在**容器自己的 IP** 上，所以宿主上 500/4500/8443 已被别的服务占用时也能跑。
+#
+#   什么时候**不要**用这个模式：
+#   - 宿主与容器需要互通（macvlan 在内核层隔离父子）→ 需额外建 shim，详见 README
+#   - 云厂商限制额外 MAC（部分 OpenVZ / 嵌套虚拟化环境）→ 容器能起但收不到 ARP/RA；
+#     这种环境改用 docker-compose.ipvlan.yml（共享 parent MAC）
+#   - Docker Desktop（macOS/Windows）：macvlan 仅 Linux 支持
+#   - macvlan_mode=passthru：与 IPAM 互斥（拿不到地址），本项目禁用
+#
+# 必填环境变量（写在 .env）：
+#   IKEV2_L2_PARENT=eth0
+#   IKEV2_L2_SUBNET=203.0.113.0/24
+#   IKEV2_L2_GATEWAY=203.0.113.1
+#
+#   Capabilities（v2.86-PR11 减权）：
+#   - 删除 privileged: true（OWASP Docker Top-1 容器逃逸风险）
+#   - 删除 SYS_ADMIN（v2-79.2 后 forwarding 自愈已经只需要 NET_ADMIN）
+#   - cap_drop ALL + cap_add 仅必需 NET_ADMIN / NET_RAW / NET_BIND_SERVICE / CHOWN /
+#     DAC_OVERRIDE / FOWNER
+#   - 加 no-new-privileges:true 防 setuid 提权
+#
+#   设备：/dev/net/tun（kernel-libipsec 的用户态 ESP 注入点）
+#
+#   ESP 兼容性说明（commit 22）：strongSwan 自编译启用 --enable-kernel-libipsec，
+#     ESP 包被封装在 UDP/4500（RFC 3948 NAT-T）里，不再走 IP 协议 50。
+#     因此即使在 OpenVZ/LXC/部分 KVM 容器宿主上，IKEv2 SA 协商也能成功。
+#     公网 IP 上可以同时跑其他服务（HTTPS/SSH/SMTP 等），互不冲突。
+
+services:
+  ikev2-panel:
+    # v2.86-PR16:镜像源迁 ghcr.io,默认 tag :latest(每次 push main 都重打)。
+    # 老用户留 PANEL_TAG=v2.86-pr15 等显式 tag 仍可固定版本;不设则每次
+    # up -d 都拉最新 main commit 镜像。
+    #
+    # 默认 PANEL_TAG=latest + pull_policy: always:
+    #   部署体验:`docker compose up -d` 一行,自动拉最新 main 镜像。
+    #   老版本固定:`PANEL_TAG=v2.86-pr15 ./scripts/up.sh`。
+    #
+    # build 段保留(本地开发 / 没装 ghcr.io 凭证时兜底):
+    #   pull_policy=always → 总是先 pull ghcr,本地 build 仅作为离线 fallback。
+    #
+    # 注意:包是 public(https://github.com/users/Rewind2026/packages/container/ikev2-panel-v2),
+    #      不用 login 就能 pull;只有 push 才需要 PAT。
+    image: ghcr.io/rewind2026/ikev2-panel-v2:${PANEL_TAG:-latest}
+    build:
+      context: .
+      args:
+        PANEL_VERSION: ${PANEL_TAG:-latest}
+    pull_policy: always
+    container_name: ikev2-panel
+    restart: unless-stopped
+
+    # ===== 网络：macvlan（本文件专属）=====
+    # 容器有独立 netns、独立 MAC、直挂物理二层。不写 network_mode（与 networks 互斥），
+    # 也不需要 `!reset` —— 因为本文件是完整的，不叠加 base。
+    #
+    # 容器 IP 从宿主所在网段分配，所以 500/4500/8443 与宿主服务完全不冲突。
+    # networks 段的 driver_opts / ipam / enable_ipv6 在文件末尾。
+    #
+    # v2.86-PR20：转发开关与 SLAAC 的 sysctl 在 service 段的 `sysctls:` 块，
+    # 不在 networks 段 —— 原因见 service 段那段详细实测记录。
+    networks:
+      - ikev2-l2
+
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_ADMIN           # iptables/nftables MASQUERADE、ip link、tc 限速（不含 forwarding 自愈，见下）
+      - NET_RAW             # tc qdisc/class/filter
+      - NET_BIND_SERVICE    # 监听 500/4500 privileged 端口
+      - CHOWN               # entrypoint.sh 改 /etc/swanctl 权限
+      - DAC_OVERRIDE        # entrypoint.sh 读 /proc/sys/net
+      # v2.86-PR19(A10):FOWNER —— entrypoint.sh 要 chmod /data 下的文件
+      # (acme.sh account.conf 600、LE 证书 644/600、cron 文件 644)。
+      #
+      # 实机踩坑(192.168.50.63,2026-10-12):数据卷 /data 里的文件属主是
+      # 10001(面板进程 uid,历史版本或手动导入证书时写进去的),而容器进程是
+      # root(uid 0)。POSIX 规定 chmod **别人拥有的文件** 需要 CAP_FOWNER ——
+      # uid 0 默认有,但这里 cap_drop: ALL 把它一起丢了,于是:
+      #     chmod: changing permissions of '/data/acme-sh/account.conf':
+      #     Operation not permitted
+      # entrypoint.sh 是 `set -euo pipefail`,这一行失败 → 整个启动流程
+      # exit 1 → restart: unless-stopped 无限重启 → 面板完全起不来。
+      #
+      # DAC_OVERRIDE 只能绕过 **读写执行** 权限检查,管不到 chmod/chown
+      # 这类"修改元数据"的操作,所以补 DAC_OVERRIDE 不够,必须补 FOWNER。
+      #
+      # 安全性:容器里只有 entrypoint.sh(固定脚本)和 acme.sh/cron 会 chmod
+      # 自己管理的文件,不构成提权面。
+      - FOWNER
+
+    devices:
+      - /dev/net/tun        # kernel-libipsec 必须的 TUN 设备
+
+    security_opt:
+      - no-new-privileges:true   # v2.86-PR11:防 setuid 提权
+
+    # v2.86-PR13.4:docker daemon 层日志轮转(跟 ddnsv6 同款 json-file driver)。
+    # 这是双保险:即使 ./logs bind mount 写满了 docker 也会按 max-size 滚动,
+    # 不会让容器把宿主磁盘吃满。
+    # 注意:这是 docker 自己的 stdout/stderr 日志(容器内 Go 进程走的 stdlib log),
+    # strongSwan/charon/audit/renew 这些业务日志在 /var/log/*.log(由 ./logs bind mount 接管)。
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+    # 关键：VPN 服务器需要 IP forwarding。
+    #
+    # 本模式下容器有**独立 netns**，forwarding 是 per-netns 的 ——
+    # 宿主上 `sysctl -w` 改的是宿主那个 netns，对本容器无效。
+    #
+    # 且容器内 /proc/sys 是 **ro** 挂载（v2.86-PR19(A16) 实测，192.168.50.63）：
+    #     $ grep ' /proc/sys ' /proc/mounts
+    #     proc /proc/sys proc ro,nosuid,nodev,noexec,relatime 0 0
+    # → entrypoint 里的 `echo 1 > /proc/sys/net/...` 必然失败，NET_ADMIN 也救不了。
+    #
+    # 所以转发开关**只能靠 Docker 建容器时注入**，见下方 sysctls 块。
+    #
+    # entrypoint §3 的行为：
+    #   - IPv4 = 0 → FATAL exit 11（没有转发则所有客户端都出不了网）
+    #   - IPv6 = 0 → WARN（客户端会 IPv4 回退，属降级不属故障）
+    #
+    # v2.86-PR20 修正：转发与 SLAAC 的 sysctl **就是**用 service 段的 `sysctls:` 块
+    # 注入的。之前注释说"sysctls 块会被 runc 以 not allowed in host network
+    # namespace 拒绝、改用 networks 段的 endpoint sysctls"——那条结论只对
+    # network_mode: host 成立（host 模式下 /proc/sys 与宿主共享，runc 确实拒绝）。
+    # L2 模式下容器有自己的 netns，runc 允许写，service 段 sysctls 完全可用。
+    #
+    # 为什么写 all/default 而不是 IFNAME/eth0：
+    #   - IFNAME 占位符只有 driver option `com.docker.network.endpoint.sysctls`
+    #     支持；service 段 sysctls 里 Docker 会直接以 `unsafe procfs detected`
+    #     拒绝（Docker 28.5.2 实测）。
+    #   - 直接写 eth0 也会被 Docker 拒绝：
+    #     `interface specific sysctl setting "net.ipv4.conf.eth0.forwarding"
+    #      must be supplied using driver option ...`（实测）。
+    #   - conf.all.forwarding=1 会由内核传播到本 netns 内所有接口；
+    #     conf.default.accept_ra=2 决定**此后新建**接口的 RA 策略，
+    #     而容器 eth0 正是 Docker 建端点时新建的，所以能吃到。
+    #   实测（Docker 28.5.2，macvlan，192.168.50.63 上 parent=ens18）：
+    #     不注入                          → v4fwd=1 v6fwd=0 ra=1 gua=0
+    #     仅 endpoint sysctls(逗号串)      → v4fwd=1 v6fwd=0 ra=1 gua=0  ← 根本没生效
+    #     仅 endpoint sysctls(JSON)        → v4fwd=1 v6fwd=0 ra=1 gua=0  ← 根本没生效
+    #     本块 sysctls + enable_ipv6       → v4fwd=1 v6fwd=1 ra=2 gua=1  ← 生效
+
+    # v2.86-PR11:删除 privileged: true。NET_ADMIN 已足够做 tc 限速等操作。
+    # 容器逃逸风险从"root on host"降到"普通进程"(仍需 0day 才逃逸)。
+    #
+    # v2.86-PR19(A16)：NET_ADMIN 不再被描述为"足够做 forwarding 自愈"——
+    # 在 /proc/sys 为 ro 的前提下它不够，forwarding 由本文件的 sysctls 块保证。
+
+    # v2.86-PR12.8:不再开 read_only rootfs。理由:
+    #   - acme.sh 运行时写 /opt/acme.sh (account.conf + ca/ + 域名证书目录)
+    #   - strongSwan 写 /etc/swanctl (x509/ private/ conf.d)
+    #   - cron 写 /etc/cron.d (renew + audit-retention)
+    #   - Go 进程写 /var/log /data /etc/strongswan.d
+    # 这些都是"业务必需的可写路径",用 read_only + tmpfs + entrypoint 同步
+    # account.key 的方式反而引入额外复杂度 (rate-limit、dnsapi 遮蔽、account 落盘等)。
+    # 跟 nginx-proxy/acme-companion / mailcow / Proxmox VE 等成熟项目一致:
+    # 不开 read_only,而用:
+    #   - cap_drop / cap_add 限制 Linux capability
+    #   - security_opt no-new-privileges
+    #   - 业务写路径用 tmpfs (swanctl/cron 频繁变化,容器重启不需要)
+    #   - acme.sh 工作目录用命名 volume (/data),天然持久化
+    tmpfs:
+      - /tmp:size=64m
+      # v2.86-PR13.4:/var/log 已改 bind mount 到宿主机 ./logs,不再需要 tmpfs。
+      # 之前 tmpfs 128m 的痛点:重启即丢 + 满了容器内进程写不进去导致 500。
+      - /var/run:size=32m
+      - /run:size=32m
+      # v2.86-PR11.1:strongSwan 必须能写 /etc/swanctl (conf.d + x509 + private),
+      # Go 进程也会写证书到 /etc/swanctl/x509/。这些是运行时频繁变化的临时
+      # 状态 (LE 续签重新 load cert、per-user conf.d 写入等),不需要跨容器重启
+      # 保留——entrypoint.sh §4.5b 启动时从 /etc/swanctl.dist (只读镜像层) 恢复。
+      - /etc/swanctl:size=32m
+      # v2.86-PR11.1:entrypoint.sh §7.5 / §7.7 写 cron 任务到 /etc/cron.d,
+      # LE 模式 renew + 审计 retention 都靠它。同样是运行时频繁变化,不需要持久化。
+      - /etc/cron.d:size=1m
+
+    # v2.86-PR20：容器 netns 的转发开关与 SLAAC 策略。
+    # 必须在 Docker 建容器时注入 —— 容器内 /proc/sys 是 ro 挂载，entrypoint 改不了。
+    # 取值与 scripts/network-mode.sh 的 net_mode_sysctls() 保持一致，
+    # entrypoint 启动后会回读复核，不符则 FATAL exit 10 / exit 11。
+    sysctls:
+      # 本项目要做 VPN 转发，容器 netns 内必须开。
+      # conf.all 会由内核传播到该 netns 内所有接口。
+      net.ipv4.conf.all.forwarding: "1"
+      net.ipv6.conf.all.forwarding: "1"
+      # accept_ra=2 是 SLAAC 的硬性前提：本项目必开 forwarding，
+      # 而内核在 forwarding 开启时会把处于默认态的 accept_ra 抑制掉，RA 会被丢弃。
+      # 写 conf.default 而非 conf.all：容器 eth0 由 Docker 建端点时新建，
+      # default 决定的就是它新建那一刻的 RA 策略。
+      net.ipv6.conf.default.accept_ra: "2"
+
+    volumes:
+      # 挂载命名 volume（必须与旧容器同名，避免升级时丢数据）。
+      # 命名方式：project_volume，project 来自 docker-compose.yml 同级目录名（ikev2-panel-v2）。
+      # 如果升级时改了项目名（比如改成 ikev2-panel-v2-v2-74），docker 会创建新 volume，
+      # 老的 LE 证书和 panel.db 都没了 → 必须用 external 显式指定旧 volume 名。
+      # 这里用 external 锁死 v2-72/v2-73 那次创建的旧 volume 名。
+      #
+      # v2.86-PR12.8:/data 下包含 4 类持久化数据:
+      #   - panel.db       SQLite (用户/审计/证书配置)
+      #   - panel-state/   运行时配置 (cert.conf + aliyun.creds + subnet.conf)
+      #   - le/            Let's Encrypt 签发的证书 (fullchain + privkey)
+      #   - acme-sh/       acme.sh working dir (ca/ + account.json + 域名证书目录)
+      #   dnsapi/deploy/notify 是 acme.sh 二进制的伴生文件,在镜像 /opt/acme.sh/
+      #   (Dockerfile 里 cp -a 进去的),不随容器重启丢失——跟 /data 无关。
+      # v2.86-PR19(A10):改用**长语法** + 显式 name 锁死卷名。
+      # 见文件末尾 volumes 段的完整说明。
+      - type: volume
+        source: ikev2-data
+        target: /data
+
+      # v2.86-PR13.4:日志 bind 到宿主机 ./logs,重启不丢 + 可直接 tail -f 排查。
+      # docker daemon 层另加 logging: json-file 轮转做双保险(见下方 logging 段)。
+      # 容器内进程(Go / strongSwan / acme.sh / cron)都需要写 /var/log,
+      # Dockerfile 已经 chmod 1777 /var/log,容器内任何用户都能写。
+      # 宿主机目录 ./logs 由 scripts/up.sh 在启动前 mkdir -p + chmod 1777 创建。
+      - ./logs:/var/log:rw
+
+      # v2-79.2：把宿主 /etc/sysctl.d 挂进容器（ro：默认值查询；rw：自愈时持久化）。
+      # 容器内 root 通过这条挂载在 /host-sysctl.d 写入 99-ikev2.conf，
+      # 宿主 systemd-sysctl.service 重启时自动加载 → 下次部署/重启永远自带 forwarding=1。
+      # 必须是 rw，否则 entrypoint §3 自愈后写不进宿主。
+      - /etc/sysctl.d:/host-sysctl.d:rw
+
+    environment:
+      # 基础
+      #
+      # v2.86 配置统一批次 D:下面 4 个原先是写死字面量,改它们必须编辑本文件。
+      # 现在统一改成 ${VAR:-<原字面量>} —— **默认值一字未改**,行为完全一致,
+      # 只是多了一条"不编辑 compose 也能调"的通路。
+      # 写成带默认值而不是 "${VAR:-}":这 4 个如果传空串,Go 侧 getenv/getdur
+      # 会因为 `v != ""` 不成立而回落到代码默认值,虽然结果一样,
+      # 但 compose 渲染出来的 `docker compose config` 里看不到实际生效值,
+      # 排查时容易误判。默认值写在这里 = 单一真相。
+      IKEV2_DATA_DIR: "${IKEV2_DATA_DIR:-/data}"
+      IKEV2_LISTEN_ADDR: "${IKEV2_LISTEN_ADDR:-0.0.0.0:8443}"
+      IKEV2_LOG_LEVEL: "${IKEV2_LOG_LEVEL:-info}"
+      IKEV2_LOG_FORMAT: "${IKEV2_LOG_FORMAT:-text}"
+      # v2.86 批次 B:明文 HTTP 备用入口。空 = 不启用(默认)。
+      # 启用后 Go 侧会自动把 cookie Secure 关掉(明文下浏览器拒收 Secure cookie)。
+      IKEV2_HTTP_LISTEN_ADDR: "${IKEV2_HTTP_LISTEN_ADDR:-}"
+
+      # 服务器身份（v2-79：所有字段都可以不传，entrypoint.sh §0 自动探测）
+      # 唯一必填的是 IKEV2_SERVER_CN（证书需要）
+      IKEV2_SERVER_CN: "${IKEV2_SERVER_CN:-vpn.example.com}"
+      # 公网 IPv6（host 网络下留空 → 从网卡自动取）
+      # 公网 IPv4（双栈模式留空 → 从网卡自动取）
+      # 双栈模式（需要宿主 IPv4 UDP 500/4500 可用）：IKEV2_IPV6_ONLY=false
+      IKEV2_IPV6_ONLY: "${IKEV2_IPV6_ONLY:-true}"
+      # 公网 IPv6 静态兜底（v2.86-PR20 补齐透传）。
+      # 语义是项目既有契约：空 → entrypoint §0.2 自动探测；非空 → 跳过探测，
+      # 直接作为 charon 的 local_addrs。macvlan/ipvlan 下这是 SLAAC 失败时的兜底开关。
+      # 注意：非空只让 charon 绑这个地址，**不会**把这个地址配到容器网关上；
+      # 若 SLAAC 失败且未在本机另行配置该地址，charon 会绑定失败。
+      IKEV2_SERVER_ADDR_V6: "${IKEV2_SERVER_ADDR_V6:-}"
+      # v2.86 批次 B:公网 IPv4 静态兜底。空 → entrypoint §1 自动探测。
+      # 只在 IKEV2_IPV6_ONLY=false(双栈)时有意义。
+      IKEV2_SERVER_ADDR_V4: "${IKEV2_SERVER_ADDR_V4:-}"
+      # 出口网卡（host 网络下留空 → ip route 自动探测）
+      # ⚠️ 语义随网络模式变化：host = 宿主网卡名；macvlan/ipvlan = 容器网卡名（通常 eth0）。
+      #    非 host 模式下若沿用宿主网卡名，entrypoint §0.1 会 FATAL exit 14（防止 nft 静默失效）。
+      IKEV2_OUT_IF: "${IKEV2_OUT_IF:-}"
+      # VPN 网络模式。**硬编码，不接受 .env 覆盖** —— 见下面说明。
+      #
+      # 本文件 = macvlan 模式，所以这里恒为 macvlan。刻意不写成
+      # ${IKEV2_NETWORK_MODE:-macvlan}：那样 .env 里残留的
+      # IKEV2_NETWORK_MODE=host 会覆盖掉默认值，导致「容器实际在 macvlan
+      # netns 里、但 entrypoint 按 host 分支跑」—— DDoS 去找不存在的
+      # DOCKER-USER 链、persist_sysctl 误写宿主 sysctl.d、SLAAC 复核整个跳过。
+      # 网络由**文件**决定，变量必须服从文件，不能反过来。
+      #
+      # bridge 已在 v2.86-PR14 移除。
+      IKEV2_NETWORK_MODE: "macvlan"
+      # ---- 以下为 L2 模式必填 ----
+      # 宿主父接口名。macvlan 虚拟网卡挂在它上面。不能填 lo。
+      IKEV2_L2_PARENT: "${IKEV2_L2_PARENT:-}"
+      # 宿主所在 IPv4 子网（CIDR）。**只支持 IPv4** —— IPv6 走 RA/SLAAC。
+      # 若填 v6 子网，Docker IPAM 会接管 IPv6 并默认分配 ULA(fd00::/8)，公网不可达。
+      IKEV2_L2_SUBNET: "${IKEV2_L2_SUBNET:-}"
+      # 该子网的宿主网关（必须是宿主自己的网关，容器经它出网）。
+      IKEV2_L2_GATEWAY: "${IKEV2_L2_GATEWAY:-}"
+      # macvlan 专属：bridge(默认) | private | vepa。passthru 与 IPAM 互斥，已禁用。
+      IKEV2_MACVLAN_MODE: "${IKEV2_MACVLAN_MODE:-}"
+      # ipvlan 专属（本文件用不到，保留是为了三份文件的 environment 键集合完全一致 ——
+      # 换 compose 文件时不会因为少一个键而少透传一个变量）：
+      #   l2(默认，强推荐) | l3 | l3s。非 l2 会丢弃广播/组播，只打 WARN。
+      IKEV2_IPVLAN_MODE: "${IKEV2_IPVLAN_MODE:-}"
+      IKEV2_IPVLAN_FLAG: "${IKEV2_IPVLAN_FLAG:-}"
+      # VPN 内部虚拟 IP 段：auto | 10.10.0.0/24 | ...
+      # auto 模式下扫描宿主 LAN 段，自动选不冲突的段
+      IKEV2_VPN_SUBNET: "${IKEV2_VPN_SUBNET:-auto}"
+      # v2.86 批次 B:IPv6 ULA 段。空 → entrypoint §0.6b 自动探测。
+      # macvlan/ipvlan 下 Docker IPAM 默认发 fd00::/8,此处仅在需要指定非默认段时用。
+      IKEV2_VPN_SUBNET_V6: "${IKEV2_VPN_SUBNET_V6:-}"
+
+      # 证书模式
+      IKEV2_CERT_MODE: "${IKEV2_CERT_MODE:-self-signed}"
+      IKEV2_DOMAIN: "${IKEV2_DOMAIN:-}"             # LE 模式必填
+      # v2.86 批次 B:LE 注册邮箱。空 = 不填(acme.sh 用默认行为)。
+      IKEV2_ACME_EMAIL: "${IKEV2_ACME_EMAIL:-}"
+      # v2.86 批次 D:面板「阿里云 API」卡的 payload 反向域名前缀。
+      # 空 = cert 内的默认值。跟证书 SAN 无关,只影响 mobileconfig 里的 payload id。
+      IKEV2_PAYLOAD_ID_BASE: "${IKEV2_PAYLOAD_ID_BASE:-}"
+
+      # LE 模式（仅 letsencrypt 时生效）：阿里云 DNS API 凭证
+      # 从 .env 读（不在镜像内、不在 git 中）
+      Ali_Key: "${Ali_Key:-}"
+      Ali_Secret: "${Ali_Secret:-}"
+
+      # v2-82 DDNS(v2-84 family-aware:支持 v4 / v6 / dual)。
+      # 适用场景:VPS 公网 IP 动态分配(家用墙 / 部分云厂商),DDNS 把域名
+      # 解析跟着变。证书本身跟 IP 无关(SAN 只放域名),不需要重签。
+      #
+      # v2-84 新增:
+      #   IKEV2_DDNS_FAMILY     - v4 / v6 / dual(默认 dual,即 A+AAAA 都同步)
+      #
+      # v2.86-pr23l 重大改动:
+      #   IKEV2_DDNS_PROBE_TARGET 已废弃。IPv4 公网 IP 由 internal/publicip
+      #   多家 API fallback 探测(境内节点:ip.cn / ipip.net;国际 fallback:
+      #   api.ipify.org / ifconfig.me / icanhazip.com),不再使用 net.Dial UDP
+      #   拿 LocalAddr 的旧实现。这样即使在 CGNAT / bridge 网络 / 多网卡场景下
+      #   也能拿到真实对外公网 IP。
+      #
+      # 注意:IPv4 DDNS 必须 host 网络(bridge 网络下访问外部 API 也不通)
+      IKEV2_DDNS_ENABLED: "${IKEV2_DDNS_ENABLED:-true}"
+      IKEV2_DDNS_FAMILY: "${IKEV2_DDNS_FAMILY:-dual}"
+      # v2.86 批次 B:阿里云凭证的**新名**(config.loadAliyunCredsFromEnv 的第 1 优先级)。
+      # 之前这三个凭证变量一个都没透传 —— 用户在 .env 里写 IKEV2_ALIYUN_KEY_ID
+      # 完全无效,容器里根本没有这个 env。entrypoint §7.5 会读它们,
+      # 所以顺序上放在 legacy 名(ALIYUN_ACCESS_KEY_*)之后语义更清楚:
+      # 新名优先,没写新名时才轮到 legacy 名。
+      IKEV2_ALIYUN_KEY_ID: "${IKEV2_ALIYUN_KEY_ID:-}"
+      IKEV2_ALIYUN_KEY_SECRET: "${IKEV2_ALIYUN_KEY_SECRET:-}"
+      ALIYUN_ACCESS_KEY_ID: "${ALIYUN_ACCESS_KEY_ID:-}"
+      ALIYUN_ACCESS_KEY_SECRET: "${ALIYUN_ACCESS_KEY_SECRET:-}"
+      ALIYUN_DOMAIN: "${ALIYUN_DOMAIN:-}"
+      ALIYUN_RR: "${ALIYUN_RR:-vpn}"
+
+      # 面板安全与登录策略（v2.86 批次 B/D 补齐透传）
+      #
+      # 这几项以前只能写进容器环境,面板看不到也改不了;
+      # 现在既能用 env 兜底,也能在面板「面板设置」卡里用开关 / 预配置下拉改。
+      # 全部用 "${VAR:-}" 空值透传:空 = 代码默认值(见 internal/config/config.go)。
+      #   IKEV2_COOKIE_SECURE  默认 true —— 关掉后明文 HTTP 入口也能登录,
+      #                      但**仅**在面板确实有 HTTPS 或反代兜 TLS 时才该关。
+      #   IKEV2_TRUSTED_PROXY  默认 false —— 面板前面有 nginx / NLB 时才开,
+      #                      公网直连时开等于让任意客户端伪造 X-Forwarded-For
+      #                      绕过登录 5 次锁定。
+      IKEV2_COOKIE_SECURE: "${IKEV2_COOKIE_SECURE:-}"
+      IKEV2_TRUSTED_PROXY: "${IKEV2_TRUSTED_PROXY:-}"
+      IKEV2_DEFAULT_USER_PASSWORD_LEN: "${IKEV2_DEFAULT_USER_PASSWORD_LEN:-12}"
+      IKEV2_SESSION_TTL: "${IKEV2_SESSION_TTL:-24h}"
+
+      # nftables 限速 / DDoS 防护阈值（v2.86 批次 B）
+      # 全部用空值透传,空 = entrypoint.sh 内部默认值(50 / 30 / 不开启)。
+      IKEV2_CONNLIMIT_PER_IP: "${IKEV2_CONNLIMIT_PER_IP:-}"
+      IKEV2_HASHLIMIT_PER_MIN: "${IKEV2_HASHLIMIT_PER_MIN:-}"
+      # true = 关闭 MSS clamping。仅当上游确实做了 PMTUD _blackhole 且
+      # 你的链路有其它 clamp 手段时才开,默认保持开启。
+      IKEV2_DISABLE_MSS_CLAMP: "${IKEV2_DISABLE_MSS_CLAMP:-}"
+      # true = 关闭 nft ikev2 表的 DDoS 防护。调试连接被限速时临时用。
+      IKEV2_DISABLE_DDOS_PROTECTION: "${IKEV2_DISABLE_DDOS_PROTECTION:-}"
+      # 限定 nftables 只处理某个地址族:v4 / v6。空 = 按 IPv6Only 自动判断。
+      IKEV2_FAMILY: "${IKEV2_FAMILY:-}"
+
+      # 审计日志保留策略（v2.86 批次 B，由 entrypoint 装的 cron 任务消费）
+      IKEV2_AUDIT_RETENTION_DAYS: "${IKEV2_AUDIT_RETENTION_DAYS:-}"
+      IKEV2_AUDIT_RETENTION_LOG: "${IKEV2_AUDIT_RETENTION_LOG:-}"
+      IKEV2_PANEL_DB: "${IKEV2_PANEL_DB:-}"
+
+      # v2.85-PR3:面板/日志时间显示时区(IANA TZ 名,默认 UTC)。
+      # 推荐:中国用户: Asia/Shanghai 或 Asia/Hong_Kong
+      #        美东用户: America/New_York
+      #        欧洲用户: Europe/Berlin
+      # 注意:此选项只影响面板渲染 / DDNS API / mobileconfig 描述的时间字符串;
+      #       不影响系统 TZ、证书有效期、cron 时间计算。
+      # v2.86 批次 D:这一项已可在面板「面板设置」卡用下拉选择,不必手填。
+      IKEV2_DISPLAY_TIMEZONE: "${IKEV2_DISPLAY_TIMEZONE:-UTC}"
+
+volumes:
+  # ⚠️ 这段卷定义必须与 docker-compose.yml / docker-compose.ipvlan.yml **逐字一致**。
+  #    改一处漏两处会导致「某个网络模式下静默新建空卷 → panel.db / LE 证书全丢」。
+  #    tests/network_mode_test.sh 的 NM-31 会强制校验三者一致。
+  #
+  # v2.86-PR17:去掉 external: true,改成 docker compose 自动建命名 volume。
+  #
+  # 之前 v2-72 加 external 的理由:锁死 volume 名(ikev2-panel-v2_ikev2-data),
+  # 防止跨项目名升级(比如项目目录从 ikev2-panel-v2 改成 ikev2-panel-v2-v2-86)
+  # 时 docker 自动建一个同名新空 volume,老 LE 证书 + panel.db 全丢。
+  #
+  # 这次去掉的原因:docker compose pull 成功,但 up -d 报 "external volume not
+  # found" —— fresh deploy(全新机器)没建过这个 volume,每次都要手动
+  # docker volume create 太反直觉。改成非 external 后:
+  #   - fresh deploy:`git clone + up.sh` 一次过,零额外步骤
+  #   - 老用户跨项目名升级:docker 会建一个空的 project_volume_name 同名
+  #     volume,老数据留在老 volume 里不丢(没被 mount → 不会被容器清空),
+  #     需要 `docker volume rename old new` 后再 `up -d` 才能复用。
+  #
+  # v2.86-PR19(A10):上面的 PR17 方案仍有洞——短名 `ikev2-data` 会被 compose
+  # 解析成 `{project_dir_name}_ikev2-data`(project 取自**目录名**)。
+  # 用户把目录从 ikev2-panel-v2 改名成 vpn(很常见的做法)→ compose 去找
+  # `vpn_ikev2-data` → 不存在 → **自动建一个空卷** → panel.db + panel-state/
+  # + LE 证书 + acme.sh account.json 全丢,且容器照常启动、面板可访问,
+  # 没有任何报错。这是**静默数据丢失**,最难排查的一类故障。
+  #
+  # 实机验证(192.168.50.63,2026-10-12):目录名 ikev2-panel-v2、volume key 写成
+  # `ikev2-panel-v2_ikev2-data` 时,compose 解析出的是
+  # `ikev2-panel-v2_ikev2-panel-v2_ikev2-data`(前缀重复),
+  # 与已有的真实数据卷 `ikev2-panel-data` **完全对不上** → up -d 静默建空卷,
+  # 57KB 的 panel.db / LE 证书 / panel-state 全部"消失",面板却显示正常。
+  #
+  # 修复:**显式 name**,卷名恒为 `ikev2-panel-data`,与目录名彻底解耦。
+  #   - fresh deploy:compose 自动建,零额外步骤
+  #   - 改目录名 / 多份 clone 共存:都指向同一个卷,不会分裂
+  #   - 老用户迁移:docker volume rename ikev2-panel-v2_ikev2-data ikev2-panel-data
+  ikev2-data:
+    name: ikev2-panel-data
+    # 无需 external;docker compose 自动建。
+
+networks:
+  # ===== macvlan 网络（本文件专属）=====
+  ikev2-l2:
+    driver: macvlan
+    driver_opts:
+      # 宿主父接口。macvlan 虚拟网卡挂在它上面。
+      parent: ${IKEV2_L2_PARENT:?必填：宿主父接口名，如 eth0}
+      # bridge(默认) | private | vepa
+      # passthru 不支持 IPAM（拿不到地址），本项目禁用。
+      macvlan_mode: ${IKEV2_MACVLAN_MODE:-bridge}
+    # 只配 IPv4。IPv6 走 RA/SLAAC —— 若在 IPAM 里配 v6 子网，
+    # Docker 会接管 IPv6 并默认分配 ULA(fd00::/8)，公网不可达。
+    ipam:
+      config:
+        - subnet: ${IKEV2_L2_SUBNET:?必填：宿主所在 IPv4 子网，如 203.0.113.0/24}
+          gateway: ${IKEV2_L2_GATEWAY:?必填：该子网的宿主网关，必须落在上面的子网内}
+    # IPv6 不用 IPAM 静态下发，交给上游路由器的 RA + 容器 SLAAC。
+    #
+    # 但必须显式打开 enable_ipv6，否则 Docker 会在端点建好时把
+    # net.ipv6.conf.eth0.disable_ipv6 置 1，接口上根本收不到 RA。
+    # 实测（v2.86-PR20，Docker 28.5.2，192.168.50.63）：
+    #   不开 enable_ipv6 → dis6=1 gua=0
+    #   开   enable_ipv6 → dis6=0 gua=1（GUA 由 RA 下发）
+    enable_ipv6: true
+    #
+    # 转发开关与 SLAAC 所需的 sysctl 写在 service 段的 `sysctls:` 里，
+    # 不在这里 —— 原因见 service 段注释。

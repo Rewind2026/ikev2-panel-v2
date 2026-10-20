@@ -218,7 +218,10 @@ func lastDDNSFailedExists() bool {
 //   - period_seconds 同步周期(10-3600)
 //
 // 副作用:
-//   - 写 /data/panel-state/ddns.conf (atomic)
+//   - Sync.SetConfig 写 /data/panel-state/ddns-runtime.conf (atomic,INI key=value)
+//     并刷内存 —— **不是** panelstate/ddns.conf。
+//     v2.86-pr23a 起 ddns.conf 这个 JSON 文件生产路径已无写入方
+//     (只有 ddns_test.go 在用),遗留读取见 main.go 的 LoadDDNSConfig。
 //   - 内存立即生效(Sync.SetConfig)
 //   - 写审计
 //   - flash 成功 → 302 /
@@ -507,7 +510,7 @@ func (s *Server) handleDDNSCreateRecord(w http.ResponseWriter, r *http.Request) 
 
 	domain, rr := s.DDNSSync.BaseDomain(), s.DDNSSync.RR()
 	if domain == "" {
-		http.Error(w, "DNS 主域名未配置(env IKEV2_DDNS_DOMAIN 或面板设置)", http.StatusBadRequest)
+		http.Error(w, "DNS 主域名未配置(env ALIYUN_DOMAIN 或面板设置)", http.StatusBadRequest)
 		return
 	}
 
@@ -566,12 +569,22 @@ func (s *Server) handleDDNSCreateRecord(w http.ResponseWriter, r *http.Request) 
 //
 // 跟 sync.go tick() 内部的 CredentialGetter 同一套 — 但 sync 的 getter 不导出,
 // 所以这里在 handler 层从 Server.PanelState 拿(等同于用户改凭证后立即生效)。
+//
+// v2.86 配置统一批次 D 修复:之前注释写着"env 兜底"但代码没兜。
+// 用户只在 .env 配 ALIYUN_ACCESS_KEY_ID / _SECRET、从没在面板保存过时,
+// "查询阿里云记录值" / "在阿里云创建记录" 两个按钮会直接报"凭证未配置",
+// 而 DDNS 同步本身却在正常工作(env 值经 main.go 注入 ddns.Config)——
+// 同一份凭证在两个入口表现不一致。
+// 现在按 s.AliyunAccessKeyID / s.AliyunAccessKeySecret(main.go 从 cfg 注入)兜底。
 func (s *Server) ddnsCredentials() (string, string, bool) {
 	if s.PanelState != nil {
 		if creds, _ := s.PanelState.ReadAliyun(); creds != nil &&
 			creds.KeyID != "" && creds.KeySecret != "" {
 			return creds.KeyID, creds.KeySecret, true
 		}
+	}
+	if s.AliyunAccessKeyID != "" && s.AliyunAccessKeySecret != "" {
+		return s.AliyunAccessKeyID, s.AliyunAccessKeySecret, true
 	}
 	return "", "", false
 }

@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -158,10 +159,13 @@ func DetectGlobalV6(iface string) (string, error) {
 // detectGlobalV6 探测指定接口（空 = 任意接口）的 global IPv6 地址（2000::/3）。
 // 实现：扫 /proc/net/if_inet6，简单稳定，不依赖 netlink。
 //
-// /proc/net/if_inet6 格式（每行）：
+// /proc/net/if_inet6 格式（每行 6 个字段，空格分隔）：
 //
-//	addr (32hex) ifindex (dec) prefix(hex) scope(hex) flags(hex) devname
-//	例子：2408832E08A510007EB4F9A371 4D8D 80 00 01 0C ens18
+//	addr(32hex) ifindex(hex) prefixlen(hex) scope(hex) flags(hex) devname
+//	例子：2408832e08a45be0be2411fffefb01bb 02 40 00 00 ens18
+//
+// ⚠️ flags 是**第 5 个**字段（索引 4），第 4 个是 scope。写错索引会让
+// DAD 状态过滤完全失效 —— 详见 parseIfInet6Line 里的位定义。
 func detectGlobalV6(iface string) (string, error) {
 	f, err := os.Open("/proc/net/if_inet6")
 	if err != nil {
@@ -171,57 +175,65 @@ func detectGlobalV6(iface string) (string, error) {
 
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
-		if len(fields) < 6 {
-			continue
+		if ip, ok := parseIfInet6Line(scanner.Text(), iface); ok {
+			return ip, nil
 		}
-		addr32 := fields[0]
-		dev := fields[5]
-		flags := fields[3]
-
-		// flags: 0x01 = temporary, 0x80 = deprecated. 我们用 primary (0x00 or 0x01)。
-		// 但忽略 deprecated (0x10)。
-		if flags == "10" {
-			continue
-		}
-
-		// 接口过滤
-		if iface != "" && dev != iface {
-			continue
-		}
-
-		// addr32 是无冒号 32 字符，需要转为 :: 分隔
-		ip, err := hexToV6(addr32)
-		if err != nil {
-			continue
-		}
-
-		// 仅取 global unicast（2000::/3）
-		if !isGlobalV6(ip) {
-			continue
-		}
-
-		// 跳过 link-local (fe80::/10)
-		if strings.HasPrefix(ip, "fe80:") || strings.HasPrefix(ip, "fe80::") {
-			continue
-		}
-
-		// 跳过 loopback
-		if ip == "::1" {
-			continue
-		}
-
-		// 跳过 ULA (fc00::/7)
-		if strings.HasPrefix(ip, "fc") || strings.HasPrefix(ip, "fd") {
-			continue
-		}
-
-		return ip, nil
 	}
 	if err := scanner.Err(); err != nil {
 		return "", fmt.Errorf("scan /proc/net/if_inet6: %w", err)
 	}
 	return "", nil
+}
+
+// /proc/net/if_inet6 第 5 字段（flags）的位定义，抄自内核
+// include/uapi/linux/in6.h。我们只关心这三个"不可用"状态。
+const (
+	ifInet6DadFailed   = 0x08 // DAD 冲突，地址不可用
+	ifInet6Deprecated  = 0x10 // 前缀过期，地址已不该再用
+	ifInet6Tentative   = 0x40 // DAD 尚未完成，地址还不能用
+)
+
+// parseIfInet6Line 解析一行 /proc/net/if_inet6，返回该行的 global unicast v6。
+// 第二个返回值为 false 表示"这行不能用"：字段不足 / 网卡不匹配 / flags 不可用
+// / 不是 GUA。调用方据此继续扫下一行。
+//
+// 抽成独立函数是为了能脱离真实网卡做单元测试 —— 状态过滤是这个函数的
+// 全部价值所在，而它恰好是最容易写错字段索引的地方。
+func parseIfInet6Line(line, wantIface string) (string, bool) {
+	fields := strings.Fields(line)
+	if len(fields) < 6 {
+		return "", false
+	}
+
+	if wantIface != "" && fields[5] != wantIface {
+		return "", false
+	}
+
+	// flags 是十六进制字符串。内核给的是两位零填充（"00"/"80"/"c0"），
+	// ParseUint 两种都能吃。
+	flagBits, err := strconv.ParseUint(fields[4], 16, 32)
+	if err != nil {
+		return "", false
+	}
+	// DAD 冲突 / DAD 未收敛 / 已过期这三种必须排除：把尚未确认可用的地址
+	// 交给 charon，症状是客户端连得上却拿不到地址，且日志里没有任何异常。
+	//
+	// 0x20 TEMPORARY（隐私地址）是稳定态，**不排除**。
+	// 0x80 PERMANENT（静态地址）自然通过。
+	if flagBits&(ifInet6DadFailed|ifInet6Deprecated|ifInet6Tentative) != 0 {
+		return "", false
+	}
+
+	ip, err := hexToV6(fields[0])
+	if err != nil {
+		return "", false
+	}
+	// 仅 2000::/3；link-local(fe80::/10)、ULA(fc00::/7)、::1 的首 hextet
+	// 首位分别是 e/f/空，都不落在 2-3 区间，isGlobalV6 一并排除。
+	if !isGlobalV6(ip) {
+		return "", false
+	}
+	return ip, true
 }
 
 // hexToV6 把 /proc/net/if_inet6 里 32 个十六进制字符（无冒号）转为标准 :: 分隔形式。
@@ -296,18 +308,14 @@ func trimLeadingZerosRFC5952(s string) string {
 	return strings.Join(parts, ":")
 }
 
-// isGlobalV6 判断 IPv6 是否为 global unicast（2000::/3）。
+// isGlobalV6 判断 IPv6 是否为 global unicast（2000::/3，即 2000:: ~ 3fff::）。
 // 不依赖 net.ParseIP 因为我们要处理 /proc 里无压缩形式。
 func isGlobalV6(s string) bool {
 	if len(s) < 4 {
 		return false
 	}
-	first := strings.ToLower(s[:4])
-	// 2000::/3 -> 高 4 位是 0010，即 0x2[0-f]
-	if first[0] == '2' {
-		return true
-	}
-	// 3xxx::/16 是 global unicast 的部分段，但 3F 段是 documentation
-	// 我们简化：只检查 2xxx 就足够（实际公网 IPv6 都从 2000::/3 分）
-	return false
+	// 首 hextet 的首位是 2 或 3 即落在 2000::/3 内。
+	// link-local(fe80::/10) 是 e、ULA(fd00::/8) 是 f、::1 是空 —— 天然不匹配。
+	first := s[0]
+	return first == '2' || first == '3'
 }

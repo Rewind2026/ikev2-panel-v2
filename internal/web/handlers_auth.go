@@ -40,7 +40,7 @@ func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 		PageMeta:   PageMeta{Page: "login", PageKey: "login", Title: "登录"},
 		Host:       host,
 		Version:    s.Version,
-		SessionTTL: s.SessionTTL.String(), // "24h" 等
+		SessionTTL: s.sessionTTL().String(), // "24h" 等
 	})
 }
 
@@ -109,7 +109,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		ID:        sessID,
 		CSRFToken: csrfToken,
 		CreatedAt: now.Unix(),
-		ExpiresAt: now.Add(s.SessionTTL).Unix(),
+		ExpiresAt: now.Add(s.sessionTTL()).Unix(),
 		UserAgent: r.UserAgent(),
 	}
 	if err := s.Store.CreateSession(r.Context(), sess); err != nil {
@@ -118,7 +118,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	auth.SetSessionCookie(w, sessID, s.Secure)
+	auth.SetSessionCookie(w, sessID, s.cookieSecure())
 	s.incLoginAttempt("success")
 	if s.RateLimiter != nil {
 		auth.RecordLoginSuccess(s.RateLimiter, r)
@@ -132,7 +132,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if sessID != "" {
 		_ = s.Store.DeleteSession(r.Context(), sessID)
 	}
-	auth.ClearSessionCookie(w, s.Secure)
+	auth.ClearSessionCookie(w, s.cookieSecure())
 	http.Redirect(w, r, "/login", http.StatusFound)
 }
 
@@ -149,7 +149,7 @@ func (s *Server) renderLoginError(w http.ResponseWriter, r *http.Request, userna
 		Username:   username,
 		Host:       host,
 		Version:    s.Version,
-		SessionTTL: s.SessionTTL.String(),
+		SessionTTL: s.sessionTTL().String(),
 	})
 }
 

@@ -30,10 +30,10 @@
 
 | 退出码 | 含义 | 对应小节 |
 |--------|------|----------|
-| 10 | 找不到公网 IPv6 地址（`IKEV2_IPV6_ONLY=true` 时） | [1.1](#11-找不到公网-ipv6-地址退出码-10) |
+| 10 | 找不到公网 IPv6 地址（`IKEV2_IPV6_ONLY=true` 时）／ L2 模式 SLAAC sysctl 不符 | [1.1](#11-找不到公网-ipv6-地址退出码-10) · [1.3.4](#134-l2-模式拿不到-ipv6退出码-10macvlan--ipvlan) |
 | 11 | IP forwarding 启用失败 | [1.2](#12-ip-forwarding-启用失败退出码-11) |
-| 12 | 网络模式不是 host / charon 启动失败 | [1.3](#13-网络模式不是-host退出码-12) · [1.4](#14-charon-启动失败退出码-12) |
-| 14 | 探测不到对外网卡 | [1.5](#15-探测不到对外网卡退出码-14) |
+| 12 | 网络模式配置错误 / charon 启动失败 | [1.3](#13-网络模式配置错误退出码-12) · [1.4](#14-charon-启动失败退出码-12) |
+| 14 | 探测不到对外网卡 / `IKEV2_OUT_IF` 在容器内不存在 | [1.5](#15-探测不到对外网卡退出码-14) |
 | 15 | nft 规则集加载失败 | [1.6](#16-nft-规则集没生效) |
 | 17 / 18 / 19 | LE 模式缺域名 / 签发失败 / 装证书失败 | [3. Let's Encrypt](#3-lets-encrypt-续签失败) |
 
@@ -254,20 +254,114 @@ pools.v6pool.addrs = fd00:1::/64
 或 `swanctl --terminate --child ikev2-rw`（注意不带 `--child` 会报
 `missing terminate selector`）。
 
-### 1.3 网络模式不是 host（退出码 12）
+### 1.3 网络模式配置错误（退出码 12）
+
+支持 `host` / `macvlan` / `ipvlan` 三种（v2.86-PR20）。以下每一条都会 FATAL。
+
+#### 1.3.1 模式值非法
 
 **症状**：
 
 ```
-[entrypoint] FATAL: IKEV2_NETWORK_MODE=bridge is not supported
-[entrypoint]   解决:从 .env 删掉 IKEV2_NETWORK_MODE 那一行(或改成 host)
+[entrypoint] ERR: IKEV2_NETWORK_MODE=bridge 已于 v2.86-PR14 移除
+[entrypoint] ERR:   合法值: host | macvlan | ipvlan
+[entrypoint] FATAL: IKEV2_NETWORK_MODE=bridge 配置错误（详见上方 ERR）
 ```
 
-**解法**：本项目**只支持 host 网络**（需要直绑公网 IPv6、且 UDP 500/4500 不做端口映射）。
-把 `.env` 里的 `IKEV2_NETWORK_MODE` 删掉或改成 `host`，然后 `docker compose up -d`。
+**解法**：`bridge` 模式不存在，改成 `host` / `macvlan` / `ipvlan`。
+
+> ⚠️ **`IKEV2_NETWORK_MODE` 不决定用哪个 compose 文件** —— 文件由 `-f` 决定。
+> 换成对应文件重建即可：
+>
+> ```bash
+> docker compose -f docker-compose.macvlan.yml up -d
+> ```
+
+#### 1.3.2 L2 变量缺失或非法
+
+**症状**（`macvlan` / `ipvlan`）：
+
+```
+[entrypoint] ERR: IKEV2_NETWORK_MODE=macvlan 缺少必填变量: IKEV2_L2_PARENT IKEV2_L2_SUBNET IKEV2_L2_GATEWAY
+```
+
+或 `IKEV2_L2_SUBNET 只支持 IPv4`、`IKEV2_L2_PARENT 不能是 lo`、
+`macvlan_mode=passthru 与 IPAM 互斥` 等。
+
+**解法**：`.env` 里补齐三项并重建：
+
+```bash
+IKEV2_NETWORK_MODE=macvlan
+IKEV2_L2_PARENT=eth0                  # 宿主物理网卡
+IKEV2_L2_SUBNET=203.0.113.0/24        # 宿主所在 IPv4 子网，只支持 IPv4
+IKEV2_L2_GATEWAY=203.0.113.1          # 该子网的宿主网关
+
+docker compose -f docker-compose.macvlan.yml up -d
+```
+
+⚠️ **gateway 必须落在 subnet 里**，否则 FATAL（entrypoint 与 `up.sh` 双重校验）。
+
+⚠️ **`macvlan_mode=passthru` 不支持 IPAM**，所以本项目的 macvlan 模式
+不接受 `passthru`，改用 `bridge`（`private` / `vepa` 可以）。
+
+#### 1.3.3 规格表文件缺失
+
+**症状**：`FATAL: /etc/ikev2-panel/scripts/network-mode.sh not found (image build incomplete)`。
+
+**解法**：镜像构建有问题（Dockerfile 里应有 `COPY scripts/network-mode.sh ...`
+且构建期 sanity check 通过）。重建镜像。
 
 > 同一个退出码 12 也用于「charon 启动失败」，两者靠日志关键字区分：
 > 前者有 `IKEV2_NETWORK_MODE`，后者有 `FATAL: charon failed to start`（见 [1.4](#14-charon-启动失败退出码-12)）。
+
+### 1.3.4 L2 模式 sysctl 不符合预期（退出码 10，macvlan / ipvlan）
+
+**症状**：
+
+```
+[entrypoint] FATAL: eth0 sysctl 不符合预期 → IPv6 SLAAC 不可用
+[entrypoint]   不符项： net/ipv6/conf/eth0/accept_ra=1(期望 2)
+```
+
+**含义**：L2 模式的公网 IPv6 靠上游路由器发 RA、容器 SLAAC 自动获取。
+`accept_ra` 不为 2，RA 就会被内核丢弃（因为本项目必开 IP forwarding）。
+
+**排查**：
+
+```bash
+# 1) 看容器实际拿到的 sysctl（这是 compose 注入的结果）
+docker inspect ikev2-panel --format '{{.HostConfig.Sysctls}}'
+
+# 2) 看容器内运行时的真实值
+docker exec ikev2-panel sh -c 'cat /proc/sys/net/ipv4/conf/eth0/forwarding \
+  /proc/sys/net/ipv6/conf/eth0/forwarding \
+  /proc/sys/net/ipv6/conf/eth0/accept_ra \
+  /proc/sys/net/ipv6/conf/eth0/disable_ipv6'
+
+# 3) 确认 disable_ipv6 是 0（由 networks 段 enable_ipv6 决定，不由 sysctls 决定）
+docker network inspect ikev2-panel-v2-main_ikev2-l2 \
+  --format '{{.EnableIPv6}} {{.Driver}}'
+```
+
+**解法**：
+
+1. 确认走的是 L2 compose 文件（`docker network inspect` 看到的 driver 应是
+   `macvlan` / `ipvlan`，不是 `host`）；
+2. 确认 `networks.ikev2-l2` 段有 `enable_ipv6: true`，service 段有三条
+   `sysctls`（`net.ipv4.conf.all.forwarding` / `net.ipv6.conf.all.forwarding` /
+   `net.ipv6.conf.default.accept_ra`）。这是唯一可用的注入通道，
+   其他写法实测都不生效 —— 见 [architecture.md §12.8.2](architecture.md)；
+3. 确认上游路由器**对这个网段真的在发 RA**（有些企业网 / 云 VPC 不发）；
+4. `accept_ra=2` 是必须的 —— 本项目要开 IP forwarding，内核在 forwarding 打开时
+   会把默认态的 `accept_ra` 抑制掉，不显式写 2 就收不到 RA。
+
+与 [1.1](#11-找不到公网-ipv6-地址退出码-10) 的区别：1.1 是"地址始终拿不到"，
+本节是"sysctl 状态本身就不对"，后者是前者的直接原因。
+
+> **地址收敛需要时间**：SLAAC 的 GUA 要等上游一个 RA 周期再叠加 DAD，
+> 实测 2~5 秒。entrypoint 在 L2 模式下会重试最多 15 秒，
+> 日志里会打印 `[auto-detect] Public IPv6 converged after ~Ns`。
+> 超过 15 秒仍失败才是真问题，不要盲目加长等待。
 
 ### 1.4 charon 启动失败（退出码 12）
 
@@ -288,18 +382,34 @@ tail -50 /var/log/charon.log
 
 ### 1.5 探测不到对外网卡（退出码 14）
 
-**症状**：`FATAL: cannot detect outbound interface`。
+**症状 A**（host 模式）：`FATAL: cannot detect outbound interface`。
 
-**排查**：容器是 host netns，网卡探测结果应与宿主一致。
+**症状 B**（macvlan / ipvlan 模式）：
+
+```
+[entrypoint] FATAL: IKEV2_OUT_IF=ens18 在容器内不存在
+[entrypoint]   当前网络模式: macvlan（容器有独立 netns，网卡名与宿主不同）
+```
+
+**排查**：
 
 ```bash
 ip -4 route show default
 ip -6 route show default
 ip -o link show up
+docker exec ikev2-panel ip -br link        # 容器里的真实网卡名
 ```
 
-**解法**：三条都空（宿主没有默认路由）→ 宿主网络没配好。
-只是名字不是预期的 → 在 `.env` 里显式指定 `IKEV2_OUT_IF=<iface>`。
+**解法**：
+
+- 症状 A：三条都空（宿主没有默认路由）→ 宿主网络没配好。
+  只是名字不是预期的 → 显式指定 `IKEV2_OUT_IF=<iface>`。
+- 症状 B：**从 `.env` 删掉 `IKEV2_OUT_IF` 这一行**，让 entrypoint 自动探测
+  （L2 模式下容器网卡通常是 `eth0`）。这是最省事的做法。
+
+⚠️ **症状 B 不修会退化成静默故障**：nft 模板会生成一条永不匹配的
+`oifname` 规则 → MASQUERADE 失效 → 客户端能连上 VPN 但出不了网。
+这是本次改造里唯一"启动成功但功能不可用"的坑，所以 entrypoint 改成 FATAL 而非 WARN。
 
 ### 1.6 nft 规则集没生效
 
@@ -340,6 +450,175 @@ docker compose exec ikev2-panel nft list table ip ikev2   # 验证回来了
 彻底加载失败（`FATAL: nft -f failed`，退出码 15）→ 检查宿主是否装了 nftables、
 以及 `/run/ikev2-panel/ikev2.nft` 是否存在（由 `scripts/ikev2.nft.template`
 渲染生成）。
+
+### 1.7 L2 模式（macvlan / ipvlan）特有排障
+
+> 只在 `IKEV2_NETWORK_MODE=macvlan|ipvlan` 时适用，host 模式见上文。
+
+#### 1.7.1 确认当前真的跑在 L2 模式
+
+```bash
+docker inspect ikev2-panel --format '{{.HostConfig.NetworkMode}}'
+# host    → host
+# macvlan → 容器名（Docker 会给自定义网络起一个 project 前缀的容器名）
+# ipvlan  → 同上
+```
+
+`/run/ikev2-panel/netmode.env` 是 entrypoint 写的运行时快照，最直接：
+
+```bash
+docker exec ikev2-panel cat /run/ikev2-panel/netmode.env
+# MODE=macvlan
+# OUT_IF=eth0
+# DRIVER=macvlan_mode=bridge
+# HAS_OWN_IP=1
+# PROCSYS_RW=0
+# DDOS_CHAIN=INPUT
+```
+
+若 `MODE=macvlan` 但日志有 `WARN: declared macvlan but the container still
+shares the host netns (docker0 visible)` → **用错 compose 文件了**
+（用了 `docker-compose.yml` 而不是 `docker-compose.macvlan.yml`）：
+
+```bash
+docker compose -f docker-compose.macvlan.yml down
+docker compose -f docker-compose.macvlan.yml up -d
+```
+
+#### 1.7.2 容器没有 v4 地址
+
+```bash
+docker inspect ikev2-panel --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}'
+docker network inspect <项目名>_ikev2-l2 | grep -i macvlan -A3
+```
+
+| 现象 | 原因 / 处置 |
+|------|-----------|
+| 没挂到 `ikev2-l2` 上 | 用的是 `docker-compose.yml`（host）而不是 L2 文件；或 `.env` 里模式名拼写不对 |
+| IP 为空、事件日志报 `failed to allocate gateway` | `IKEV2_L2_SUBNET` 与宿主实际网段不符（同一二层上有别的 DHCP 池），或网关不在子网内 |
+| 报 `could not find an available, non-overlapping IPv4 address pool` | `IKEV2_L2_SUBNET` 与已有 Docker 网段（如默认 `172.17.0.0/16`）重叠 → 换一个不重叠的子网 |
+| **容器压根没创建**（`docker compose up` 就报 `device or resource busy`） | 父接口是 virtio，**不是配置问题** → [1.7.6](#176-device-or-resource-busy父接口是-virtio) |
+| IP 拿到了但 ping 不通网关 | 交换机 / 云安全组不允许多个源 MAC（macvlan）→ 改用 `ipvlan`；或网络是 `/32` 主机路由，点对点配置 |
+| 容器 ping 不到**宿主** | **这是设计如此**，macvlan/ipvlan 在内核层隔离父子，不是 bug。需要互通就建 shim |
+
+#### 1.7.3 容器拿不到 v6 地址
+
+```bash
+docker exec ikev2-panel ip -6 addr show eth0
+docker exec ikev2-panel cat /proc/sys/net/ipv6/conf/eth0/accept_ra
+docker exec ikev2-panel sysctl net.ipv6.conf.all.forwarding
+tcpdump -i <parent> -n icmp6          # 宿主上抓 RA
+```
+
+| 现象 | 原因 / 处置 |
+|------|-----------|
+| 抓不到 RA | 上游不发 RA（企业网 / 部分云 VPC）→ 换网段，或放弃 L2 模式 |
+| 抓得到 RA 但地址没配上来 | `accept_ra` 不是 2 → entrypoint 已 `exit 10` 拦截（[1.3.4](#134-l2-模式拿不到-ipv6退出码-10macvlan--ipvlan)） |
+| 地址是 `fd00::/8`（ULA） | 有人在 IPAM 里配了 v6 子网，Docker 抢了 RA → 本项目已拒绝 v6 子网，检查是不是手工改过 L2 compose 文件 |
+| 地址是 `fe80::` 开头 | RA 收到了但没给全局前缀（DAD 未完成）→ 等 2s 再看，或上游只发 link-local |
+
+⚠️ **`IKEV2_SERVER_ADDR_V6` 解决不了这个问题**：它只填 charon 的
+`local_addrs`，不负责把地址配到网卡上。设了它但网卡上没有对应地址，
+charon 会 bind 失败或收不到包。
+
+#### 1.7.4 客户端能连 VPN 但出不了网
+
+按可能性从高到低排查：
+
+| 序 | 检查 | 命令 |
+|----|------|------|
+| 1 | `IKEV2_OUT_IF` 语义漂移 | entrypoint 已 FATAL 拦截（[1.5](#15-探测不到对外网卡退出码-14)）；若没触发说明已自动探测成 `eth0` |
+| 2 | 容器 netns 内 forwarding 是否为 1 | `docker exec ikev2-panel sysctl net.ipv4.ip_forward`（应为 1） |
+| 3 | MASQUERADE 规则是否加载 | `docker exec ikev2-panel nft list table ip ikev2` |
+| 4 | NAT 路由是否在 | `docker exec ikev2-panel ip route show` |
+| 5 | 容器本身能否出网 | `docker exec ikev2-panel ping -c3 <公网 IP>` —— 不能出网是环境问题，不是项目问题 |
+
+⚠️ **宿主上 `sysctl -w net.ipv4.ip_forward=1` 对 L2 容器无效**：
+forwarding 是 per-netns 的，改的是宿主那个 netns。这是最容易被误导的地方。
+
+#### 1.7.5 宿主与容器需要互通（建 shim）
+
+macvlan / ipvlan 在内核层隔离宿主与容器（`host` 模式不会有这个问题）。
+需要互通时在**宿主**上建一个 shim 接口：
+
+```bash
+# macvlan（parent 换成你的实际父接口）
+ip link add macvlan-shim link eth0 type macvlan mode bridge
+ip addr add 203.0.113.9/24 dev macvlan-shim
+ip link set macvlan-shim up
+ip route add 203.0.113.50/32 dev macvlan-shim   # 换成容器实际拿到的 IP
+
+# ipvlan 用 type ipvlan mode l2 代替
+```
+
+查容器 IP：
+
+```bash
+docker inspect ikev2-panel --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}'
+```
+
+删除 shim：
+
+```bash
+ip link del macvlan-shim
+```
+
+⚠️ shim 本身也要走宿主防火墙策略，别以为建了就能通。
+
+#### 1.7.6 `device or resource busy`（父接口是 virtio）
+
+**症状**：`docker compose up` 在**创建网络**这一步就失败，容器根本没起来：
+
+```
+Error response from daemon: device or resource busy
+```
+
+**这是宿主虚拟化层的限制，不是配置写错。** 父接口是 **virtio**（KVM 虚拟机的
+常见网卡）时，内核不允许在上面挂 macvlan / ipvlan，**两种模式都会失败**，
+改任何参数都绕不过去。
+
+> 注意区分：报 `could not find an available, non-overlapping IPv4 address pool`
+> 是**另一个问题**（`IKEV2_L2_SUBNET` 与已有 Docker 网段撞了），见 [1.7.2](#172-容器没有-v4-地址)。
+
+**先确认父接口类型**：
+
+```bash
+ip -d link show eth0 | head -1
+```
+
+| 输出 | 结论 |
+|------|------|
+| `virtio` 开头 | ❌ L2 模式在这台机器上不可用，只能留在 host 模式 |
+| `e1000` / `enp*` / `ens*` / `bond*` / `bridge` | 一般没问题，继续往下看 |
+
+**用一次探测代替反复试 compose**（探测网络比试 compose 快得多，且失败不留半成品）：
+
+```bash
+# macvlan
+docker network create ikev2-l2-probe --driver macvlan -o parent=eth0 -o macvlan_mode=bridge
+# ipvlan
+docker network create ikev2-l2-probe --driver ipvlan -o parent=eth0 -o ipvlan_mode=l2
+docker network rm ikev2-l2-probe     # 探测完记得删
+```
+
+报 `device or resource busy` → 就是 virtio。
+
+**实测对照**（Docker 28.5.2）：
+
+| parent | 类型 | macvlan | ipvlan |
+|--------|------|---------|--------|
+| `ens18` | virtio | ❌ `device or resource busy` | ❌ `device or resource busy` |
+| `docker0` | bridge | — | ✅ 正常创建 |
+
+同一份 compose 配置只换 parent 就成功，**证明配置本身没问题**。
+
+**解法**（按优先级）：
+
+1. 留在 **host 模式** —— 宿主 500/4500 没被占用就用它，最省事，也是绝大多数情况下的正解。
+2. 换一块**非 virtio** 网卡作 parent（物理网卡 / e1000 类型的 vNIC）。
+
+⚠️ shim（[1.7.5](#175-宿主与容器需要互通建-shim)）在纯 virtio 宿主上通常也不通 ——
+shim 本身也是建在 parent 上的 macvlan 子接口，同样被内核拒绝。
 
 ---
 
@@ -1165,6 +1444,20 @@ docker compose exec ikev2-panel sqlite3 /data/panel.db \
 
 # 8. UDP 500/4500 端口占用 `[host]`（host netns，容器内外看到的是同一批 socket）
 ss -lunp | grep -E ':(500|4500)\b'
+#    L2 模式下容器有独立 IP，这两条查到的是宿主自己的服务，与本项目无关
+
+# 9. 当前网络模式（三模式通用）
+docker exec ikev2-panel cat /run/ikev2-panel/netmode.env
+docker inspect ikev2-panel --format '{{.HostConfig.NetworkMode}}'
+
+# 10. L2 模式专查：地址 / SLAAC sysctl / 转发
+docker exec ikev2-panel ip -br addr
+docker exec ikev2-panel sysctl net.ipv4.ip_forward
+docker exec ikev2-panel cat /proc/sys/net/ipv6/conf/eth0/accept_ra
+docker exec ikev2-panel cat /proc/sys/net/ipv6/conf/eth0/disable_ipv6
+
+# 11. 网络模式规格表单元测试（不依赖 docker）
+./tests/network_mode_test.sh
 ```
 
 ---

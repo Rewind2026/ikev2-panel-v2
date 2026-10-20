@@ -148,7 +148,7 @@ func (s *Server) handleUserMobileconfigQR(w http.ResponseWriter, r *http.Request
 	// QR 内容：scheme://panelHost/install/{token}，极短（~70 字节），
 	// 二维码密度正常，手机相机好扫。
 	scheme := "https"
-	if !s.Secure {
+	if !s.cookieSecure() {
 		scheme = "http"
 	}
 	installURL := fmt.Sprintf("%s://%s/install/%s", scheme, s.PanelHost, token)

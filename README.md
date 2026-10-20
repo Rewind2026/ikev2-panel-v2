@@ -91,22 +91,111 @@ IKEV2_DOMAIN=vpn.example.com
 
 以下每条都对应 [`docker-compose.yml`](docker-compose.yml) 里的实际配置。
 
-### 网络：只有 host 模式
+### 三网络模式与前置条件
 
-`network_mode: host` 是**唯一支持的模式**，容器与宿主共享网络命名空间。
+支持 `host`（默认）、`macvlan`、`ipvlan` 三种，v2.86-PR20 起。
 
-- **compose 里没有 `ports:` 映射**，host 模式下写了也不生效 —— 端口是容器直接在宿主上监听的。
-- 不要去改 `/etc/docker/daemon.json` 配 IPv6 或转发开关：host 模式不走 Docker 的
-  iptables / sysctl 管理，改那些只会在宿主上留下无关配置。
-- 公网 IPv6 必须可达，所以 bridge 模式（Docker 默认从 `fd00::/8` 分 ULA，公网不可路由）
-  天然不可用。`.env` 里若把 `IKEV2_NETWORK_MODE` 设成 `bridge` / `ipvlan`，
-  entrypoint 会直接 FATAL 退出并说明原因。
+| 模式 | compose 文件 | netns | 地址来源 | 什么时候用 |
+|------|-------------|-------|---------|-----------|
+| `host` | `docker-compose.yml` | 与宿主共享 | 宿主网卡 | **默认**。零改动兼容，宿主已有公网 v6 就直接用 |
+| `macvlan` | `docker-compose.macvlan.yml` | 独立 | IPAM 分配 v4 + 上游 RA 下发 v6 | 宿主上 500/4500/8443 已被别的服务占用，但容器需要在同一二层里占一个独立 IP |
+| `ipvlan` | `docker-compose.ipvlan.yml` | 独立 | 同上，但与宿主共享 MAC | 同 macvlan，但上游（云厂商 / 交换机）不允许出现第二个源 MAC |
+
+**三个模式 = 三个独立完整的 compose 文件**，各管各的，不叠加：
+
+```bash
+docker compose up -d                                # host
+docker compose -f docker-compose.macvlan.yml up -d  # macvlan
+docker compose -f docker-compose.ipvlan.yml up -d   # ipvlan
+```
+
+也可以用 `./scripts/up.sh` —— 它读 `.env` 里的 `IKEV2_NETWORK_MODE` 自动选文件，
+额外做两件事：建 `./logs` 目录（bind mount 目标），以及在调 docker 之前拦下
+L2 必填变量缺失 / 填了 v6 子网这类配置错误。
+
+不需要 `!reset` / `!override` 标签，所以**任何 Docker Compose 版本都能用**，不设版本下限。
+
+> ⚠️ **三份文件的服务定义必须保持一致**（image / capabilities / volumes / tmpfs / environment）。
+> 这是三独立文件方案唯一的结构性风险 —— 改一处漏两处的后果不是报错，而是
+> 「某个模式下静默新建空卷 → panel.db / LE 证书全丢」。改完 compose 请跑：
+>
+> ```bash
+> ./tests/network_mode_test.sh     # NM-29~NM-36 强制校验三份一致
+> ```
+
+**L2 模式在 `.env` 里需要额外提供**（全部必填）：
+
+```bash
+IKEV2_NETWORK_MODE=macvlan
+IKEV2_L2_PARENT=eth0                  # 宿主父接口
+IKEV2_L2_SUBNET=203.0.113.0/24        # 宿主所在 IPv4 子网（只支持 IPv4）
+IKEV2_L2_GATEWAY=203.0.113.1          # 该子网的宿主网关，必须落在上面的子网里
+```
+
+**L2 模式前置条件**：
+
+| 条件 | 说明 |
+|------|------|
+| Linux | macvlan / ipvlan 是 Linux 内核特性，Docker Desktop 不支持 |
+| kernel ≥ 3.9（macvlan）/ ≥ 4.2（ipvlan） | 低于此版本直接没有这两个 driver |
+| 非 rootless | rootless 下支持不完整 |
+| 上游对该网段**发 RA** | L2 模式的公网 IPv6 靠 RA/SLAAC 自动获取，没有 RA 就没有 v6 |
+| 云厂商可能拦新 MAC | macvlan 收不到 ARP/RA 时，改用共享 MAC 的 ipvlan |
+| **父接口不能是 virtio** | 云主机（KVM/超卖）上最常见的硬墙，**macvlan 和 ipvlan 都会失败**，见下方 |
+
+**先自查父接口类型**（两条命令，10 秒决定能不能用 L2）：
+
+```bash
+ip -d link show eth0 | head -1
+# virtio 开头 → macvlan / ipvlan 都起不来，直接留在 host 模式
+# e1000 / enp* / ens* / bond* / bridge → 一般没问题
+docker network create ikev2-l2-probe \
+  --driver macvlan -o parent=eth0 -o macvlan_mode=bridge
+# Error response from daemon: device or resource busy → 就是 virtio
+docker network rm ikev2-l2-probe
+```
+
+实测（Docker 28.5.2，宿主 `ens18` 为 virtio）：macvlan 与 ipvlan **都**报
+`device or resource busy`；同一配置把 parent 换成 `docker0` 则 ipvlan 正常创建。
+这是宿主虚拟化层限制，**不是配置写错**，改任何参数都绕不过去。
+
+**已知限制**：
+
+- **macvlan / ipvlan 在内核层隔离宿主与容器** —— 容器 ping 不到宿主。
+  需要互通就建 shim：
+
+  ```bash
+  ip link add macvlan-shim link eth0 type macvlan mode bridge
+  ip addr add 203.0.113.9/24 dev macvlan-shim && ip link set macvlan-shim up
+  ip route add <容器IP>/32 dev macvlan-shim
+  # 删除：ip link del macvlan-shim
+  ```
+
+- **`IKEV2_L2_SUBNET` 只接受 IPv4**。填 v6 子网会让 Docker IPAM 接管 IPv6 并
+  分配 ULA（`fd00::/8`），公网不可达，所以入口直接拒绝。
+
+- **`IKEV2_OUT_IF` 的语义随模式变化**：host 模式是**宿主**网卡名，
+  macvlan / ipvlan 是**容器**网卡名（通常 `eth0`）。沿用宿主网卡名会被
+  FATAL 拦截（否则会静默失效成"能连 VPN 但出不了网"）。
+  **L2 模式下建议直接删掉这一行让它自动探测。**
+
+- **切换模式必须重建容器**（compose 文件决定网络）：
+
+  ```bash
+  docker compose -f docker-compose.macvlan.yml down && docker compose -f docker-compose.macvlan.yml up -d
+  ```
+
+- host 模式仍然**不要**去改 `/etc/docker/daemon.json` 配 IPv6 或转发开关：
+  host 模式不走 Docker 的 iptables / sysctl 管理，改那些只会在宿主上留下无关配置。
+
+详见 [architecture.md §11.1](docs/architecture.md) 与
+[TROUBLESHOOTING.md §1.7](docs/TROUBLESHOOTING.md)。
 
 ### Capabilities
 
 ```yaml
 cap_drop: [ALL]
-cap_add: [NET_ADMIN, NET_RAW, NET_BIND_SERVICE, CHOWN, DAC_OVERRIDE]
+cap_add: [NET_ADMIN, NET_RAW, NET_BIND_SERVICE, CHOWN, DAC_OVERRIDE, FOWNER]
 security_opt: [no-new-privileges:true]
 devices: [/dev/net/tun]
 ```
@@ -118,7 +207,9 @@ devices: [/dev/net/tun]
 | `NET_BIND_SERVICE` | 监听 500 / 4500 特权端口 |
 | `CHOWN` | entrypoint 调整 `/etc/swanctl` 权限 |
 | `DAC_OVERRIDE` | 读取 `/proc/sys/net` 下的转发开关 |
+| `FOWNER` | 写非属主文件（LE 证书签发、panelstate 属主切换） |
 
+三种网络模式共用同一套 `cap_add`，无需按模式调整。
 不要随手加 `SYS_ADMIN` 或 `privileged: true` —— 这个镜像不需要它们。
 
 ### 数据卷
@@ -204,6 +295,14 @@ docker volume inspect ikev2-panel-data    # 看 Mountpoint（注意不是 /var/l
 | 8443 | TCP | 管理面板 HTTPS（默认 `0.0.0.0:8443`） | **限制源 IP** |
 | — | ESP / IP 协议号 50 | 不需要 | libipsec 走 UDP/4500 |
 
+三种模式**都不做端口映射**：
+
+- **host** —— 容器直接在宿主上监听 500/4500/8443，与宿主已有服务抢端口。
+  这是选 macvlan / ipvlan 的主要动机。
+- **macvlan / ipvlan** —— 容器有自己的 IP，500/4500/8443 绑在那个 IP 上，
+  与宿主服务完全不冲突。此时防火墙规则要指向**容器 IP**而不是宿主 IP，
+  且容器 IP 随重建可能变化（除非在 IPAM 里固定地址）。
+
 host 网络下 8443 直接暴露在公网，面板自身没有 RBAC 和 2FA，务必用防火墙或反向代理限制来源。
 面板前面挂了反代时才设 `IKEV2_TRUSTED_PROXY=true`，否则登录限流只按直连地址计数。
 
@@ -228,6 +327,7 @@ docker compose logs -f          # 容器 stdout
 |------|--------------|
 | `IKEV2_SERVER_CN` / `IKEV2_CERT_MODE` / `IKEV2_DOMAIN` | **重启容器**（entrypoint 启动时替换 swanctl.conf 占位符） |
 | `IKEV2_IPV6_ONLY` / `IKEV2_OUT_IF` / `IKEV2_VPN_SUBNET` | **重启容器** |
+| `IKEV2_NETWORK_MODE` / `IKEV2_L2_*` | **重建容器** —— 选哪个 compose 文件由 `-f` 决定。这个变量在每份文件里硬编码为自身模式，改它没用 |
 | `IKEV2_LISTEN_ADDR` / `IKEV2_LOG_LEVEL` / `IKEV2_DISPLAY_TIMEZONE` | **重启容器** |
 | `IKEV2_SESSION_TTL` / `IKEV2_DEFAULT_USER_PASSWORD_LEN` | **重启容器** |
 | 面板里改的证书配置、客户端虚拟网段 | **重启容器**（`cert.conf` / `subnet.conf` 由 entrypoint 启动时读；网段另有"保存并立即生效"按钮，不重启也能改） |
@@ -289,6 +389,12 @@ docker run --rm -v ikev2-panel-data:/src:ro -v /opt/ikev2-backups:/dst \
 限速单位是 Mbps，`0` 表示不限速。IPv6 限速依赖 `tc flower`（内核 4.1+），
 不支持时只打 WARN、不阻断 SA 建立。
 
+**限速的作用域随网络模式变化**：tc 规则挂在 `IKEV2_OUT_IF` 上，而这张网卡
+在 host 模式是宿主网卡、在 macvlan / ipvlan 是**容器自己的 eth0**。
+功能不变（都是约束客户端出向流量），只是 qdisc 从宿主的队列挪进了容器 netns，
+在宿主上 `tc qdisc show dev eth0` 查不到，别误判成「限速没生效」。
+排查限速一律用 `docker compose exec ikev2-panel tc qdisc show dev <OUT_IF>`。
+
 ### libipsec 是单核瓶颈
 
 ESP 走用户态解密，单 SA 绑定单线程，**无法多核扩展，也不支持网卡硬件 offload**。
@@ -303,16 +409,54 @@ MOBIKE 默认开启，客户端切网时复用现有 IKE SA，切换不掉线。
 
 ### forwarding 自愈，失败即拒绝启动
 
-容器作为 VPN 路由器需要宿主打开转发。`compose` 里**没有 `sysctls:` 段** ——
-host 网络模式下 runc 会以 `not allowed in host network namespace` 拒绝它。
-转发开关由 entrypoint 在容器内直接写 `/proc/sys/net/...`（host 模式共享 net ns，
-写的就是宿主内核），成功后再把值持久化到宿主 `/etc/sysctl.d/99-ikev2.conf`。
+容器作为 VPN 路由器需要转发打开。**host 模式的 compose 里没有 `sysctls:` 段** ——
+host 网络模式下容器与宿主共享 netns，runc 会以
+`not allowed in host network namespace` 拒绝它。
+L2 模式容器有自己的 netns，runc 允许写，所以由 compose 注入。
+
+| 模式 | forwarding 在哪个 netns | 谁负责打开 |
+|------|------------------------|-----------|
+| `host` | 与宿主同一个 | **宿主**（`sysctl -w`），entrypoint 只会把值持久化到 `/etc/sysctl.d/99-ikev2.conf` |
+| `macvlan` / `ipvlan` | 容器自己的 | **L2 compose 文件的 service 段 `sysctls:`** |
+
+L2 模式注入的三条（L2 compose 文件里已写好，不需要用户操作）：
+
+```yaml
+sysctls:
+  net.ipv4.conf.all.forwarding: "1"
+  net.ipv6.conf.all.forwarding: "1"
+  net.ipv6.conf.default.accept_ra: "2"   # SLAAC 必需
+```
+
+配套 `networks.ikev2-l2.enable_ipv6: true`。
+实测细节与其他写法的失败原因见 [architecture.md §12.8.2](docs/architecture.md)。
+
+```bash
+# host 模式：转发必须由宿主负责
+sudo sysctl -w net.ipv4.ip_forward=1
+sudo sysctl -w net.ipv6.conf.all.forwarding=1
+```
+
+⚠️ **L2 模式下这条命令无效** —— `net.ipv4.ip_forward` 是 per-netns 的，
+宿主上 `sysctl -w` 改的是宿主那个 netns，与容器无关。这也是 L2 模式不写
+`/host-sysctl.d/99-ikev2.conf` 的原因：写了也是误导。
 
 两步都失败时 entrypoint **FATAL `exit 11`**，容器起不来。这是刻意设计：
 宁可启动失败，也不要跑出一个"看起来正常但客户端连上后上不了网"的实例。
 
 nftables 规则同理：启动时校验自定义表 `ikev2` / `ikev26` 是否生效，缺失则重建重试
 （快阶段 1s × 10，慢阶段 5s × 50）。彻底失败会写哨兵文件，面板顶部告警。
+
+### L2 模式（macvlan / ipvlan）的代价
+
+- **容器与宿主在内核层隔离**，互相 ping 不通，需要互通得建 shim。
+- **IPv6 完全依赖上游发 RA**。不发 RA 就没有公网 v6；
+  `IKEV2_SERVER_ADDR_V6` 只填 charon 的 `local_addrs`，**不负责把地址配到网卡上**，
+  设了它但网卡上没有对应地址反而会让 charon bind 失败。
+- **只在 Linux 可用**，Docker Desktop / rootless 支持不完整。
+- **容器 IP 随重建可能变**，写死防火墙规则前先在 IPAM 里固定地址。
+- 详见 [三网络模式与前置条件](#三网络模式与前置条件) 与
+  [TROUBLESHOOTING.md §1.7](docs/TROUBLESHOOTING.md)。
 
 ### VICI socket 权限没有配置项
 

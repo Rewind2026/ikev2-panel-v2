@@ -312,6 +312,43 @@ func TestRateLimit_WindowResets(t *testing.T) {
 	}
 }
 
+// TestClientIP_SetTrustedProxyRuntime 覆盖 v2.86 批次 D 新增的
+// SetTrustedProxy(面板 UI 运行期开关),以及它与测试钩子的优先级。
+//
+// 优先级必须保持:测试 override > 面板 runtime > env。
+// 否则既有的 TestRateLimit_ClientIP_XForwardedFor 等用例会被面板写入的
+// 全局量污染,出现"单跑绿、全跑红"的偶发失败。
+func TestClientIP_SetTrustedProxyRuntime(t *testing.T) {
+	prev := trustedProxyRuntime.Load()
+	t.Cleanup(func() { trustedProxyRuntime.Store(prev) })
+
+	r := newReqWithXFF("203.0.113.77")
+
+	// 面板打开 → 立即信任 XFF,无需重启
+	SetTrustedProxy(true)
+	if got := ClientIP(r); got != "203.0.113.77" {
+		t.Fatalf("SetTrustedProxy(true) 后 ClientIP = %q, want 203.0.113.77", got)
+	}
+
+	// 面板显式关闭 → 忽略 XFF,走 RemoteAddr
+	SetTrustedProxy(false)
+	if got := ClientIP(r); got != "127.0.0.1" {
+		t.Fatalf("SetTrustedProxy(false) 后 ClientIP = %q, want 127.0.0.1 (RemoteAddr)", got)
+	}
+
+	// 测试钩子优先级最高:面板说 false,钩子说 true → 仍信任 XFF
+	restore := setTrustedProxyForTest(t, true)
+	if got := ClientIP(r); got != "203.0.113.77" {
+		t.Fatalf("测试 override 应压过面板 runtime,ClientIP = %q", got)
+	}
+	restore()
+
+	// 钩子还原后回到面板的值(false)
+	if got := ClientIP(r); got != "127.0.0.1" {
+		t.Fatalf("钩子还原后应回到面板 runtime 的 false,ClientIP = %q", got)
+	}
+}
+
 // TestRateLimit_LoginMiddlewareBlocks 测试中间件层。
 func TestRateLimit_LoginMiddlewareBlocks(t *testing.T) {
 	rl := NewRateLimiter(RateLimitConfig{

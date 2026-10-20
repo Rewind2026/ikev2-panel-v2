@@ -1,26 +1,45 @@
-# docker-compose.yml
+# docker-compose.yml —— 【host 网络模式】
 # 运行期配置的唯一权威。设计说明见 docs/architecture.md §11。
 #
-# 关键决策（v2.86-PR14 收敛）：
-#   网络模式：唯一支持 host 网络。理由——
-#     1. 必须监听公网 IPv6 地址,docker 默认 bridge 给的是 fd00::/8 ULA,公网不可达。
-#     2. 必须能直绑宿主网卡 → UDP 500/4500 不需要端口映射(NAT-T 兼容性最好)。
-#     3. bridge + libipsec / bridge + ipvlan 模式历史上写过但从未实机验证通过
-#        (kernel-libipsec 在 bridge 模式下 UDP 4500 在容器内能 listen,但 iptables
-#         FORWARD + MASQUERADE 链路复杂,2025 年测试时多用户并发丢包严重),
-#        v2-85 决定只保留 host。
+# ⚠️ 三个网络模式 = 三个**独立完整**的 compose 文件，各管各的，不用叠加：
+#
+#   docker-compose.yml            ← 本文件，host 模式
+#   docker-compose.macvlan.yml       macvlan 模式
+#   docker-compose.ipvlan.yml        ipvlan 模式
+#
+#   三份服务定义（image / capabilities / volumes / tmpfs / environment）**必须保持一致**，
+#   由 tests/network_mode_test.sh 的 NM-30~NM-36 强制校验，改一处漏两处会被测试挡住。
+#   唯一允许的差异是网络相关的那几行（见下）。
+#
+#   为什么 host 模式用默认文件名：老用户直接 `docker compose up -d` 零改动可用，
+#   这是向后兼容的硬要求。macvlan / ipvlan 用户显式 -f 指定自己的文件。
+#
+#   不需要 `!reset` / `!override` 标签，**任何 Docker Compose 版本都能用**
+#   （不设版本下限）。
+#
+#   host    : 容器共享宿主 netns,UDP 500/4500 与 TCP 8443 直接占用宿主端口。
+#             需要公网 IPv6 直绑 + 完全不做端口映射时用这个。
+#   macvlan : 容器独占 MAC,直挂物理二层。宿主上 500/4500/8443 已被占用时用。
+#   ipvlan  : 同 macvlan,但共享 parent MAC(不消耗额外 MAC 地址)。
+#
+#   为什么**不**提供 bridge：docker 默认 bridge 给的是 fd00::/8 ULA,公网不可达；
+#   且历史上 bridge + libipsec 路线(MASQUERADE / FORWARD 链路)从未实机验证通过。
+#   需要二层身份时用 macvlan / ipvlan 取代,而不是 bridge。
 #
 # 启动方式：
-#   - ./scripts/up.sh           推荐(自动 mkdir ./logs + docker compose up -d)
-#   - docker compose up -d      也行(host 是默认,无 override 必要)
+#   - docker compose up -d                      host（推荐，直接用 docker 官方命令）
+#   - docker compose -f docker-compose.macvlan.yml up -d    macvlan
+#   - docker compose -f docker-compose.ipvlan.yml up -d     ipvlan
+#   - ./scripts/up.sh                           等价封装（额外建 ./logs 目录）
 #
-# 老用户（直接 docker compose up -d）仍然 100% 可用——本文件默认 host,
+# 老用户（直接 docker compose up -d）仍然 100% 可用——本文件就是 host 模式,
 # 跟 v2.86-PR14 之前的行为 100% 一致(向后兼容)。
 #
 #   Capabilities（v2.86-PR11 减权）：
 #   - 删除 privileged: true（OWASP Docker Top-1 容器逃逸风险）
 #   - 删除 SYS_ADMIN（v2-79.2 后 forwarding 自愈已经只需要 NET_ADMIN）
-#   - cap_drop ALL + cap_add 仅必需 NET_ADMIN / NET_RAW / NET_BIND_SERVICE / CHOWN / DAC_OVERRIDE
+#   - cap_drop ALL + cap_add 仅必需 NET_ADMIN / NET_RAW / NET_BIND_SERVICE / CHOWN /
+#     DAC_OVERRIDE / FOWNER
 #   - 加 no-new-privileges:true 防 setuid 提权
 #
 #   设备：/dev/net/tun（kernel-libipsec 的用户态 ESP 注入点）
@@ -58,8 +77,11 @@ services:
     container_name: ikev2-panel
     restart: unless-stopped
 
-    # ===== 唯一支持：host 网络 =====
-    # v2.86-PR14 收敛：删除 bridge / ipvlan 模式(只支持 host,见文件头注释)。
+    # ===== 网络：host（本文件专属，不要复制到 L2 文件）=====
+    # v2.86-PR14 收敛为 host-only;v2.86-PR20 追加 macvlan / ipvlan 两个**独立**文件。
+    #
+    # 这里是 host 模式唯一的网络声明。macvlan / ipvlan 走各自的 compose 文件，
+    # 那里没有这一行、改挂 networks(两者互斥)。
     network_mode: host
 
     cap_drop:
@@ -131,6 +153,9 @@ services:
     #
     # compose 里的 sysctls: 块不能加 —— host 网络模式下 runc 会以
     # `not allowed in host network namespace` 拒绝（v2-79.2 已实测）。
+    # macvlan / ipvlan 模式走的是**另外两个独立 compose 文件**，那里用
+    # networks.ikev2-l2.options.com.docker.network.endpoint.sysctls 注入
+    # per-interface sysctl（那是 endpoint 创建时的 driver option，与本块无关）。
 
     # v2.86-PR11:删除 privileged: true。NET_ADMIN 已足够做 tc 限速等操作。
     # 容器逃逸风险从"root on host"降到"普通进程"(仍需 0day 才逃逸)。
@@ -201,10 +226,21 @@ services:
 
     environment:
       # 基础
-      IKEV2_DATA_DIR: "/data"
-      IKEV2_LISTEN_ADDR: "0.0.0.0:8443"
-      IKEV2_LOG_LEVEL: "info"
-      IKEV2_LOG_FORMAT: "text"
+      #
+      # v2.86 配置统一批次 D:下面 4 个原先是写死字面量,改它们必须编辑本文件。
+      # 现在统一改成 ${VAR:-<原字面量>} —— **默认值一字未改**,行为完全一致,
+      # 只是多了一条"不编辑 compose 也能调"的通路。
+      # 写成带默认值而不是 "${VAR:-}":这 4 个如果传空串,Go 侧 getenv/getdur
+      # 会因为 `v != ""` 不成立而回落到代码默认值,虽然结果一样,
+      # 但 compose 渲染出来的 `docker compose config` 里看不到实际生效值,
+      # 排查时容易误判。默认值写在这里 = 单一真相。
+      IKEV2_DATA_DIR: "${IKEV2_DATA_DIR:-/data}"
+      IKEV2_LISTEN_ADDR: "${IKEV2_LISTEN_ADDR:-0.0.0.0:8443}"
+      IKEV2_LOG_LEVEL: "${IKEV2_LOG_LEVEL:-info}"
+      IKEV2_LOG_FORMAT: "${IKEV2_LOG_FORMAT:-text}"
+      # v2.86 批次 B:明文 HTTP 备用入口。空 = 不启用(默认)。
+      # 启用后 Go 侧会自动把 cookie Secure 关掉(明文下浏览器拒收 Secure cookie)。
+      IKEV2_HTTP_LISTEN_ADDR: "${IKEV2_HTTP_LISTEN_ADDR:-}"
 
       # 服务器身份（v2-79：所有字段都可以不传，entrypoint.sh §0 自动探测）
       # 唯一必填的是 IKEV2_SERVER_CN（证书需要）
@@ -213,19 +249,60 @@ services:
       # 公网 IPv4（双栈模式留空 → 从网卡自动取）
       # 双栈模式（需要宿主 IPv4 UDP 500/4500 可用）：IKEV2_IPV6_ONLY=false
       IKEV2_IPV6_ONLY: "${IKEV2_IPV6_ONLY:-true}"
+      # 公网 IPv6 静态兜底（v2.86-PR20 补齐透传）。
+      # 语义是项目既有契约：空 → entrypoint §0.2 自动探测；非空 → 跳过探测，
+      # 直接作为 charon 的 local_addrs。macvlan/ipvlan 下这是 SLAAC 失败时的兜底开关。
+      # 注意：非空只让 charon 绑这个地址，**不会**把这个地址配到容器网关上；
+      # 若 SLAAC 失败且未在本机另行配置该地址，charon 会绑定失败。
+      IKEV2_SERVER_ADDR_V6: "${IKEV2_SERVER_ADDR_V6:-}"
+      # v2.86 批次 B:公网 IPv4 静态兜底。空 → entrypoint §1 自动探测。
+      # 只在 IKEV2_IPV6_ONLY=false(双栈)时有意义。
+      IKEV2_SERVER_ADDR_V4: "${IKEV2_SERVER_ADDR_V4:-}"
       # 出口网卡（host 网络下留空 → ip route 自动探测）
+      # ⚠️ 语义随网络模式变化：host = 宿主网卡名；macvlan/ipvlan = 容器网卡名（通常 eth0）。
+      #    非 host 模式下若沿用宿主网卡名，entrypoint §0.1 会 FATAL exit 14（防止 nft 静默失效）。
       IKEV2_OUT_IF: "${IKEV2_OUT_IF:-}"
-      # VPN 网络模式（v2.86-PR14 收敛）：只支持 host。环境变量保留兼容性,
-      # 传 bridge/ipvlan 会被 entrypoint.sh §0.7 拒绝并 FATAL 退出。
-      IKEV2_NETWORK_MODE: "${IKEV2_NETWORK_MODE:-host}"
+      # VPN 网络模式。**硬编码，不接受 .env 覆盖** —— 见下面说明。
+      #
+      # 本文件 = host 模式，所以这里恒为 host。刻意不写成
+      # ${IKEV2_NETWORK_MODE:-host}：那样 .env 里若残留
+      # IKEV2_NETWORK_MODE=macvlan，容器实际在 host netns 里、
+      # entrypoint 却按 macvlan 分支跑 —— 跳过 forwarding 持久化、
+      # 跳过 DDoS 的 host 专属处理、白等一次 SLAAC 复核。
+      # 网络由**文件**决定，变量必须服从文件，不能反过来。
+      #
+      # 要换模式请换 compose 文件（见文件头），不是改这个变量。
+      # bridge 已在 v2.86-PR14 移除。
+      IKEV2_NETWORK_MODE: "host"
+      # ---- 以下为 macvlan / ipvlan 专属（L2 模式必填，host 模式下会被忽略并 WARN）----
+      # 宿主父接口名。macvlan/ipvlan 虚拟网卡挂在它上面。
+      IKEV2_L2_PARENT: "${IKEV2_L2_PARENT:-}"
+      # 宿主所在 IPv4 子网（CIDR）。**只支持 IPv4** —— IPv6 走 RA/SLAAC。
+      # 若填 v6 子网，Docker IPAM 会接管 IPv6 并默认分配 ULA(fd00::/8)，公网不可达。
+      IKEV2_L2_SUBNET: "${IKEV2_L2_SUBNET:-}"
+      # 该子网的宿主网关（必须是宿主自己的网关，容器经它出网）。
+      IKEV2_L2_GATEWAY: "${IKEV2_L2_GATEWAY:-}"
+      # macvlan 专属：bridge(默认) | private | vepa。passthru 与 IPAM 互斥，已禁用。
+      IKEV2_MACVLAN_MODE: "${IKEV2_MACVLAN_MODE:-}"
+      # ipvlan 专属：l2(默认，强推荐) | l3 | l3s。非 l2 会丢弃广播/组播。
+      IKEV2_IPVLAN_MODE: "${IKEV2_IPVLAN_MODE:-}"
+      # ipvlan 专属：bridge(默认) | private | vepa
+      IKEV2_IPVLAN_FLAG: "${IKEV2_IPVLAN_FLAG:-}"
       # VPN 内部虚拟 IP 段：auto | 10.10.0.0/24 | ...
       # auto 模式下扫描宿主 LAN 段，自动选不冲突的段
       IKEV2_VPN_SUBNET: "${IKEV2_VPN_SUBNET:-auto}"
+      # v2.86 批次 B:IPv6 ULA 段。空 → entrypoint §0.6b 自动探测。
+      # macvlan/ipvlan 下 Docker IPAM 默认发 fd00::/8,此处仅在需要指定非默认段时用。
+      IKEV2_VPN_SUBNET_V6: "${IKEV2_VPN_SUBNET_V6:-}"
 
       # 证书模式
       IKEV2_CERT_MODE: "${IKEV2_CERT_MODE:-self-signed}"
       IKEV2_DOMAIN: "${IKEV2_DOMAIN:-}"             # LE 模式必填
-      # IKEV2_ACME_EMAIL: "you@example.com"
+      # v2.86 批次 B:LE 注册邮箱。空 = 不填(acme.sh 用默认行为)。
+      IKEV2_ACME_EMAIL: "${IKEV2_ACME_EMAIL:-}"
+      # v2.86 批次 D:面板「阿里云 API」卡的 payload 反向域名前缀。
+      # 空 = cert 内的默认值。跟证书 SAN 无关,只影响 mobileconfig 里的 payload id。
+      IKEV2_PAYLOAD_ID_BASE: "${IKEV2_PAYLOAD_ID_BASE:-}"
 
       # LE 模式（仅 letsencrypt 时生效）：阿里云 DNS API 凭证
       # 从 .env 读（不在镜像内、不在 git 中）
@@ -249,15 +326,49 @@ services:
       # 注意:IPv4 DDNS 必须 host 网络(bridge 网络下访问外部 API 也不通)
       IKEV2_DDNS_ENABLED: "${IKEV2_DDNS_ENABLED:-true}"
       IKEV2_DDNS_FAMILY: "${IKEV2_DDNS_FAMILY:-dual}"
-      # IKEV2_DDNS_PROBE_TARGET 仍可设置但被忽略(向后兼容老部署脚本)
+      # v2.86 批次 B:阿里云凭证的**新名**(config.loadAliyunCredsFromEnv 的第 1 优先级)。
+      # 之前这三个凭证变量一个都没透传 —— 用户在 .env 里写 IKEV2_ALIYUN_KEY_ID
+      # 完全无效,容器里根本没有这个 env。entrypoint §7.5 会读它们,
+      # 所以顺序上放在 legacy 名(ALIYUN_ACCESS_KEY_*)之后语义更清楚:
+      # 新名优先,没写新名时才轮到 legacy 名。
+      IKEV2_ALIYUN_KEY_ID: "${IKEV2_ALIYUN_KEY_ID:-}"
+      IKEV2_ALIYUN_KEY_SECRET: "${IKEV2_ALIYUN_KEY_SECRET:-}"
       ALIYUN_ACCESS_KEY_ID: "${ALIYUN_ACCESS_KEY_ID:-}"
       ALIYUN_ACCESS_KEY_SECRET: "${ALIYUN_ACCESS_KEY_SECRET:-}"
       ALIYUN_DOMAIN: "${ALIYUN_DOMAIN:-}"
       ALIYUN_RR: "${ALIYUN_RR:-vpn}"
 
-      # 其他
-      IKEV2_DEFAULT_USER_PASSWORD_LEN: "12"
-      IKEV2_SESSION_TTL: "24h"
+      # 面板安全与登录策略（v2.86 批次 B/D 补齐透传）
+      #
+      # 这几项以前只能写进容器环境,面板看不到也改不了;
+      # 现在既能用 env 兜底,也能在面板「面板设置」卡里用开关 / 预配置下拉改。
+      # 全部用 "${VAR:-}" 空值透传:空 = 代码默认值(见 internal/config/config.go)。
+      #   IKEV2_COOKIE_SECURE  默认 true —— 关掉后明文 HTTP 入口也能登录,
+      #                      但**仅**在面板确实有 HTTPS 或反代兜 TLS 时才该关。
+      #   IKEV2_TRUSTED_PROXY  默认 false —— 面板前面有 nginx / NLB 时才开,
+      #                      公网直连时开等于让任意客户端伪造 X-Forwarded-For
+      #                      绕过登录 5 次锁定。
+      IKEV2_COOKIE_SECURE: "${IKEV2_COOKIE_SECURE:-}"
+      IKEV2_TRUSTED_PROXY: "${IKEV2_TRUSTED_PROXY:-}"
+      IKEV2_DEFAULT_USER_PASSWORD_LEN: "${IKEV2_DEFAULT_USER_PASSWORD_LEN:-12}"
+      IKEV2_SESSION_TTL: "${IKEV2_SESSION_TTL:-24h}"
+
+      # nftables 限速 / DDoS 防护阈值（v2.86 批次 B）
+      # 全部用空值透传,空 = entrypoint.sh 内部默认值(50 / 30 / 不开启)。
+      IKEV2_CONNLIMIT_PER_IP: "${IKEV2_CONNLIMIT_PER_IP:-}"
+      IKEV2_HASHLIMIT_PER_MIN: "${IKEV2_HASHLIMIT_PER_MIN:-}"
+      # true = 关闭 MSS clamping。仅当上游确实做了 PMTUD _blackhole 且
+      # 你的链路有其它 clamp 手段时才开,默认保持开启。
+      IKEV2_DISABLE_MSS_CLAMP: "${IKEV2_DISABLE_MSS_CLAMP:-}"
+      # true = 关闭 nft ikev2 表的 DDoS 防护。调试连接被限速时临时用。
+      IKEV2_DISABLE_DDOS_PROTECTION: "${IKEV2_DISABLE_DDOS_PROTECTION:-}"
+      # 限定 nftables 只处理某个地址族:v4 / v6。空 = 按 IPv6Only 自动判断。
+      IKEV2_FAMILY: "${IKEV2_FAMILY:-}"
+
+      # 审计日志保留策略（v2.86 批次 B，由 entrypoint 装的 cron 任务消费）
+      IKEV2_AUDIT_RETENTION_DAYS: "${IKEV2_AUDIT_RETENTION_DAYS:-}"
+      IKEV2_AUDIT_RETENTION_LOG: "${IKEV2_AUDIT_RETENTION_LOG:-}"
+      IKEV2_PANEL_DB: "${IKEV2_PANEL_DB:-}"
 
       # v2.85-PR3:面板/日志时间显示时区(IANA TZ 名,默认 UTC)。
       # 推荐:中国用户: Asia/Shanghai 或 Asia/Hong_Kong
@@ -265,6 +376,7 @@ services:
       #        欧洲用户: Europe/Berlin
       # 注意:此选项只影响面板渲染 / DDNS API / mobileconfig 描述的时间字符串;
       #       不影响系统 TZ、证书有效期、cron 时间计算。
+      # v2.86 批次 D:这一项已可在面板「面板设置」卡用下拉选择,不必手填。
       IKEV2_DISPLAY_TIMEZONE: "${IKEV2_DISPLAY_TIMEZONE:-UTC}"
 
 volumes:

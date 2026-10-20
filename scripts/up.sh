@@ -1,20 +1,31 @@
 #!/usr/bin/env bash
-# up.sh - 一键启动容器(host 网络唯一模式)
+# up.sh - 一键启动容器（host / macvlan / ipvlan 三种网络模式）
 #
 # 为什么需要这个脚本:
 #   - 自动 ./logs bind mount 目录准备(避免 docker compose up 因目录不存在失败)
-#   - docker compose up -d 的薄封装,加 stderr 染色 + 错误处理
+#   - 按 IKEV2_NETWORK_MODE 选对应的 compose 文件(三个模式 = 三个独立文件)
+#   - L2 模式的前置校验(必填变量 / v6 子网拦截)做在调 docker 之前
 #
-# v2.86-PR14 收敛:删除网络模式探测(v2-79~v2-85 时期的 auto-network.sh 已删除)。
-# 唯一支持 host 网络,无需探测。
+# v2.86-PR20:三个网络模式对应三个**独立完整**的 compose 文件,不用叠加:
+#   host    : docker-compose.yml            (老用户 `docker compose up -d` 零改动)
+#   macvlan : docker-compose.macvlan.yml
+#   ipvlan  : docker-compose.ipvlan.yml
+#
+#   不需要 `!reset` / `!override` 标签 —— 三个文件各自完整,
+#   所以**任何 Docker Compose 版本都能用**,不设版本下限。
 #
 # 用法:
-#   ./scripts/up.sh                  # 默认启动
-#   ./scripts/up.sh --no-detect      # 兼容老用户参数(已 no-op,保留)
-#   ./scripts/up.sh --help           # 看帮助
+#   ./scripts/up.sh                              # host(默认)
+#   IKEV2_NETWORK_MODE=macvlan ./scripts/up.sh   # macvlan
+#   IKEV2_NETWORK_MODE=ipvlan  ./scripts/up.sh   # ipvlan
+#   ./scripts/up.sh --no-detect                  # 兼容老用户参数(已 no-op,本脚本消费,不会传给 docker compose)
+#   ./scripts/up.sh --help                       # 看帮助
 #
-# 等价于:
+# 等价于（host 模式）:
 #   mkdir -p logs && chmod 1777 logs && docker compose up -d
+#
+# 等价于（L2 模式）:
+#   mkdir -p logs && chmod 1777 logs && docker compose -f docker-compose.macvlan.yml up -d
 
 set -euo pipefail
 
@@ -22,38 +33,144 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "$PROJECT_DIR"
 
+# ---------- 复用容器内同一份模式规格表 ----------
+# network-mode.sh 是三种网络模式的**单一真源**：枚举、归一化、L2 变量校验、
+# sysctl 清单都在那里，entrypoint.sh 用的就是它。
+# v2.86-PR20 之前本脚本自己写了一份 require_l2_env，只查「三项非空 + 拦截 v6 子网」，
+# 和 net_mode_validate 是同一件事的两份实现 —— 规则一改就漂移
+# （例如 net_mode_validate 后来加的 parent!=lo、gateway 必须落在 subnet 内、
+#  macvlan_mode=passthru 拦截，up.sh 全都不知道，只能等容器起来才 exit 12）。
+# 该文件是纯 POSIX sh、零副作用，直接 source 即可。
+# shellcheck source=scripts/network-mode.sh
+. "${SCRIPT_DIR}/network-mode.sh"
+
+# .env 里的 IKEV2_NETWORK_MODE 要能被本脚本读到（docker compose 自己也会读 .env，
+# 但 up.sh 需要在选 compose 文件**之前**就知道模式）。
+#
+# 只 grep 出需要的键，不整体 source .env —— .env 的值可能带空格 / 特殊字符，
+# 整体 source 有被当成 shell 代码执行的风险。
+env_get() {
+  [ -f ./.env ] || return 0
+  # 取最后一个未注释的 KEY=VALUE 赋值（与 compose 的"后者覆盖前者"语义一致）
+  sed -nE "s/^[[:space:]]*(export[[:space:]]+)?$1[[:space:]]*=[[:space:]]*(.*)$/\2/p" ./.env \
+    | tail -n1 \
+    | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+           -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'\$/\1/"
+}
+
+[ -n "${IKEV2_NETWORK_MODE:-}" ] || IKEV2_NETWORK_MODE="$(env_get IKEV2_NETWORK_MODE)"
+
+# 三个 L2 变量沿用原样：读到就 export，让 docker compose 的 ${...} 插值
+# 拿到与本脚本一致的取值。
+for _k in IKEV2_L2_PARENT IKEV2_L2_SUBNET IKEV2_L2_GATEWAY; do
+  if [ -z "${!_k:-}" ]; then
+    declare "$_k=$(env_get "$_k")"
+    export "$_k"
+  fi
+done
+
+# 模式专属开关只给 net_mode_validate 用，**不 export**：
+# env_get 的解析规则和 compose 的 .env 解析规则不完全等价
+# （行尾注释 `KEY=v # x` compose 会剥离、我们不会），export 出去反而可能
+# 用一个被误解的值去覆盖 compose 本来能正确读到的 .env 值。
+# 不 export 时它们只是普通 shell 变量，函数内照样可见。
+for _k in IKEV2_MACVLAN_MODE IKEV2_IPVLAN_MODE IKEV2_IPVLAN_FLAG; do
+  if [ -z "${!_k:-}" ]; then
+    declare "$_k=$(env_get "$_k")"
+  fi
+done
+
+# 归一化同样交给单一真源（大小写不敏感 + 去首尾空白 + 空值→host）
+NETWORK_MODE="$(net_mode_normalize "${IKEV2_NETWORK_MODE:-}")"
+
 if [ -t 1 ]; then
-  BLUE='\033[0;34m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+  BLUE='\033[0;34m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; NC='\033[0m'
 else
-  BLUE=''; GREEN=''; YELLOW=''; NC=''
+  BLUE=''; GREEN=''; YELLOW=''; RED=''; NC=''
 fi
 log()  { echo -e "${BLUE}[up.sh]${NC} $*" >&2; }
 ok()   { echo -e "${GREEN}[up.sh] ✓${NC} $*" >&2; }
 warn() { echo -e "${YELLOW}[up.sh] !${NC} $*" >&2; }
+die()  { echo -e "${RED}[up.sh] ✗${NC} $*" >&2; exit 1; }
 
 # ---------- 解析参数 ----------
-for arg in "$@"; do
+# --no-detect 必须真的从参数里剔掉。
+# v2.86-PR20 实测（Docker Compose v2.40.3）：只 warn 不剔除的话，
+# 它会一路透传给 `docker compose up`，直接报 `unknown flag: --no-detect`，
+# 整个启动失败 —— 正好和"兼容老参数"的意图相反。
+# 用数组收集透传参数，而不是拼字符串：
+# 拼字符串再 `exec docker compose up -d $ARGS` 会把 'xxx' 的引号原样传进去，
+# docker 会把带引号的 '--force-recreate' 当成未知参数。
+# 先把原始参数复制一份，遍历副本，这样循环里可以自由剔除。
+ORIG_ARGS=("$@")
+PASSTHRU_ARGS=()
+for arg in "${ORIG_ARGS[@]}"; do
   case "$arg" in
-    --no-detect) warn "--no-detect 已是 no-op(v2.86-PR14 删了网络模式探测)" ;;
+    --no-detect) warn "--no-detect 已是 no-op(v2.86-PR14 删了网络模式自动探测),已忽略该参数" ;;
     -h|--help)
       cat <<EOF
 用法: ./scripts/up.sh [选项]
 
 选项:
-  --no-detect    兼容老参数(已 no-op)
+  --no-detect    兼容老参数(已 no-op,会被本脚本消费,不会传给 docker compose)
   -h, --help     显示这个帮助
 
-v2.86-PR14 后:网络模式固定 host,docker-compose.yml 已写死 network_mode: host,
-                不再需要探测 / override 文件。
+网络模式(读 .env 或环境变量 IKEV2_NETWORK_MODE)—— 三个模式 = 三个独立 compose 文件:
+  host      docker-compose.yml            默认。容器共享宿主 netns,直占宿主 500/4500/8443
+  macvlan   docker-compose.macvlan.yml   容器独占 MAC,直挂物理二层,500/4500 绑容器独立 IP
+  ipvlan    docker-compose.ipvlan.yml    同 macvlan,但共享 parent MAC
+
+  三个文件都是**完整**的,不叠加,所以任何 Docker Compose 版本都能用(无版本下限)。
+
+macvlan / ipvlan 需要在 .env 里额外提供:
+  IKEV2_L2_PARENT / IKEV2_L2_SUBNET / IKEV2_L2_GATEWAY
+  (IKEV2_L2_SUBNET 只支持 IPv4,v6 走 RA/SLAAC)
 EOF
       exit 0
       ;;
-    *) warn "unknown arg: $arg (ignored)" ;;
+    *)
+      # 其余参数原样透传给 docker compose
+      PASSTHRU_ARGS+=("$arg")
+      ;;
   esac
 done
 
+# ---------- 模式合法性校验 + 按网络模式选 compose 文件 ----------
+# host 分支必须保持 COMPOSE_FILES 为空，展开后命令退化为改造前的
+# `docker compose up -d "$@"`（向后兼容的硬要求）。
+COMPOSE_FILES=""
+
+# 校验复用 network-mode.sh 的 net_mode_validate，不再维护第二份实现。
+# 它把 ERR/WARN 打到 stderr、用返回码表示结果；这里只翻译退出语义。
+# 收益：up.sh 在 docker 启动**之前**就能报出与容器内 entrypoint 完全一致的
+# 错误（parent=lo / gateway 不落在 subnet 内 / macvlan_mode=passthru /
+# 网关缺失 / v6 子网 ...），不必等容器起来再 exit 12。
+# host 模式下它对 .env 残留的 L2 变量打 WARN，与 entrypoint 行为一致。
+if ! net_mode_validate "$NETWORK_MODE"; then
+  die "IKEV2_NETWORK_MODE=${NETWORK_MODE} 配置不合法（详见上方 ERR 行）"
+fi
+
+case "$NETWORK_MODE" in
+  host)
+    COMPOSE_FILES=""
+    ;;
+  macvlan|ipvlan)
+    [ -f "./docker-compose.${NETWORK_MODE}.yml" ] \
+      || die "docker-compose.${NETWORK_MODE}.yml 不存在（请先 git pull 更新项目文件）"
+    COMPOSE_FILES="-f docker-compose.${NETWORK_MODE}.yml"
+    warn "网络模式: ${NETWORK_MODE}（parent=${IKEV2_L2_PARENT} subnet=${IKEV2_L2_SUBNET} gateway=${IKEV2_L2_GATEWAY}）"
+    warn "切换网络模式必须重建容器，本次会自动 recreate"
+    ;;
+  *)
+    # 兜底：net_mode_validate 当前只对 host/macvlan/ipvlan 返回 0。
+    # 万一 network-mode.sh 以后加了新模式而这里没跟上，静默落到上面的
+    # host 分支会「启动成功但网络模式不对」，所以显式拦下来。
+    die "IKEV2_NETWORK_MODE=${NETWORK_MODE} 尚未被 scripts/up.sh 支持（compose 文件缺失），请检查 scripts/network-mode.sh 与本脚本是否同步"
+    ;;
+esac
+
 # ---------- 准备 ./logs bind mount 目标(v2.86-PR13.4)----------
-# docker-compose.yml 把容器内 /var/log bind 到宿主 ./logs。
+# docker-compose 把容器内 /var/log bind 到宿主 ./logs。
 # 如果宿主目录不存在或权限不对,容器启动会 mount 失败 / 容器内进程写不进去。
 # 必须在 docker compose up 之前建好。
 if [ ! -d ./logs ]; then
@@ -69,5 +186,34 @@ else
 fi
 
 # ---------- docker compose up ----------
-log "running: docker compose up -d"
-exec docker compose up -d "$@"
+# 把实际执行的命令原样打出来 —— 三个模式三个文件，用户最容易搞不清
+# "up.sh 到底跑了什么"，打出来就没有黑盒感。
+#
+# 用 PASSTHRU_ARGS 数组而不是 "$@"：
+#   "$@" 里还留着已被消费的 --no-detect，直接透传会让 docker compose 报
+#   unknown flag（Docker Compose v2.40.3 实测）。
+#   exec 时用 "${PASSTHRU_ARGS[@]}" 保持数组元素边界，
+#   不会把 '--force-recreate' 连引号一起传下去。
+#   set -u 下空数组直接展开 "${arr[@]}" 会报 unbound variable，
+#   所以先判断长度，零个就直接不带参数。
+run_compose() {
+  if [ -n "$COMPOSE_FILES" ]; then
+    if [ "${#PASSTHRU_ARGS[@]}" -eq 0 ]; then
+      log "running: docker compose ${COMPOSE_FILES} up -d"
+      # shellcheck disable=SC2086
+      exec docker compose ${COMPOSE_FILES} up -d
+    fi
+    log "running: docker compose ${COMPOSE_FILES} up -d ${PASSTHRU_ARGS[*]}"
+    # shellcheck disable=SC2086
+    exec docker compose ${COMPOSE_FILES} up -d "${PASSTHRU_ARGS[@]}"
+  fi
+
+  if [ "${#PASSTHRU_ARGS[@]}" -eq 0 ]; then
+    log "running: docker compose up -d"
+    exec docker compose up -d
+  fi
+  log "running: docker compose up -d ${PASSTHRU_ARGS[*]}"
+  exec docker compose up -d "${PASSTHRU_ARGS[@]}"
+}
+
+run_compose

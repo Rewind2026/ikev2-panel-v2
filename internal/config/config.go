@@ -32,16 +32,15 @@ type Config struct {
 	OutIf        string // 出接口（updown 脚本限速用）
 
 	// 证书模式
-	CertMode    string // self-signed / letsencrypt
-	Domain      string // LE 模式必填
-	ACMEEmail   string // LE 注册邮箱
-	ACMEWebroot string // HTTP-01 webroot，默认 /var/www/acme
+	CertMode  string // self-signed / letsencrypt
+	Domain    string // LE 模式必填
+	ACMEEmail string // LE 注册邮箱
 
 	// DDNS (v2-82 新增,v2-84 family-aware)
-	DDNSEnabled bool   // 总开关 (env IKEV2_DDNS_ENABLED,默认 false)
+	DDNSEnabled bool   // 总开关 (env IKEV2_DDNS_ENABLED,默认 true — 与 compose 对齐)
 	DDNSFamily  string // v2-84:同步哪些 family — v4 / v6 / dual(默认 dual)
-	// v2.86-pr23l:DDNSProbeTarget 已废弃。IPv4 公网地址由 internal/publicip
-	// 多家 API fallback 探测,不再依赖 net.Dial + target。
+	// v2.86-pr23l:DDNSProbeTarget 字段已删除。IPv4 公网地址由 internal/publicip
+	// 多家 API fallback 探测,不依赖任何 target 变量。
 	AliyunAccessKeyID     string // 阿里云 RAM AccessKey ID(env,见 v2-83)
 	AliyunAccessKeySecret string // 阿里云 RAM AccessKey Secret
 	AliyunAccessKeySource string // 凭证来源: env-new / env-legacy-ddns / env-legacy-acme.sh / ""
@@ -68,10 +67,33 @@ type Config struct {
 	// Session
 	SessionTTL   time.Duration
 	CookieSecure bool // cookie Secure 标志；dev 测试可置 false
+	// v2.86 配置统一批次 D:是否信任 X-Forwarded-For / X-Real-IP。
+	// 之前只在 internal/auth.isTrustedProxy 里直接读 env,面板既看不到也改不了。
+	TrustedProxy bool // 默认 false(公网直连时读 XFF 等于让客户端伪造 IP 绕过登录限速)
 
 	// v2.85-PR3:面板/DDNS/mobileconfig 时间显示时区(IANA TZ 名,默认 UTC)。
 	// 只影响渲染字符串,不改容器 TZ、证书有效期、cron 计算。
 	DisplayTimezone string
+
+	// ---- v2.86 批次 E:compose 里剩下的可调项(面板可改,多数需重启)----
+	//
+	// 这几项 Go 进程运行期基本不消费,真正的消费者是 entrypoint.sh:
+	// 限速阈值 / MSS clamp / DDoS 开关写进 nft,审计保留天数写进 cron。
+	// 之所以仍在 Config 里留字段,是为了 status API 能报出"当前生效值",
+	// 面板只读区要显示它们 —— 读 os.Getenv 会漏掉 entrypoint 的内部默认值。
+
+	// AuditRetentionDays 审计日志保留天数(env IKEV2_AUDIT_RETENTION_DAYS,默认 90)。
+	AuditRetentionDays int
+	// ConnLimitPerIP 每 IP 并发 SA 上限(env IKEV2_CONNLIMIT_PER_IP,默认 50)。
+	ConnLimitPerIP int
+	// HashLimitPerMin 每 IP 每分钟新 SA 上限(env IKEV2_HASHLIMIT_PER_MIN,默认 30)。
+	HashLimitPerMin int
+	// DisableMSSClamp 关闭 MSS clamping(env IKEV2_DISABLE_MSS_CLAMP,默认 false)。
+	DisableMSSClamp bool
+	// DisableDDoSProtection 关闭 DDoS 防护(env IKEV2_DISABLE_DDOS_PROTECTION,默认 false)。
+	DisableDDoSProtection bool
+	// NftFamily nftables 地址族(env IKEV2_FAMILY,空 = 按 IPV6_ONLY 自动判断)。
+	NftFamily string
 }
 
 // Load 从环境变量读取配置，必要时填默认值。
@@ -93,21 +115,36 @@ func Load() (*Config, error) {
 		CertMode:               getenv("IKEV2_CERT_MODE", "self-signed"),
 		Domain:                 getenv("IKEV2_DOMAIN", ""),
 		ACMEEmail:              getenv("IKEV2_ACME_EMAIL", ""),
-		ACMEWebroot:            getenv("IKEV2_ACME_WEBROOT", "/var/www/acme"),
 		DefaultUserPasswordLen: getint("IKEV2_DEFAULT_USER_PASSWORD_LEN", 12),
 		SessionTTL:             getdur("IKEV2_SESSION_TTL", 24*time.Hour),
 		CookieSecure:           getbool("IKEV2_COOKIE_SECURE", true),
+		// v2.86 配置统一批次 D:信任反向代理开关。
+		// 原先只有 internal/auth.isTrustedProxy 直接 os.Getenv 读,面板无从展示/修改。
+		// 现在 config 读一次存进字段,auth 侧仍保留 env 读取(见 auth.ClientIP 注释)。
+		TrustedProxy: getbool("IKEV2_TRUSTED_PROXY", false),
 
 		// DDNS (v2-82 + v2-83 凭证统一 + v2-84 family)
-		DDNSEnabled: getbool("IKEV2_DDNS_ENABLED", false),
+		// 默认值与 docker-compose 的 ${IKEV2_DDNS_ENABLED:-true} 对齐:
+		// 之前 Go 侧写 false、compose 写 true,同一条部署在两种启动路径下默认值不同。
+		DDNSEnabled: getbool("IKEV2_DDNS_ENABLED", true),
 		DDNSFamily:  parseFamily(getenv("IKEV2_DDNS_FAMILY", "dual")),
-		// v2.86-pr23l:DDNSProbeTarget 字段废弃,不再读 IKEV2_DDNS_PROBE_TARGET。
-		// 老 env 仍会被读但忽略(下游 Config.DetectTarget 也已废弃)。
+		// v2.86-pr23l:DDNSProbeTarget 字段已删除。IPv4 公网地址由 internal/publicip
+		// 多家 API fallback 探测,不依赖任何 target 变量;老 env IKEV2_DDNS_PROBE_TARGET
+		// 即使还留在 .env 里也不再被本进程读取。
 		AliyunDomain: getenv("ALIYUN_DOMAIN", ""),
 		AliyunRR:     getenv("ALIYUN_RR", "vpn"),
 
 		// v2.85-PR3:显示时区。LoadLocation 失败时 fallback UTC + stderr WARN
 		DisplayTimezone: loadDisplayTimezone(),
+
+		// v2.86 批次 E。默认值跟 entrypoint.sh 里的 `:-` 兜底一字不差,
+		// 避免"env 没写"时 Go 侧和 shell 侧报出两个不同的当前值。
+		AuditRetentionDays:    getint("IKEV2_AUDIT_RETENTION_DAYS", 90),
+		ConnLimitPerIP:        getint("IKEV2_CONNLIMIT_PER_IP", 50),
+		HashLimitPerMin:       getint("IKEV2_HASHLIMIT_PER_MIN", 30),
+		DisableMSSClamp:       getbool("IKEV2_DISABLE_MSS_CLAMP", false),
+		DisableDDoSProtection: getbool("IKEV2_DISABLE_DDOS_PROTECTION", false),
+		NftFamily:             normalizeNftFamily(getenv("IKEV2_FAMILY", "")),
 	}
 
 	// Aliyun 凭证(env 4 级优先级):从 env 读,不在 Load 里碰 panelstate
@@ -230,22 +267,14 @@ func (c *Config) validate() error {
 
 // NewLogger 构造 slog.Logger。
 // M1 简单实现：text / json 两种格式 + 级别。
+//
+// v2.86 批次 E:级别改用 slog.LevelVar 承接,面板「日志级别」下拉保存后
+// 调 SetLogLevel 即可运行期生效,不必重启容器。
+// 格式(text/json)仍然是构造期定死的 handler 类型,换格式要重启。
 func (c *Config) NewLogger() *slog.Logger {
-	var level slog.Level
-	switch strings.ToLower(c.LogLevel) {
-	case "debug":
-		level = slog.LevelDebug
-	case "info":
-		level = slog.LevelInfo
-	case "warn":
-		level = slog.LevelWarn
-	case "error":
-		level = slog.LevelError
-	default:
-		level = slog.LevelInfo
-	}
+	logLevelVar.Set(parseLogLevel(c.LogLevel))
 
-	opts := &slog.HandlerOptions{Level: level}
+	opts := &slog.HandlerOptions{Level: &logLevelVar}
 	var h slog.Handler
 	if strings.ToLower(c.LogFormat) == "json" {
 		h = slog.NewJSONHandler(os.Stdout, opts)
@@ -253,6 +282,61 @@ func (c *Config) NewLogger() *slog.Logger {
 		h = slog.NewTextHandler(os.Stdout, opts)
 	}
 	return slog.New(h)
+}
+
+// logLevelVar 全进程共享的日志级别。
+//
+// 为什么是包级变量而不是存在 Config 上:slog.Handler 构造时只拿到
+// 一个 *slog.LevelVar 指针,之后所有写这个 var 的地方(面板保存设置)
+// 都要能访问它,而 handler 侧不该为此反向依赖 Config。
+var logLevelVar slog.LevelVar
+
+// SetLogLevel 运行期改日志级别,立即对之后创建的 handler 生效。
+//
+// 返回 false 表示值不合法(调用方负责回 400)。
+// 合法值与 panelstate.ValidLogLevels 一致:debug / info / warn / error。
+func SetLogLevel(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "debug":
+		logLevelVar.Set(slog.LevelDebug)
+	case "info":
+		logLevelVar.Set(slog.LevelInfo)
+	case "warn":
+		logLevelVar.Set(slog.LevelWarn)
+	case "error":
+		logLevelVar.Set(slog.LevelError)
+	default:
+		return false
+	}
+	return true
+}
+
+// CurrentLogLevel 当前生效的日志级别字符串(面板渲染用)。
+func CurrentLogLevel() string {
+	switch logLevelVar.Level() {
+	case slog.LevelDebug:
+		return "debug"
+	case slog.LevelWarn:
+		return "warn"
+	case slog.LevelError:
+		return "error"
+	default:
+		return "info"
+	}
+}
+
+// parseLogLevel env 值 → slog.Level,非法值退到 info。
+func parseLogLevel(v string) slog.Level {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "debug":
+		return slog.LevelDebug
+	case "warn":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
 }
 
 func getenv(k, def string) string {
@@ -292,7 +376,26 @@ func getdur(k string, def time.Duration) time.Duration {
 	return def
 }
 
-// parseFamily v2-84:校验 + 规范化 DDNS family 值。
+// normalizeNftFamily 校验 IKEV2_FAMILY:只接受 v4 / v6,其余(含空)退到空串。
+//
+// 空串的语义是"跟随 IKEV2_IPV6_ONLY 自动判断",那是 entrypoint §4.5 的默认分支,
+// 所以这里不能用 "dual" 之类的值去填 —— 填了就等于悄悄改了自动判断的结果。
+func normalizeNftFamily(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "v4":
+		return "v4"
+	case "v6":
+		return "v6"
+	default:
+		if strings.TrimSpace(s) != "" {
+			fmt.Fprintf(os.Stderr,
+				"WARN: IKEV2_FAMILY=%q invalid, supported: v4, v6; falling back to auto-detect\n", s)
+		}
+		return ""
+	}
+}
+
+// parseFamily v2-84：校验 + 规范化 DDNS family 值。
 func parseFamily(s string) string {
 	switch s {
 	case "", "v4", "v6", "dual":

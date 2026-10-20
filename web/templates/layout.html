@@ -802,6 +802,210 @@
           }, true);
         }
 
+        // ------------------------------------------------------------------
+        // v2.86 批次 E:面板设置表单的前端校验
+        //
+        // 为什么必须有这一层(而不能只靠服务端):
+        //   面板设置里这批字段"留空 = 跟随 env 默认",所以不能用原生 required;
+        //   而原生 min/max 越界只会弹浏览器气泡(文案随浏览器语言走,
+        //   英文环境下是一句 Value must be less than or equal to 10000),
+        //   并且只在 submit 那一刻才提示,填的过程中毫无反馈。
+        //
+        // 更要紧的是"静默改错配置"这一类失败:connlimit_per_ip 填 abc 时,
+        // 服务端 optInt 已经会 400 拒绝(本轮修的),但如果哪天前端把值
+        // 原样带过去而服务端又退回"跟随 env",管理员会以为改过了 ——
+        // 对限速阈值这种参数来说,这比直接报错危险得多。
+        //
+        // 所以这里做三件事:
+        //   1. submit 时逐项校验,任一非法就拦下整张表单(不写盘);
+        //   2. 错误落在字段正下方的 .form-error,而不是浮在屏幕中央;
+        //   3. 用户改动字段时立即重算,改对了当场消错。
+        //
+        // 校验规则从 DOM 读(data-val-*),不写死在 JS 里 —— 上下界来自
+        // panelstate 的常量,经模板渲染成 data-val-min/max,同一份真相源。
+        // 服务端 panelstate.Validate 始终是最终防线,前端只是让人不必
+        // 靠一次失败往返才知道填错了。
+        function initSettingsValidation() {
+          if (document.__ikev2SettingsValInit) return;
+          document.__ikev2SettingsValInit = true;
+
+          // 取字段的展示名:优先 data-val-name,退到 name。
+          function fieldName(el) {
+            return el.getAttribute('data-val-name') || el.getAttribute('name') || '该字段';
+          }
+
+          // 数值字段校验。返回错误文案,合法则返回 ''。
+          //
+          // 空串不算错 —— 留空是这批字段的合法状态(跟随 env 默认)。
+          function checkInt(el) {
+            var raw = String(el.value == null ? '' : el.value).trim();
+            if (raw === '') return '';                 // 跟随 env
+
+            // type=number 在部分浏览器里会把非法输入折叠成空串(此时 value
+            // 为空但 badInput 为 true),所以先问 validity 再看字符串。
+            if (el.validity && el.validity.badInput) {
+              return fieldName(el) + ' 只能是整数,当前输入的内容无法识别为数字';
+            }
+            // step=1 排除小数;这里再兜一次,因为去掉 min/max 语义后
+            // 部分浏览器不再因小数报 stepMismatch。
+            if (!/^[+-]?\d+$/.test(raw)) {
+              return fieldName(el) + ' 必须是整数(不含小数),当前是 "' + raw + '"';
+            }
+
+            var n = parseInt(raw, 10);
+            var lo = parseInt(el.getAttribute('data-val-min'), 10);
+            var hi = parseInt(el.getAttribute('data-val-max'), 10);
+            if (!isNaN(lo) && n < lo) {
+              return fieldName(el) + ' 不能小于 ' + lo + ',当前是 ' + n;
+            }
+            if (!isNaN(hi) && n > hi) {
+              return fieldName(el) + ' 不能大于 ' + hi + ',当前是 ' + n;
+            }
+            return '';
+          }
+
+          // 枚举字段校验。data-val-enum 是空格分隔的白名单。
+          //
+          // 空串是合法值 —— 它就是 <select> 首项「跟随 env 默认」。
+          // 这批下拉在"面板没接管"时全部选中首项,如果把空串判成非法,
+          // 用户第一次点保存就被自己的默认值拦住,而且错误文案会写成
+          // '当前是 ""',看起来像配置坏了,其实只是还没设置过。
+          //
+          // 非空时的校验仍然有用:<select> 本来选不出不存在的 <option>,
+          // 真正要防的是 settings.json 里存了历史遗留的非法值 ——
+          // buildEnumOptions 会把它当作"当前值"补进 option 列表,
+          // 用户什么都不改直接点保存就把它原样提交回去了。
+          function checkEnum(el) {
+            var v = String(el.value == null ? '' : el.value).trim();
+            if (v === '') return '';                 // 跟随 env 默认
+            var allowed = (el.getAttribute('data-val-enum') || '').split(/\s+/).filter(Boolean);
+            if (!allowed.length) return '';
+            if (allowed.indexOf(v) !== -1) return '';
+            return fieldName(el) + ' 只支持 ' + allowed.join(' / ') + ',当前是 "' + v + '"';
+          }
+
+          // 开关字段校验。
+          //
+          // checkbox 的取值天然受限,但这里查的是另一个东西:
+          // hidden 兜底 input 必须排在 checkbox 之前,否则取消勾选时
+          // 表单里一个值都不提交,optBool 会把"取消勾选"读成 nil
+          // (= 跟随 env)而不是 false(= 面板显式关闭)。
+          // 这是"顺序错了后果很安静"的一类 bug,顺手挡一下。
+          function checkBool(el) {
+            var hidden = el.form && el.form.querySelector(
+              'input[type="hidden"][name="' + el.getAttribute('name') + '"]');
+            if (!hidden) {
+              return fieldName(el) + ' 缺少 hidden 兜底,取消勾选会被误读成「跟随 env 默认」';
+            }
+            // DOM 顺序:hidden 必须在 checkbox 之前
+            if (!(hidden.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING)) {
+              return fieldName(el) + ' 的 hidden 兜底必须排在开关前面,当前顺序会导致取消勾选失效';
+            }
+            return '';
+          }
+
+          // 逐项跑一遍校验,把结果写到字段下方的 .form-error。
+          // 返回错误条目数组(空数组 = 全部合法)。
+          function validateForm(form) {
+            var errors = [];
+            form.querySelectorAll('[data-val-int],[data-val-enum],[data-val-bool]').forEach(function (el) {
+              var msg = '';
+              if (el.hasAttribute('data-val-int')) {
+                msg = checkInt(el);
+              } else if (el.hasAttribute('data-val-enum')) {
+                msg = checkEnum(el);
+              } else if (el.hasAttribute('data-val-bool')) {
+                msg = checkBool(el);
+              }
+              showFieldError(form, el, msg);
+              if (msg) errors.push({ el: el, msg: msg });
+            });
+            return errors;
+          }
+
+          // 写/清某个字段的错误态:文案、.is-invalid 高亮、aria-invalid。
+          function showFieldError(form, el, msg) {
+            var name = el.getAttribute('name');
+            var slot = name ? form.querySelector('[data-error-for="' + name + '"]') : null;
+            if (slot) {
+              slot.textContent = msg;
+              if (msg) {
+                slot.hidden = false;
+              } else {
+                slot.hidden = true;
+              }
+            }
+            if (msg) {
+              el.classList.add('is-invalid');
+              el.setAttribute('aria-invalid', 'true');
+            } else {
+              el.classList.remove('is-invalid');
+              el.removeAttribute('aria-invalid');
+            }
+          }
+
+          // 顶部汇总条:让用户一眼看到"这次没保存成"以及为什么。
+          function showSummary(form, errors) {
+            var box = form.querySelector('[data-settings-error-summary]');
+            if (!box) return;
+            if (!errors.length) {
+              box.textContent = '';
+              box.hidden = true;
+              return;
+            }
+            box.textContent = '有 ' + errors.length + ' 项填写有问题,本次没有保存:' +
+              errors.map(function (e) { return e.msg; }).join(';');
+            box.hidden = false;
+          }
+
+          // submit 阶段拦截。capture = true,抢在 initButtonLoading
+          // 的 spinner/disabled 效果之前 —— 那套是给"确定要发出去"的
+          // 请求做视觉反馈的,校验没过就不该让按钮转圈。
+          document.addEventListener('submit', function (ev) {
+            var form = ev.target;
+            if (!form || !form.hasAttribute || !form.hasAttribute('data-settings-form')) return;
+
+            // "全部恢复默认"带 formaction,走的是清空而不是保存 ——
+            // 不该被上面的校验拦住(否则用户想清掉错误配置却清不掉)。
+            var submitter = ev.submitter;
+            if (submitter && submitter.hasAttribute('formaction')) return;
+
+            var errors = validateForm(form);
+            showSummary(form, errors);
+            if (!errors.length) return;
+
+            ev.preventDefault();
+            ev.stopPropagation();
+            // 聚焦第一个出错的字段:焦点环落在出问题的地方,
+            // 而不是留在已经点过的按钮上。
+            var first = errors[0].el;
+            try { first.focus({ preventScroll: false }); } catch (e) { first.focus(); }
+          }, true);
+
+          // 改动即重算:用户改对了当场消错,不用再点一次保存才发现白填了。
+          // 只对已经处于错误态的字段做实时重算,避免每敲一个键都刷 DOM。
+          document.addEventListener('input', function (ev) {
+            var el = ev.target;
+            if (!el || !el.closest) return;
+            if (!el.classList || !el.classList.contains('is-invalid')) return;
+            var form = el.form;
+            if (!form || !form.hasAttribute('data-settings-form')) return;
+            var errors = validateForm(form);
+            showSummary(form, errors);
+          });
+
+          // 枚举/开关走 change 而不是 input(select 不触发 input)
+          document.addEventListener('change', function (ev) {
+            var el = ev.target;
+            if (!el || !el.closest) return;
+            var form = el.form;
+            if (!form || !form.hasAttribute || !form.hasAttribute('data-settings-form')) return;
+            if (!el.classList || !el.classList.contains('is-invalid')) return;
+            var errors = validateForm(form);
+            showSummary(form, errors);
+          });
+        }
+
         function initAll() {
           initTopbarActive();
           initDismissable();
@@ -813,6 +1017,7 @@
           initButtonLoading();
           initDetailsPersistence();
           initConfirmGuard();
+          initSettingsValidation();
         }
 
         // 此 <script> 在 </body> 前直接执行,DOM 已解析,querySelector 立即可用。

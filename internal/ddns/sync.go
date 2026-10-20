@@ -426,7 +426,7 @@ func (s *Sync) FetchRemote(ctx context.Context) (RemoteSnapshot, error) {
 	}
 
 	if domain == "" {
-		snap.Error = "DDNS 主域名未配置(env IKEV2_DDNS_DOMAIN)"
+		snap.Error = "DDNS 主域名未配置(env ALIYUN_DOMAIN 或面板设置)"
 		s.mu.Lock()
 		s.remoteSnap = snap
 		s.mu.Unlock()
@@ -704,8 +704,8 @@ func (s *Sync) Run(ctx context.Context) error {
 		period = defaultPeriod
 	}
 	// 用一次性 Timer 而非 Ticker:Ticker 的周期在 NewTicker 时就固定死了,
-	// 面板改 Period 只改内存、循环还按老周期 fire,必须重启容器才生效。
-	// 每轮跑完重新 arm 一次并重读周期 → 面板改完下一轮即生效。
+// 面板改 Period 只改内存、循环还按老周期 fire。
+// 每轮跑完重新 arm 一次并重读周期 → 面板改完下一轮即生效(不需要重启容器)。
 	timer := time.NewTimer(period)
 	defer timer.Stop()
 
