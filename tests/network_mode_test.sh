@@ -564,6 +564,44 @@ for p in "$BASE" "$MACV" "$IPVL"; do
   fi
 done
 
+# ---------- NM-57 L2 必填变量的插值语义：L2 两份用 :?，host 那份用 :- ----------
+#
+# 背景（真实故障）：同一个 L2 变量在 compose 文件里出现两次，走两条
+# **互相独立**的插值路径 ——
+#   - networks 段的 parent/subnet/gateway → 插值结果给 Docker daemon 建网
+#   - environment 段的同名三项           → 插值结果作为容器 env 传进去
+# entrypoint 读的是**容器里**那一份。
+#
+# 当 environment 段写成 `:-`（缺失即空串）而 networks 段被改成 `:-<默认值>`
+# （面板的一键部署模板常这么改，好让 compose 先起得来），就会出现：
+#   compose 插值通过 → 容器创建成功 → 容器里三个变量是**空串**
+#   → entrypoint net_mode_validate 判「缺少必填变量」→ exit 12
+#   → restart: unless-stopped 无限重启，日志反复刷同一行 ERR，
+#     根因（变量压根没传进容器）从日志上完全看不出来。
+#
+# 所以 L2 两份的 environment 段必须用 `:?`（缺失即在 up 阶段报错），
+# 而 host 那份必须保持 `:-`（host 模式压根不用这三个变量，
+# 写成 `:?` 会让所有 host 部署直接起不来）。
+#
+# 这一项同时锁住两端，防止将来只改一边。
+for v in IKEV2_L2_PARENT IKEV2_L2_SUBNET IKEV2_L2_GATEWAY; do
+  for p in "$MACV" "$IPVL"; do
+    f="$(basename "$p")"
+    raw="$(grep -E "^[[:space:]]+${v}:" "$p" | head -1)"
+    if printf '%s' "$raw" | grep -q ':?'; then
+      ok "NM-57 ${f} ${v} 用 :? 必填"
+    else
+      bad "NM-57 ${f} ${v} 用 :? 必填" "got: ${raw}"
+    fi
+  done
+  raw="$(grep -E "^[[:space:]]+${v}:" "$BASE" | head -1)"
+  if printf '%s' "$raw" | grep -q ':-' && ! printf '%s' "$raw" | grep -q ':?'; then
+    ok "NM-57 docker-compose.yml ${v} 保持 :- 可选（host 模式不需要）"
+  else
+    bad "NM-57 docker-compose.yml ${v} 保持 :- 可选" "got: ${raw}"
+  fi
+done
+
 # ---------- 非法模式 ----------
 validate_rc "MODE=foobar"
 if [ "$RC" -ne 0 ]; then

@@ -275,6 +275,19 @@ services:
       # bridge 已在 v2.86-PR14 移除。
       IKEV2_NETWORK_MODE: "host"
       # ---- 以下为 macvlan / ipvlan 专属（L2 模式必填，host 模式下会被忽略并 WARN）----
+      #
+      # ⚠️ 这三个变量在**本文件**里必须保持 `:-`（可空），不能跟着
+      # macvlan / ipvlan 那两份改成 `:?`（必填）。
+      # 原因：host 模式压根不用它们，entrypoint 的 net_mode_validate 对 host
+      # 分支只打 WARN 不拦截（见 scripts/network-mode.sh）。写成 `:?` 的话，
+      # 所有 host 部署在 `docker compose up` 阶段就因为缺这三个变量而失败 ——
+      # 而 host 部署本来就不需要它们。
+      #
+      # 反过来，macvlan / ipvlan 那两份的 environment 段必须用 `:?`：
+      # 那是「L2 模式必填」，且不写 `:?` 就会出现「networks 段有默认值、
+      # 容器 env 里却是空串」的不对称（容器起得来但 entrypoint FATAL 无限重启）。
+      # 详见 docker-compose.macvlan.yml / .ipvlan.yml 里对应的注释块。
+      #
       # 宿主父接口名。macvlan/ipvlan 虚拟网卡挂在它上面。
       IKEV2_L2_PARENT: "${IKEV2_L2_PARENT:-}"
       # 宿主所在 IPv4 子网（CIDR）。**只支持 IPv4** —— IPv6 走 RA/SLAAC。

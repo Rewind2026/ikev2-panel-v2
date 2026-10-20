@@ -297,13 +297,38 @@ services:
       # bridge 已在 v2.86-PR14 移除。
       IKEV2_NETWORK_MODE: "macvlan"
       # ---- 以下为 L2 模式必填 ----
+      #
+      # ⚠️ 这三个变量必须用 `:?`（缺失即报错），不能用 `:-`（缺失即空串）。
+      #
+      # 为什么 environment 段也要必填：同一个变量在本文件里出现两次，
+      # 走两条**互相独立**的插值路径：
+      #   - networks 段的 parent/subnet/gateway → 插值结果给 Docker daemon 建网
+      #   - environment 段的这三项              → 插值结果作为**容器环境变量**传进去
+      # entrypoint 读的是**容器里**那一份（os.Getenv），不是 networks 段的。
+      #
+      # 如果这里写成 `:-`、而 networks 段又被改成 `:-<默认值>`（不少面板的
+      # 「一键部署」模板会为了先让 compose 起得来这么改），那么：
+      #   compose 插值通过 → 容器创建成功 → 容器里这三个变量却是**空串**
+      #   → entrypoint net_mode_validate 判「缺少必填变量」→ exit 12
+      #   → restart: unless-stopped 无限重启，日志反复刷同一行 ERR，
+      #     而真正的根因（变量压根没传进容器）藏在两段插值语法的差异里，
+      #     从日志上完全看不出来。
+      #
+      # 两段都写成 `:?` 之后，缺变量在 `docker compose up` 阶段就直接失败：
+      #   error while interpolating services.ikev2-panel.environment.IKEV2_L2_PARENT:
+      #   required variable IKEV2_L2_PARENT is missing a value: 必填：宿主父接口名，如 eth0
+      # 不用等容器起来再从刷屏日志里反推。
+      #
+      # host 模式那份（docker-compose.yml）必须保持 `:-` —— host 模式根本
+      # 不用这三个变量，写成 `:?` 会让所有 host 部署直接起不来。
+      #
       # 宿主父接口名。macvlan 虚拟网卡挂在它上面。不能填 lo。
-      IKEV2_L2_PARENT: "${IKEV2_L2_PARENT:-}"
+      IKEV2_L2_PARENT: "${IKEV2_L2_PARENT:?必填：宿主父接口名，如 eth0}"
       # 宿主所在 IPv4 子网（CIDR）。**只支持 IPv4** —— IPv6 走 RA/SLAAC。
       # 若填 v6 子网，Docker IPAM 会接管 IPv6 并默认分配 ULA(fd00::/8)，公网不可达。
-      IKEV2_L2_SUBNET: "${IKEV2_L2_SUBNET:-}"
+      IKEV2_L2_SUBNET: "${IKEV2_L2_SUBNET:?必填：宿主所在 IPv4 子网，如 203.0.113.0/24}"
       # 该子网的宿主网关（必须是宿主自己的网关，容器经它出网）。
-      IKEV2_L2_GATEWAY: "${IKEV2_L2_GATEWAY:-}"
+      IKEV2_L2_GATEWAY: "${IKEV2_L2_GATEWAY:?必填：该子网的宿主网关，必须落在上面的子网内}"
       # macvlan 专属：bridge(默认) | private | vepa。passthru 与 IPAM 互斥，已禁用。
       IKEV2_MACVLAN_MODE: "${IKEV2_MACVLAN_MODE:-}"
       # ipvlan 专属（本文件用不到，保留是为了三份文件的 environment 键集合完全一致 ——

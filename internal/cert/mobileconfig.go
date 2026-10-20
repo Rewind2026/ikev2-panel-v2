@@ -744,8 +744,10 @@ func xmlEscape(s string) string {
 // 轴 4 lane 轨（服务就绪链路 8 格），全站面板语言统一（banner / metric /
 // settings-card / login-card / 拓扑图 / 顶栏）。详见 docs/CHANGELOG.md（v2.88）。
 //
-// 详见 docs/CHANGELOG.md（v2.87）。
-const PanelVersion = "v2.88"
+// v2.89：L2 模式必填变量 —— 两份 L2 compose 的 environment 段改用 `:?`（必填），
+// 与 networks 段对称，缺变量在 `docker compose up` 阶段即报错指名变量。
+// 详见 docs/CHANGELOG.md（v2.89）。
+const PanelVersion = "v2.89"
 
 // generateUUID RFC 4122 v4 随机 UUID。
 // mobileconfig 的 PayloadUUID/ProfileUUID 必须全局唯一，否则 iOS 覆盖会乱。
