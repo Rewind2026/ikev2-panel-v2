@@ -568,9 +568,17 @@ func loadDDNSStatus(s *Server) ddnsStatusData {
 		// v2.86-pr23g:整轮 Attempted 透传(只有 dual 走完 loop / 单 family 真正跑过 才 true)
 		out.attempted = last.Attempted
 	} else if exists := lastDDNSFailedExists(); exists {
-		// goroutine 还没 tick 但文件存在(上次运行失败)→ 也算失败
+		// 兜底分支:本次进程还没跑过一轮(last.Time 为 zero),
+		// 但上次运行留下的失败标志文件还在 —— 于是知道"失败过",
+		// 却拿不到失败原因和时间。
+		//
+		// v2.88 修订文案:原来这里写的是"详见 /var/log/charon.log",
+		// 指错日志了 —— charon.log 是 strongSwan IKE 进程的日志,
+		// DDNS 同步是面板自己的 goroutine 跑的,原因只可能在面板日志里。
+		// 同时不再说"最近一次同步失败":本次进程压根没同步过,
+		// 真实语义是"上次运行失败,且本次尚未重试"。
 		out.failed = true
-		out.lastErr = "最近一次同步失败(详见 /var/log/charon.log 或面板日志)"
+		out.lastErr = "上次运行同步失败，本次进程尚未开始重试；具体原因见面板日志（docker compose logs ikev2-panel）"
 	}
 
 	return out

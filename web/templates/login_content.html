@@ -18,8 +18,7 @@
   </div>
 
   {{if .Error}}
-  {{template "banner" (dict "Kind" "error" "MsgHTML" "<strong>登录失败</strong>" "ExtraClass" "mb-2")}}
-  <p class="banner-detail text-muted">{{.Error}}</p>
+  {{template "banner" (dict "Kind" "error" "MsgHTML" "<strong>登录失败</strong>" "Detail" .Error "ExtraClass" "mb-2")}}
   {{end}}
 
   <form method="POST" action="/login" class="login-form" autocomplete="on">

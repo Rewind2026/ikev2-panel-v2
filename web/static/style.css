@@ -1,14 +1,19 @@
 /* ============================================================================
-   ikev2-panel v2.86-PR-Redesign — EZZON-flavored visual language
+   ikev2-panel — EZZON-flavored visual language
    --------------------------------------------------------------------------
    视觉灵感（不复制游戏内容）：
      - 深黑底 + 青蓝霓虹高亮（#22d3ee / #06b6d4）作为主色
      - 顶部 horizontal nav，icon + 大写小字标签
-     - 顶栏 HUD 大数字区（活跃数 / 总数）+ 状态 pill
-     - 胶囊状（pill）按钮 + 像素级描边/光泽感
-     - 卡片"玻璃感" 1px 青色描边 + 内部 glow
-     - 暗调蓝灰 panel grid（顶部 key caps + lane 列）
+     - HUD 大数字区（首页 .metric-value / 侧栏 .side-stat-value）
+     - 切角（clip-path）取代圆角 —— 锐利是 EZZON 的辨识度来源
+     - 常驻微动效：网格漂移 / 呼吸 stage light / 状态脉冲 / 隧道跑光
+     - 噪点颗粒（body 背景栈）+ 网格底纹
      - 暗色为唯一主题（VPN 控制台天然是夜间场景）
+
+   v2.88 修订：上列 7 条里有 3 条在 v2.86 时只是"注释里的声明"，没有对应实现 ——
+   像素光泽（0 处 sheen）、panel grid lane 列（--ikev2-lane-N 是死变量）、
+   顶栏 HUD 大数字区（.hud-stat 模板零引用）。§30 把三条全部真正落地，
+   lane 轨的映射方案见 §30.6（服务就绪链路，8 格恒定）。
    ========================================================================== */
 
 /* ===== 1. Design Tokens ============================================== */
@@ -53,15 +58,19 @@
   --ikev2-info-soft:   rgba(96, 165, 250, 0.16);
   --ikev2-info-fg:     #93c5fd;
 
-  /* --- lane rail (8-key setting 颜色映射到快速统计 chip) --- */
+  /* --- lane rail 调色板 ---
+     v2.86 定义后一直无人消费（死变量）。v2.88 §30.6 接上 .lane 状态色：
+     lane-6/7/8 分别承担 ok / warn / danger 三态。
+     lane-1..5 是给未来扩展的同族色阶（当前未被消费，但与 6/7/8 同源，
+     改动时能保证八格同在一个色系里而不是各调各的）。 */
   --ikev2-lane-1: #22d3ee;
   --ikev2-lane-2: #38bdf8;
   --ikev2-lane-3: #818cf8;
   --ikev2-lane-4: #a78bfa;
   --ikev2-lane-5: #f472b6;
-  --ikev2-lane-6: #34d399;
-  --ikev2-lane-7: #fbbf24;
-  --ikev2-lane-8: #fb7185;
+  --ikev2-lane-6: #34d399;   /* ok    */
+  --ikev2-lane-7: #fbbf24;   /* warn  */
+  --ikev2-lane-8: #fb7185;   /* danger*/
 
   /* --- shape (EZZON: 锐利,4px 主导) --- */
   --ikev2-radius-sm:   2px;
@@ -86,10 +95,42 @@
   --ikev2-rhythm-7: 2.5rem;
   --ikev2-rhythm-8: 3rem;
 
-  /* --- fonts --- */
-  --ikev2-font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', sans-serif;
-  --ikev2-font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', 'Cascadia Code', Menlo, Consolas, monospace;
-  --ikev2-font-display: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  /* --- fonts ---
+     v2.88:原先只写 Inter / JetBrains Mono,但项目**从未加载这两个 webfont**
+     (grep 全站无 @font-face、无 Google Fonts <link>)。也就是说字体栈里
+     前两位一直是"声明了但永远命中不到"的死项,实际生效的是 -apple-system
+     → Segoe UI → sans-serif 这条兜底链。
+     这次把兜底链补完整:CJK 显式列出 PingFang / 微软雅黑 / Noto Sans SC,
+     否则中文标题会掉到浏览器默认宋体/黑体,和拉丁数字不是一个气质。 */
+  --ikev2-font-sans:
+    'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+    'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei UI', 'Microsoft YaHei',
+    'Noto Sans SC', 'Source Han Sans SC', 'Helvetica Neue', Arial, sans-serif;
+  --ikev2-font-mono:
+    'JetBrains Mono', ui-monospace, 'SF Mono', 'Cascadia Code', Menlo, Consolas,
+    'PingFang SC', 'Microsoft YaHei UI', 'Noto Sans Mono CJK SC', monospace;
+  --ikev2-font-display: var(--ikev2-font-sans);
+
+  /* --- type scale (v2.88) ---
+     改版前字号散落在 0.625 / 0.6875 / 0.75 / 0.8125 / 0.875 / 0.9375 / 1.125 /
+     1.5rem 之间,彼此的间距不是固定比例,阶梯是"历史遗留"而非设计。
+     这里定一条约 1.2 递增的阶梯(基准 html font-size 14px,见 §2),
+     后续新增文字只能从这 8 档里取。 */
+  --ikev2-fs-2xs:  0.6875rem;  /*  9.6px 纯装饰:chip / 徽标角标 */
+  --ikev2-fs-xs:   0.75rem;    /* 10.5px 辅助说明、表单 hint */
+  --ikev2-fs-sm:   0.8125rem;  /* 11.4px 次要正文、表格、标签 */
+  --ikev2-fs-md:   0.875rem;   /* 12.3px 正文基准、按钮、输入框 */
+  --ikev2-fs-lg:   1rem;       /*   14px 小节标题 */
+  --ikev2-fs-xl:   1.25rem;    /* 17.5px 卡片标题 */
+  --ikev2-fs-2xl:  1.5rem;     /*   21px 页面标题 */
+  --ikev2-fs-3xl:  1.875rem;   /* 26.3px HUD 数字 */
+
+  /* 中文没有 x-height,同样 rem 下中文看起来比拉丁字母小一档,
+     所以中文正文的行高要比纯拉丁场景更松,否则段落糊成一片。 */
+  --ikev2-lh-tight: 1.25;
+  --ikev2-lh-snug:  1.4;
+  --ikev2-lh-body:  1.65;
+  --ikev2-lh-loose: 1.8;
 
   /* --- topbar (EZZON 风横向 nav 高度) --- */
   --ikev2-topbar-h: 48px;  /* EZZON 顶栏紧凑 */
@@ -103,8 +144,12 @@
 *,*::before,*::after{box-sizing:border-box;}
 html{
   font-family:var(--ikev2-font-sans);
-  font-size:13.5px;  /* EZZON 紧致 */
-  line-height:1.5;
+  /* v2.88:13.5px → 14px。原来这个值是照"纯拉丁紧凑后台"定的,但界面正文
+     九成以上是中文 —— 13.5px 下中文笔画已经开始互相挤压,而 14px 是
+     中文正文公认的下限(再小连"默认密码"这种提示都难辨)。
+     全站字号都是 rem,改一处即整体等比放大,不需要逐条调。 */
+  font-size:14px;
+  line-height:var(--ikev2-lh-body);
   color:var(--ikev2-fg);
   background:var(--ikev2-bg-0);
   -webkit-font-smoothing:antialiased;
@@ -163,14 +208,20 @@ body::before{
   -webkit-mask-image: radial-gradient(circle at 50% 35%, black 0%, transparent 75%);
 }
 
-/* Heading scale */
-h1,h2,h3,h4,h5,h6{ margin:0; color:var(--ikev2-fg-strong); font-weight:600; letter-spacing:-0.01em; line-height:1.2;}
-h1{ font-size:1.5rem; letter-spacing:-0.02em; font-weight:700;}
-h2{ font-size:1.125rem;}
-h3{ font-size:0.9375rem; text-transform:uppercase; letter-spacing:0.08em; color:var(--ikev2-fg-muted); font-weight:600;}
-h4{ font-size:0.8125rem; text-transform:uppercase; letter-spacing:0.08em; color:var(--ikev2-fg-muted); font-weight:600;}
-p{ margin:0; color:var(--ikev2-fg);}
-small,.text-sm{ font-size:0.8125rem; color:var(--ikev2-fg-muted);}
+/* Heading scale
+   v2.88:中文标题不能沿用纯拉丁的负 letter-spacing —— 负字距会把汉字的
+   左右结构往中间挤("部署"里的"罒"和"布"会粘连)。只有纯数字/拉丁大标题
+   (h1 页面名、metric 数字)才保留 -0.02em。 */
+h1,h2,h3,h4,h5,h6{
+  margin:0; color:var(--ikev2-fg-strong); font-weight:600;
+  letter-spacing:0; line-height:var(--ikev2-lh-tight);
+}
+h1{ font-size:var(--ikev2-fs-2xl); letter-spacing:-0.02em; font-weight:700;}
+h2{ font-size:var(--ikev2-fs-xl); font-weight:650;}
+h3{ font-size:var(--ikev2-fs-md); color:var(--ikev2-fg); font-weight:650;}
+h4{ font-size:var(--ikev2-fs-sm); color:var(--ikev2-fg-muted); font-weight:600;}
+p{ margin:0; color:var(--ikev2-fg); line-height:var(--ikev2-lh-body);}
+small,.text-sm{ font-size:var(--ikev2-fs-sm); color:var(--ikev2-fg-muted);}
 .text-muted{ color:var(--ikev2-fg-muted);}
 .text-subtle{ color:var(--ikev2-fg-subtle);}
 .text-mono{ font-family:var(--ikev2-font-mono);}
@@ -270,18 +321,22 @@ button:active{ transform:translateY(1px);}
 button:disabled{ opacity:0.45; cursor:not-allowed;}
 
 /* Primary — cyan, glowing */
-button[type="submit"], button.btn-primary, .btn-primary{
+/* v2.88:排除 .topbar-menu-item —— 下拉菜单里的"登出"是 <button type="submit">,
+   特异度 0,1,1 压过 .topbar-menu-item 的 0,1,0,于是菜单项被染成整块青色
+   主按钮(和同级的"账号设置"完全不像一个菜单)。它只是菜单里的一项,
+   不该继承主按钮的实心渐变。 */
+button[type="submit"]:not(.topbar-menu-item), button.btn-primary, .btn-primary{
   background:linear-gradient(180deg, var(--ikev2-brand-hover) 0%, var(--ikev2-brand) 60%, var(--ikev2-brand-2) 100%);
   border-color:var(--ikev2-brand-2);
   color:var(--ikev2-brand-fg);
   font-weight:700;
   box-shadow:0 1px 0 rgba(255,255,255,0.45) inset, 0 8px 18px var(--ikev2-brand-glow), 0 0 0 1px rgba(34,211,238,0.55) inset;
 }
-button[type="submit"]:hover, button.btn-primary:hover, .btn-primary:hover{
+button[type="submit"]:not(.topbar-menu-item):hover, button.btn-primary:hover, .btn-primary:hover{
   background:linear-gradient(180deg, #a5f3fc 0%, var(--ikev2-brand-hover) 100%);
   box-shadow:0 1px 0 rgba(255,255,255,0.55) inset, 0 12px 28px var(--ikev2-brand-glow), 0 0 0 1px rgba(34,211,238,0.85) inset, 0 0 24px var(--ikev2-brand-glow);
 }
-button[type="submit"]:active, button.btn-primary:active, .btn-primary:active{
+button[type="submit"]:not(.topbar-menu-item):active, button.btn-primary:active, .btn-primary:active{
   background:var(--ikev2-brand-2);
   transform:translateY(1px);
 }
@@ -527,54 +582,24 @@ tbody tr:hover td{ background:rgba(34,211,238,0.04);}
   box-shadow:0 0 16px rgba(34,211,238,0.20) inset, 0 0 16px rgba(34,211,238,0.18);
 }
 
-/* HUD — the right cluster, four big-number tiles + preset chips + status */
-.topbar-hud{
-  display:flex; align-items:center; gap:0.75rem;
-  margin-left:auto;
-}
-.hud-stat{
-  display:flex; align-items:center; gap:0.5rem;
-  padding:0 0.75rem; height:var(--ikev2-hud-h);
-  background:rgba(255,255,255,0.02);
-  border:1px solid rgba(255,255,255,0.06);
-  border-radius:var(--ikev2-radius);
-  font-feature-settings:'tnum';
-}
-.hud-stat-label{
-  font-size:0.625rem; text-transform:uppercase; letter-spacing:0.10em;
-  color:var(--ikev2-fg-subtle); font-weight:600;
-}
-.hud-stat-value{
-  font-family:var(--ikev2-font-mono);
-  font-size:1.125rem; font-weight:700;
-  color:var(--ikev2-fg-strong);
-  letter-spacing:-0.01em;
-  text-shadow:0 0 12px rgba(34,211,238,0.25);
-}
-.hud-stat.brand .hud-stat-value{ color:var(--ikev2-brand-hover);}
-.hud-stat.ok .hud-stat-value{ color:var(--ikev2-ok-fg);}
-.hud-stat.warn .hud-stat-value{ color:var(--ikev2-warn-fg);}
-.hud-stat.danger .hud-stat-value{ color:var(--ikev2-danger-fg);}
+/* v2.88 删除:.topbar-hud / .hud-stat / .hud-stat-label / .hud-stat-value /
+   .topbar-preset / .preset-num 共 6 个类（约 45 行）—— grep 全部模板零引用，
+   是 v2.86 重设计时写下但从未接入的死代码。文件头注释宣称的
+   "顶栏 HUD 大数字区（活跃数/总数）"从未真正落地。
+   真正显示大数字的是首页 .metric-value 与侧栏 .side-stat-value，
+   v2.88 在 §30.3 升级了这两者。样式表不该保留不存在的组件。 */
 
-/* PRESET (legacy) — chip-style "preset 3 of 10" */
-.topbar-preset{
-  display:inline-flex; align-items:center; gap:0.35rem;
-  font-size:0.6875rem; text-transform:uppercase; letter-spacing:0.10em;
-  color:var(--ikev2-fg-subtle); font-weight:600;
-  margin:0 0.25rem;
-}
-.topbar-preset .preset-num{
-  display:inline-flex; align-items:center; justify-content:center;
-  min-width:18px; height:18px; padding:0 5px;
-  background:rgba(34,211,238,0.14);
-  color:var(--ikev2-brand-hover);
-  border:1px solid rgba(34,211,238,0.35);
-  border-radius:4px;
-  font-family:var(--ikev2-font-mono);
-  font-weight:700; font-size:0.6875rem;
-}
 
 /* user pill */
+.topbar-user-wrap{
+  /* v2.88:账号区的定位上下文。
+     .topbar-user-pill 有 clip-path 切角,而 clip-path 会把溢出到自身盒子
+     之外的子元素整个裁掉 —— 下拉菜单必须放在 pill 外面(同级),
+     挂在 wrap 上定位,否则菜单会被切角裁没(表现为"点了没反应")。 */
+  position:relative;
+  display:inline-flex;
+  align-items:center;
+}
 .topbar-user-pill{
   display:inline-flex; align-items:center; gap:0.5rem;
   height:var(--ikev2-hud-h);
@@ -584,6 +609,8 @@ tbody tr:hover td{ background:rgba(34,211,238,0.04);}
   border-radius:var(--ikev2-radius-pill);
   color:var(--ikev2-fg);
   font-size:0.8125rem;
+  /* v2.88:整个账号区可点(头像/用户名/齿轮),给指针反馈 */
+  cursor:pointer;
 }
 .topbar-user-pill .avatar{
   display:inline-flex; align-items:center; justify-content:center;
@@ -955,8 +982,13 @@ main#main, .main-area{
   background:linear-gradient(90deg, transparent, var(--ikev2-brand), transparent);
   opacity:0.5;
 }
-.metric:hover{
-  border-color:rgba(34,211,238,0.40);
+/* v2.88：§30.1 给切角面板统一提亮了 border-color。
+   这条选择器提到 (0,2,0)，才能盖过 §30.1 那条 (0,1,0) 的统一底色 ——
+   否则鼠标移上去边框不变色，hover 反馈静默失效。
+   :focus-within 是为了键盘 Tab 进卡片内控件时也有同样反馈。 */
+.metric:hover,
+.metric:focus-within{
+  border-color:rgba(34,211,238,0.55);
   transform:translateY(-1px);
   box-shadow:var(--ikev2-shadow-hover);
 }
@@ -1003,20 +1035,34 @@ main#main, .main-area{
 :where(.banner, [class*="banner-"]:not(.banner-icon):not(.banner-body)){
   position:relative;
   display:flex;
-  align-items:center;
+  align-items:flex-start;
   gap:0.625rem;
-  padding:0.625rem 0.875rem;
+  padding:0.7rem 0.9rem;
   border-radius:var(--ikev2-radius);
-  margin:0;
   font-size:0.8125rem;
-  line-height:1.45;
+  line-height:1.5;
   border:1px solid transparent;
   border-left-width:3px;
   /* dismissable 时的右 padding 留给 × */
+  /* v2.88 修订:原来是 margin:0 —— 首页可同时叠 4 条 banner
+     (LE 警告 / 默认密码 / DDNS 失败 / 未配阿里云),零间距会让它们
+     糊成一片,切角斜边互相咬在一起,读不出是两条独立信息。 */
+  /* margin 是可继承属性。:where() 让这条规则零特异性,若不在下一条归零,
+     这条下边距会被 .banner-body / .banner-msg / .banner-detail /
+     .banner-detail-time / small 全部继承,行距被 margin + gap 双重撑开。 */
+  margin:0 0 0.55rem;
+}
+/* 子元素清零:行距只由 .banner-body 的 gap 控制。 */
+:where(.banner, [class*="banner-"]:not(.banner-icon):not(.banner-body)) > *,
+:where(.banner, [class*="banner-"]:not(.banner-icon):not(.banner-body)) > * > *{
+  margin-top:0; margin-bottom:0;
 }
 .banner .banner-icon{
   flex-shrink:0;
   width:16px; height:16px;
+  /* 图标与多行文本顶端对齐(原 align-items:center 会让单行 banner 正常、
+     三行 banner 的图标卡在中间) */
+  margin-top:0.1rem;
 }
 .banner .banner-icon svg{
   width:100%; height:100%; display:block;
@@ -1024,10 +1070,36 @@ main#main, .main-area{
 .banner .banner-body{
   flex:1; min-width:0;
   word-break:break-word;
+  display:flex; flex-direction:column; gap:0.2rem;
 }
+/* 标题行:多行时也能和下面的详情区分开。
+   ⚠ 必须显式清 margin:上面那条 :where(.banner,...) 是零特异性的通配规则,
+     它给 .banner 定的 margin:0 0 .55rem 会被子元素继承 —— .banner-msg 和
+     .banner-detail 各背 7.7px 下边距,再叠上 gap,详情行会被推开近 10px。
+     行距由这里的 gap 单独控制,margin 一律归零。 */
+.banner .banner-msg{
+  display:block;
+  margin:0;
+}
+.banner .banner-detail{
+  margin:0;
+  font-size:0.78125rem;
+  line-height:1.45;
+  opacity:.88;
+  overflow-wrap:anywhere;
+}
+.banner .banner-detail-time{
+  margin:0;
+  font-size:0.75rem;
+  opacity:.7;
+  font-variant-numeric:tabular-nums;
+}
+/* MsgHTML 字面量里内嵌的 <small>(如"前往账号设置 →"那种行动链接)。
+   上面那条子元素清零规则 specificity 为 0,这里用 class 选择器把
+   上边距加回来 —— 它是标题的续行,不是 .banner-body 的并列行。 */
 .banner small{
   display:block;
-  margin-top:0.25rem;
+  margin:0.3rem 0 0;
   opacity:0.85;
   font-size:0.75rem;
 }
@@ -1039,32 +1111,12 @@ main#main, .main-area{
   font-size:0.8125rem;
 }
 
-/* banner 拆出的补充说明(错误详情 / 时间戳等)。
-   banner-body 只承载标题,动态内容单独成段并保持默认转义边界。 */
-.banner-detail{
-  margin:-0.5rem 0 0.85rem;
-  padding-left:2.15rem;
-  font-size:0.8125rem;
-  overflow-wrap:anywhere;
-}
-.banner-detail small{
-  display:block;
-  margin-top:0.2rem;
-  font-size:0.75rem;
-  opacity:0.85;
-}
-/* DDNS 同步失败详情 */
-.ddns-failed-detail{
-  margin:-0.5rem 0 0.85rem;
-  font-size:0.8125rem;
-  overflow-wrap:anywhere;
-}
-.ddns-failed-detail small{
-  display:block;
-  margin-top:0.2rem;
-  font-size:0.75rem;
-  opacity:0.85;
-}
+/* v2.88 删除:.banner-detail(外挂版)与 .ddns-failed-detail。
+   两者都是把详情挂在 banner **外面**、靠 margin:-0.5rem 负边距硬贴 ——
+   实测文字裸露在切角之外,且负边距会把相邻 banner 的间距吃掉。
+   详情现已由 banner 宏的 Detail / DetailTime 参数渲染进 .banner-body
+   内部(见上面 .banner .banner-detail),不再需要外挂段落。 */
+
 /* 一次性密码(新建/重置后展示)—— 密码必须在 <code> 里等宽易读,
    提醒单独一行,与 banner 标题分离。 */
 .one-time-secret{
@@ -2036,7 +2088,6 @@ body.login-page main#main{
   .topbar-nav{ gap:0.15rem;}
   .topbar-nav a{ padding:0.4rem 0.6rem; font-size:0.6875rem;}
   .topbar-nav a .nav-glyph{ display:none;}
-  .topbar-hud{ display:none;}
   main#main,.main-area{ padding:1rem 0.85rem 2rem;}
 
   /* 移动端(<=720px):grid 退化为单列卡片堆叠 */
@@ -2133,7 +2184,8 @@ body.login-page main#main{
 }
 .topology-svg{
   width:100%; height:auto; display:block;
-  border-radius:calc(var(--ikev2-radius-xl) - 4px);
+  /* v2.88 移除 border-radius —— 外层 .topology 已改为 clip-path 非对称切角,
+     内层再留圆角会与斜边错位。归零声明见 §30.9。 */
 }
 
 /* 空状态 */
@@ -2622,6 +2674,1414 @@ button.password-submit[disabled],
   border-radius:3px;
   font-size:0.6875rem;
 }
+/* ============================================================================
+   30. EZZON 质感层（v2.88）
+   ----------------------------------------------------------------------------
+   为什么单独开一节，而不是就地改前面的规则？
+
+   §1~§29 是 v2.86 重设计留下的骨架。改版时逐条对账发现：文件头注释声明的
+   7 条 EZZON 设计意图里，有 3 条根本没落地 ——
+     · "像素级描边/光泽感"  —— 全站 0 处 sheen，27 个 transition 全是 hover 变色
+     · "暗调蓝灰 panel grid" —— --ikev2-lane-1..8 定义了但没有任何规则消费，死变量
+     · "顶栏 HUD 大数字区"   —— .topbar-hud / .hud-stat 写完了但模板零引用，死代码
+   而 2 个 @keyframes 全是一次性的（入场淡入、横幅消失），零循环动画。
+
+   所以这一节把「质感」当成可整体回退的一层：新增规则全部集中在末尾，
+   不改动 §1~§29 既有选择器的盒模型，万一某台机器上掉帧或渲染异常，
+   删掉这一节即可完全回到 v2.87，不牵动任何业务样式。
+
+   四条轴：
+     轴 1  切角 / 锐利质感   §30.1
+     轴 2  常驻微动效         §30.2
+     轴 3  HUD 数字升级       §30.3
+     轴 4  lane 轨            §30.6
+     排版收尾                 §30.4
+     降级                     §30.5
+
+   轴 4 曾一度只备 CSS 不接入：8 格轨要么映射批次 E 的 8 项参数（只有 2 项是
+   布尔，其余是枚举和数值，轨道亮灭表达不了）、要么映射 8 条在线通道（用户数
+   不定，凑不满 8 格会塌成空格）。v2.88 定的映射是**服务就绪链路**：
+   8 格绑 8 个固定子系统，格数恒定、每格有确定值，详见 §30.6。
+   ========================================================================== */
+
+:root{
+  /* --- motion tokens ---
+     全站动效只从这里取时长/曲线。之前散着 .15s / .2s / 240ms / 280ms /
+     cubic-bezier(.4,0,.2,1) 等十几种写法，看不出意图也没法统一调快调慢。 */
+  --dur-1: 120ms;   /* 按压、hover 这类即时反馈 */
+  --dur-2: 220ms;   /* 展开/收起、状态切换 */
+  --dur-3: 420ms;   /* 进场 */
+  --dur-4: 720ms;   /* 数值变化脉冲 */
+  --ease-out:      cubic-bezier(.22,.61,.36,1);
+  --ease-out-quart:cubic-bezier(.25,.46,.45,.94);
+  --ease-out-expo: cubic-bezier(.16,1,.3,1);
+  --ease-in-out:   cubic-bezier(.45,.05,.55,.95);
+
+  /* --- 切角尺寸 ---
+     左上 + 右下双向切，模拟 EZZON 的斜切键帽。
+     polygon 里的百分比按元素自身尺寸解析，clip-path 只影响渲染、不改变盒模型，
+     所以切角不会引起任何重排。 */
+  --cut-sm: 6px;    /* 小控件:按钮、chip、输入框 */
+  --cut:    10px;   /* 卡片、面板 */
+
+  --clip-cut-sm: polygon(
+    var(--cut-sm) 0, 100% 0,
+    100% calc(100% - var(--cut-sm)), calc(100% - var(--cut-sm)) 100%,
+    0 100%, 0 var(--cut-sm));
+  --clip-cut: polygon(
+    var(--cut) 0, 100% 0,
+    100% calc(100% - var(--cut)), calc(100% - var(--cut)) 100%,
+    0 100%, 0 var(--cut));
+
+  /* --- 噪点（颗粒质感）---
+     内联 SVG feTurbulence，不额外发请求、不依赖外部字体。
+     data URI 里的 # 必须写成 %23 —— 否则会被浏览器当成 URL fragment 截断，
+     这是 data:image/svg+xml 的经典坑，表现是"噪点层完全不显示且无报错"。
+
+     ⚠⚠ feColorMatrix 不是可选装饰，去掉它整站底色会被洗成浅灰（实测见下）。
+
+     feTurbulence 的输出是**不透明的中灰**（fractalNoise 各通道均值≈0.5，
+     alpha 也是 0.5），直接当背景图铺满全屏，等于在 #050816 的深色底上盖了
+     一层 50% 不透明的灰纱 —— 深色主题当场失效。
+
+     headless Chrome 实测（1600×1232 首页，截图像素平均亮度）：
+         不加背景图          luma = 14.0   ← 正确的深色底
+         裸 feTurbulence     luma = 84.5   ← 被洗白，就是这个 bug
+         加下面这组 matrix   luma = 24.5   ← 有颗粒感，底色仍是深色
+
+     matrix 的作用：前 3 行把 RGB 全部钉成纯白（不再继承噪点的灰），
+     第 4 行 0.035 0.035 0.035 把 alpha 压到 ~1.8% 并让它**随噪点起伏**
+     —— 这才是"颗粒"而不是"纱窗"：亮处微微提亮，暗处保持纯黑。
+     别把 0.035 往上调：0.06 → luma 31.8，0.10 → 43.5，0.16 → 61.1，
+     每一步都在把深色底推向灰色。 */
+  --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.82' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='matrix' values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0.035 0.035 0.035 0 0'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* ============================================================================
+   30.1 轴 1 — 切角 / 锐利质感
+   ----------------------------------------------------------------------------
+   只切"面板级"和"控件级"元素，不切代码块和纯文本容器。
+   原因：clip-path 会连同子元素一起裁掉。.terminal-card 里是横向滚动的
+   <pre> 命令，切角后长命令的末尾会被斜边削掉一刀，读起来像"命令被截断了"，
+   是错误的语义暗示。所以代码块、表格保持原样。
+
+   切角后 1px border 会在斜边处被削断、露出背景，视觉上边框"缺了一角"。
+   补法：card-head / metric 这类已有 ::before 的容器，把 ::before 从
+   "顶部一条高光线"改成"沿整个上边+左侧的受光边"，斜角处自然衔接；
+   没有 ::before 的容器（.side-stats / .settings-card / .onboarding /
+   .quick-stat）原本就没用伪元素，直接占用 ::after 画受光边。
+   ========================================================================== */
+
+/* --- 面板级切角 --- */
+.card,
+.metric,
+.side-stats,
+.settings-card,
+.onboarding,
+.user-detail-header,
+.login-card,
+.quick-stat{
+  border-radius:0;
+  clip-path:var(--clip-cut);
+  /* v2.88 修订：边框必须比背景亮，否则切角等于没切。
+     原来这 8 个容器用的是 --ikev2-bg-rule(#1e2a48)，和深色底几乎同色 ——
+     斜边外侧就是背景，1px 线被削断后没有任何对比度，轴 1 全部白切，
+     实测反馈"整体分割和之前版本差别不大"正是这个原因（lane 轨同病，
+     已改成 color-mix(lc) 描边）。
+
+     这里不动 --ikev2-bg-rule 本体：它还被表格线、输入框描边等大量复用，
+     全局提亮会连带改掉所有分隔线（表格会变得很吵）。
+     只给"已切角的面板级容器"单独提亮到 #2c3d63，仍是冷色、不刺眼，
+     但足以让 10px 斜边读出来。 */
+  border-color:#2c3d63;
+}
+/* ⚠ 两个刻意排除：
+   · .os-panel —— 它靠 position:absolute + grid-template-rows 0fr→1fr 做高度
+     过渡，clip-path 会创建裁剪上下文，非 active 态（inset:0 的绝对定位）
+     会被裁到 active 面板的形状上，直接破坏 tab 切换。
+   · .settings-error-summary —— 它靠 border-left:3px 做危险色强调条，
+     切角会把这条竖条的上/下端削掉，语义反而变弱。 */
+
+/* 受光边 A：已有 ::before 的容器 —— 把"顶部高光线"扩成"上边 + 左上斜角"。
+   起点内缩 --cut，让线正好落在斜角尽头而不是被削断。 */
+.card::before,
+.metric::before,
+.user-detail-header::before{
+  left:var(--cut);
+  top:0; bottom:auto; right:auto; width:calc(100% - var(--cut));
+  height:1px;
+  background:linear-gradient(90deg,
+    rgba(34,211,238,.55) 0%, rgba(34,211,238,.14) 45%, transparent 100%);
+}
+/* 受光边 B：没有 ::before 的容器 —— 用 ::after 画同一条边。
+   这几个元素原本都没定义 ::after（已 grep 确认），占用是安全的。
+   ⚠ 它们原本也都没写 position，而 ::after 是 position:absolute ——
+     不补 position:relative 的话，伪元素会向上找到最近的定位祖先
+     （可能是 .dashboard-grid 甚至 body），inset:0 直接铺满整个页面。 */
+.side-stats,
+.settings-card,
+.onboarding,
+.quick-stat{
+  position:relative;
+}
+.side-stats::after,
+.settings-card::after,
+.onboarding::after,
+.quick-stat::after{
+  content:''; position:absolute; inset:0; pointer-events:none;
+  background:linear-gradient(160deg,
+    rgba(34,211,238,.50) 0%, rgba(34,211,238,.12) 38%, transparent 66%);
+  /* 只留 1px 的边缘：两层 mask 交集取反（exclude）= content-box 之外那圈。
+     padding:1px 是 content-box 内缩的来源，删掉就变成整片蒙版。 */
+  -webkit-mask:linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite:xor;
+          mask:linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+          mask-composite:exclude;
+  padding:1px;
+}
+/* .settings-card 是 <details>，展开时高度突变；受光边跟着 inset:0 自适应，
+   不需要额外处理。 */
+
+/* --- 控件级切角 ---
+   体量小，切角一律用 --cut-sm(6px)。用 --cut(10px) 会变成"缺了一块"。
+
+   ⚠ 四个刻意排除（都是圆形或依赖自身几何的控件）：
+   · .topbar-gear  —— border-radius:50% 的 28px 齿轮按钮，切角会毁掉圆形
+   · .dismiss      —— 28px 的裸 × 按钮，字形本身没有任何留白，切角显脏
+   · .password-toggle —— 浮在输入框**内部**的 34px 图标按钮，
+     代码注释明确写了它靠 top:0;bottom:0;margin:auto 居中且不能加 transform
+   · .os-tabs button —— 激活态用 border-bottom:2px 做下划线指示，
+     切角会削掉下划线的两端，指示性变弱
+   排除方式统一用 :not()，而不是把它们从基础规则里挑出来 ——
+   后者要写 5 遍选择器，且以后新增按钮容易漏。 */
+button,
+.btn-primary,
+.btn-secondary,
+button.secondary,
+.copy-btn,
+.chip,
+.badge{
+  border-radius:0;
+  clip-path:var(--clip-cut-sm);
+}
+button:is(.topbar-gear, .dismiss, .password-toggle),
+.os-tabs button{
+  clip-path:none;
+  border-radius:var(--ikev2-radius-pill);
+}
+.topbar-gear{ border-radius:50%; }
+/* v2.88:.topbar-menu-item 不切角 —— 外层 .topbar-menu 已经是非对称切角,
+   菜单项再切一次会变成"切角里套切角",且与同级的 <a> 菜单项(不切角)
+   视觉不齐。菜单项保持普通矩形。 */
+button.topbar-menu-item{
+  clip-path:none;
+  border-radius:5px;
+}
+
+input[type="text"],input[type="email"],input[type="password"],input[type="date"],
+input[type="number"],input[type="url"],input[type="search"],select,textarea,
+.radio-group label{
+  border-radius:0;
+  clip-path:var(--clip-cut-sm);
+}
+/* 聚焦态：原来是一条四边等宽的 cyan ring，现在改成左上角先亮 ——
+   与切角方向一致，也避免和 clip-path 切掉的那两角对不上。 */
+input:focus,select:focus,textarea:focus{
+  box-shadow:0 0 0 1px var(--ikev2-brand) inset,
+             0 0 0 3px rgba(34,211,238,.16),
+             0 0 20px rgba(34,211,238,.18);
+}
+
+/* --- 按钮扫光 ---
+   一条斜向白带划过按钮表面，只在 hover 触发。
+   用 transform 位移 —— 走合成层，不触发重绘。
+
+   实现上的三个要点：
+   1. 必须给 button 补 position:relative，::after 才有定位基准；
+   2. ::after 的 z-index 要高于按钮内容（见下方 z-index:3），
+      否则白带会糊在文字上；
+   3. 排除上面那三个圆形/内部图标按钮 —— 它们的空间太小，
+      扫光划过时视觉上是"图标在闪"而不是"表面在反光"。 */
+button:not(.topbar-gear):not(.dismiss):not(.password-toggle):not(.os-tabs button),
+.btn-secondary,
+.copy-btn{
+  position:relative;
+  overflow:hidden;
+}
+button:not(.topbar-gear):not(.dismiss):not(.password-toggle):not(.os-tabs button)::after,
+.btn-secondary::after,
+.copy-btn::after{
+  content:''; position:absolute; top:-20%; bottom:-20%; left:-70%; width:42%;
+  pointer-events:none; z-index:2;
+  background:linear-gradient(100deg,
+    transparent 0%, rgba(255,255,255,.18) 50%, transparent 100%);
+  opacity:0;
+  transform:translateX(0) skewX(-14deg);
+}
+button:not(.topbar-gear):not(.dismiss):not(.password-toggle):not(.os-tabs button):hover::after,
+.btn-secondary:hover::after,
+.copy-btn:hover:not(:disabled)::after{
+  opacity:1;
+  transform:translateX(400%) skewX(-14deg);
+  transition:transform 620ms var(--ease-out-expo), opacity 160ms linear;
+}
+/* 扫光下的按钮文字不能被盖住。::after 是 z-index:2 的定位元素，
+   而按钮内容是普通流内容 —— 不显式抬层就一定在白带下面。
+   注意 :not(.os-tabs button) 里是复合选择器：:not() 只接受选择器列表，
+   但参数本身可以是复合选择器（Selectors L4，Chrome 88+/Safari 9+ 支持）。 */
+button:not(.topbar-gear):not(.dismiss):not(.password-toggle):not(.os-tabs button) > *,
+.btn-secondary > *,
+.copy-btn > *{
+  position:relative;
+  z-index:3;
+}
+
+/* --- 登录卡：边缘流光 ---
+   .login-card::before 原本就是"渐变描边 + mask 掏空"（与切角补光同构），
+   所以不需要 ::after，直接把渐变换成 conic 并让它转起来。
+   注意 .login-card 不能进上面「受光边 B」的 ::after 名单 ——
+   它的 ::before 已经被描边占了，两个伪元素会叠成双层亮边。 */
+@property --ikev2-ang{ syntax:'<angle>'; initial-value:0deg; inherits:false; }
+@keyframes ikev2-edge-run{ to{ --ikev2-ang:360deg; } }
+.login-card::before{
+  background:conic-gradient(from var(--ikev2-ang),
+    transparent 0deg, rgba(34,211,238,.85) 34deg,
+    transparent 72deg, transparent 360deg);
+  animation:ikev2-edge-run 6s linear infinite;
+}
+
+/* ============================================================================
+   30.2 轴 2 — 常驻微动效
+   ----------------------------------------------------------------------------
+   两条硬约束，违反任一条都会在 192.168.50.63 那台 4 核小主机上掉帧：
+
+   1. 只动 transform / opacity / background-position，不动 width/height/top/left。
+      后者每帧触发布局 + 重绘；前者走合成层，只花 GPU。
+   2. 常驻动画一律挂在 pointer-events:none 的装饰层上，
+      不挂在承载交互的容器上 —— 否则装饰层会吃掉 hover / 点击。
+   ========================================================================== */
+
+/* --- 30.2.1 网格底纹缓慢漂移 ---
+   body::before 原本是静态网格（56px 格）。让它每 24s 走一整格，
+   位移量正好等于格距 → 无缝循环，肉眼看到的是底纹在缓慢流动而非在跳。 */
+@keyframes ikev2-grid-drift{
+  from{ background-position:0 0, 0 0; }
+  to  { background-position:56px 56px, 56px 56px; }
+}
+body::before{
+  animation:ikev2-grid-drift 26s linear infinite;
+}
+
+/* --- 30.2.2 舞台光呼吸 ---
+   body::after 在非登录页是空的（body.login-page::after 才是网格），
+   正好拿来放顶部柔光。position:fixed + pointer-events:none + z-index:0，
+   位于 main#main（z-index:1）之下，不会遮挡任何内容。 */
+@keyframes ikev2-breathe{
+  0%,100%{ opacity:.5;  transform:translate3d(-50%,0,0); }
+  50%    { opacity:.95; transform:translate3d(-50%,18px,0); }
+}
+body:not(.login-page)::after{
+  content:''; position:fixed; z-index:0; pointer-events:none;
+  top:var(--ikev2-topbar-h); left:50%;
+  width:min(1080px, 94vw); height:320px;
+  background:radial-gradient(ellipse 60% 100% at 50% 0%,
+    rgba(34,211,238,.14), rgba(34,211,238,.04) 55%, transparent 78%);
+  animation:ikev2-breathe 8s var(--ease-in-out) infinite;
+}
+
+/* --- 30.2.3 噪点（颗粒质感）---
+   挂在 body 的 background 栈里，不额外造元素也不占伪元素 ——
+   body::before 已被网格占用、body::after 已被舞台光占用、
+   body.login-page::after 另有登录页网格，三个坑位都满了。
+
+   噪点作为 background-image 列表的第一项（最上层），卡片是半透明
+   （rgba(255,255,255,.025)）所以噪点会透过卡片隐约可见，正是想要的效果。
+   不加 mix-blend-mode —— overlay 混合会为整个页面建立混合组并强制离屏
+   合成，在 4 核小主机上实测明显掉帧。 */
+@keyframes ikev2-grain-shift{
+  0%  { background-position:0 0,    50% 35%, 20% -10%, 100% 0%,  50% 100%; }
+  25% { background-position:-14px 9px,  50% 35%, 20% -10%, 100% 0%,  50% 100%; }
+  50% { background-position:11px -13px, 50% 35%, 20% -10%, 100% 0%,  50% 100%; }
+  75% { background-position:-9px -7px,  50% 35%, 20% -10%, 100% 0%,  50% 100%; }
+  100%{ background-position:0 0,    50% 35%, 20% -10%, 100% 0%,  50% 100%; }
+}
+body{
+  background-image:
+    var(--grain),
+    radial-gradient(900px 500px at 50% 35%, rgba(34,211,238,0.10), transparent 65%),
+    radial-gradient(1200px 600px at 20% -10%, rgba(34,211,238,0.06), transparent 60%),
+    radial-gradient(1000px 500px at 100% 0%, rgba(99,102,241,0.05), transparent 60%),
+    radial-gradient(1400px 900px at 50% 100%, rgba(0,0,0,0.55), transparent 70%);
+  background-size:140px 140px, auto, auto, auto, auto;
+  background-repeat:repeat, no-repeat, no-repeat, no-repeat, no-repeat;
+  animation:ikev2-grain-shift 12s steps(1,end) infinite;
+}
+
+/* --- 30.2.4 状态脉冲 ---
+   这是全站唯一"一直在动"的信息元素：它动的含义是"服务活着"。
+   只给语义色加（ok / warn / danger），muted 和 brand 不加 ——
+   中性的"12 个用户"不需要心跳，只有异常和在线状态值得打断注意力。 */
+@keyframes ikev2-pulse-ok{
+  0%,100%{ box-shadow:0 0 0 0 rgba(74,222,128,.55); opacity:1; }
+  70%    { box-shadow:0 0 0 6px rgba(74,222,128,0);  opacity:.85; }
+}
+@keyframes ikev2-pulse-danger{
+  0%,100%{ box-shadow:0 0 0 0 rgba(248,113,113,.6); opacity:1; }
+  70%    { box-shadow:0 0 0 7px rgba(248,113,113,0);  opacity:.82; }
+}
+@keyframes ikev2-blink-warn{
+  0%,100%{ opacity:1; }
+  50%    { opacity:.4; }
+}
+.chip.ok::before, .badge.ok::before{
+  animation:ikev2-pulse-ok 2.2s var(--ease-out) infinite;
+}
+.chip.danger::before, .badge.danger::before{
+  animation:ikev2-pulse-danger 1.6s var(--ease-out) infinite;
+}
+.chip.warn::before, .badge.warn::before{
+  animation:ikev2-blink-warn 2s var(--ease-in-out) infinite;
+}
+.timeline-dot.ok   { animation:ikev2-pulse-ok 2.6s var(--ease-out) infinite; }
+.timeline-dot.warn { animation:ikev2-blink-warn 2.2s var(--ease-in-out) infinite; }
+.timeline-dot.danger{ animation:ikev2-pulse-danger 1.8s var(--ease-out) infinite; }
+
+/* --- 30.2.5 折叠面板箭头：展开时旋转 + 亮一下 --- */
+@keyframes ikev2-caret-open{
+  0%  { transform:rotate(0deg) scale(.8); color:var(--ikev2-fg-muted); }
+  55% { transform:rotate(96deg) scale(1.2); color:var(--ikev2-brand-hover); }
+  100%{ transform:rotate(90deg) scale(1); color:var(--ikev2-brand); }
+}
+.settings-card[open] > summary::before{
+  animation:ikev2-caret-open var(--dur-3) var(--ease-out-expo) both;
+}
+
+/* --- 30.2.6 活跃隧道：左侧跑光条 ---
+   "有多少条隧道在跑"本身就是这个面板最该被看见的状态，
+   让每条隧道自己跑一道光比再加一个数字更直观。 */
+@keyframes ikev2-tunnel-run{
+  0%  { transform:translate3d(0,-120%,0); opacity:0; }
+  15% { opacity:1; }
+  85% { opacity:1; }
+  100%{ transform:translate3d(0,520%,0); opacity:0; }
+}
+.tunnel-row{ position:relative; overflow:hidden; }
+.tunnel-row::after{
+  content:''; position:absolute; left:0; top:0; width:2px; height:20%;
+  background:linear-gradient(to bottom, transparent, var(--ikev2-ok), transparent);
+  animation:ikev2-tunnel-run 2.8s var(--ease-in-out) infinite;
+}
+
+/* --- 30.2.7 HUD 数字入场脉冲 ---
+   原本这里设计的是「数值文本变化时脉冲」+ 一个 MutationObserver。
+   但 grep 全站确认：面板**没有任何轮询**（无 setInterval / fetch / meta refresh /
+   location.reload），.metric-value 是服务端渲染后一次性写死的，
+   文本永远不会在客户端变化 —— 那个 Observer 一次都不会触发，是死代码。
+
+   改成纯 CSS 的入场脉冲：每次页面渲染时数字依次"跳"一下。
+   零 JS、零 CSP 顾虑，且效果等价（用户感知到的都是"数字活了"）。
+   stagger 让 4 个格子依次点亮而不是一起闪。 */
+@keyframes ikev2-hud-in{
+  0%  { transform:scale(.82); opacity:0; filter:blur(3px); }
+  55% { transform:scale(1.08); opacity:1; filter:blur(0); }
+  100%{ transform:scale(1); opacity:1; filter:blur(0); }
+}
+.metric-value,
+.side-stat-value .v-num{
+  display:inline-block;
+  animation:ikev2-hud-in 620ms var(--ease-out-expo) both;
+}
+/* 逐格延迟：用 --i 由 nth-child 赋值，避免在模板里手写 style */
+.metrics-row > .metric:nth-child(1) .metric-value{ animation-delay:60ms; }
+.metrics-row > .metric:nth-child(2) .metric-value{ animation-delay:150ms; }
+.metrics-row > .metric:nth-child(3) .metric-value{ animation-delay:240ms; }
+.metrics-row > .metric:nth-child(4) .metric-value{ animation-delay:330ms; }
+.side-stat:nth-child(1) .v-num{ animation-delay:80ms; }
+.side-stat:nth-child(2) .v-num{ animation-delay:170ms; }
+.side-stat:nth-child(3) .v-num{ animation-delay:260ms; }
+.side-stat:nth-child(4) .v-num{ animation-delay:350ms; }
+
+/* ============================================================================
+   30.3 轴 3 — HUD 数字升级
+   ----------------------------------------------------------------------------
+   v2.86 的 .topbar-hud / .hud-stat 写完了但**全站零引用**
+   （grep 全部模板无 class="hud-stat"），是一整套死代码 —— 文件头注释里
+   "顶栏 HUD 大数字区（活跃数/总数）"这条声明从未真正落地。
+   实际在显示大数字的是首页 .metric-value 和侧栏 .side-stat-value，
+   这一节改的是它们。
+
+   做两件事：
+     1. 等宽数字（tabular-nums）+ 入场脉冲（§30.2.7）
+     2. 侧栏 .side-stat 左侧加一条状态色竖条，悬停时拉长
+   ========================================================================== */
+.metric-value,
+.side-stat-value .v-num{
+  font-variant-numeric:tabular-nums;
+  font-feature-settings:'tnum' 1;
+  letter-spacing:-0.01em;
+}
+/* 侧栏状态竖条：用 ::before 而不是改 .side-stat 的 border-left ——
+   .side-stat 的分隔线是 border-bottom，加左边框会和 .side-stats 的
+   外框在视觉上打架。
+   ⚠ .tunnel-row 也是 .side-stat，它内部已有 ::after 跑光条（§30.2.6），
+     伪元素互不冲突（::before vs ::after），但竖条会和跑光条叠在同一条 2px
+     线上。所以 .tunnel-row 排除掉 —— 它的活跃状态已经由跑光条表达了。 */
+.side-stat{ position:relative; padding-left:1.15rem; }
+.side-stat:not(.tunnel-row)::before{
+  content:''; position:absolute; left:0; top:50%; width:2px; height:0;
+  background:var(--ikev2-fg-disabled);
+  transform:translate3d(0,-50%,0);
+  transition:height var(--dur-3) var(--ease-out-expo);
+}
+.side-stat:not(.tunnel-row):has(.side-stat-value.ok)::before    { height:60%; background:var(--ikev2-ok); }
+.side-stat:not(.tunnel-row):has(.side-stat-value.warn)::before  { height:60%; background:var(--ikev2-warn); }
+.side-stat:not(.tunnel-row):has(.side-stat-value.danger)::before{ height:60%; background:var(--ikev2-danger); }
+.side-stat:not(.tunnel-row):has(.side-stat-value.brand)::before{ height:60%; background:var(--ikev2-brand); }
+.side-stat:not(.tunnel-row):hover::before{ height:78%; }
+
+/* ============================================================================
+   30.4 排版收尾
+   ----------------------------------------------------------------------------
+   中文界面的三条硬约束：
+
+   · uppercase 对中文无意义但 letter-spacing 有害。
+     改版前 h3 / h4 / .card-head h2 / .metric-label / .side-stat-label /
+     .chip / thead th 全都带 text-transform:uppercase + letter-spacing:.08~.10em。
+     uppercase 本身对汉字是空操作（"部署"大写还是"部署"），
+     但 .08em 的字距会实打实把汉字拆散 —— "活 跃 隧 道"这种观感就是这么来的。
+     → 中文标签：去 uppercase，字距收到 .02em。
+   · 拉丁缩写仍需要字距（DDNS / VPN / IKE_SA 拆开一点更好认）。
+     → 保留在 .02~.04em，不归零。
+   · 中文正文行高比拉丁松（§2 的 --ikev2-lh-body = 1.65 已落地）。
+
+   对比度：--ikev2-fg-subtle(#64748b) 在卡片底 #0f172a 上约 3.9:1，
+   低于 WCAG AA 正文要求的 4.5:1。而 .form-hint 里写的全是
+   "改完需重启容器"这类关键操作信息，不能因为对比度不够被忽略 ——
+   统一提到 --ikev2-fg-muted(#94a3b8)，约 7.1:1。
+   ========================================================================== */
+
+/* --- 区块小标题 ---
+   v2.88 新增。改版前每个区块标题都在模板里手写
+   style="font-size: 0.875rem; letter-spacing: 0.10em;"，
+   9 处重复，且 inline style 的优先级高于样式表 —— §30.4 的排版规则
+   根本覆盖不掉它们。抽成类之后字距/字号只有这一个来源。 */
+.section-title{
+  font-size:var(--ikev2-fs-md);
+  font-weight:650;
+  letter-spacing:.02em;
+  color:var(--ikev2-fg-strong);
+  line-height:var(--ikev2-lh-snug);
+  margin:0 0 .6rem;
+}
+/* 带操作按钮的行：标题在左、按钮在右，标题自身不再带下边距 */
+.section-title-row{
+  display:flex; align-items:center; justify-content:space-between;
+  gap:.75rem; flex-wrap:wrap;
+  margin:0 0 .6rem;
+}
+.section-title-row > .section-title{ margin:0; }
+
+/* --- 中文字距归零 ---
+   v2.86 给一堆标签写了 text-transform:uppercase + letter-spacing:.08~.10em。
+   uppercase 对汉字是空操作（"用户" uppercase 仍是"用户"），但 .10em 字距
+   会实打实把汉字拆散 —— 实测 .form-label 的 computed letter-spacing 是
+   1.225px（12.25px 字号 × 0.10em），"域（LE 模式必填）"这种标签在浏览器里
+   明显散开，像被加了空格。
+
+   为什么是逐个列选择器，而不是 `*{letter-spacing:normal}`：
+   拉丁缩写（DDNS / VPN / LE / IKEv2 Panel）保留字距才是 EZZON 的味道，
+   一刀切会把顶栏 brand 和表头一起打平。这里只列**内容是中文**的标签，
+   拉丁缩写标签单独在下面保留 .04em。
+
+   这份名单是 headless Chrome 遍历 8 个页面 `getComputedStyle` 扫出来的
+   （凡是 computed textTransform===uppercase 且文本含汉字的全部命中），
+   不是凭印象列的 —— 漏掉哪个，验收脚本会再报一次。 */
+.card-head h2,
+.card-head h3,
+.settings-form-nav-title,
+.metric-label,
+.side-stat-label,
+.deploy-only-table th,
+thead th,
+.settings-card > summary,
+.mobileconfig-options > summary,
+.login-field-label,
+.password-field-label,
+.os-panel h3,
+.login-submit,
+.login-meta,
+.terminal-card .term-title,
+.quick-stat .qs-label,
+.user-detail-header .user-quick-stat .qs-label,
+.qr-card .qr-info .qr-title,
+.password-strength-label,
+.form-section > .form-label,
+.settings-body h3,
+.settings-body h4,
+.account-card h3,
+.users-grid-head,
+.users-grid-head .cell{
+  text-transform:none;
+  letter-spacing:.02em;
+}
+.metric-label,
+.side-stat-label{
+  font-size:var(--ikev2-fs-xs);
+  color:var(--ikev2-fg-muted);
+  font-weight:650;
+}
+/* 拉丁缩写标签：DDNS / VPN / LE 这类保留一点点字距 */
+.metric-label,.side-stat-label,
+.deploy-only-table th, thead th{
+  letter-spacing:.04em;
+}
+/* hint 类辅助文字统一一档并抬高对比度 */
+.metric-hint,
+.form-hint,
+.deploy-only-why,
+.empty-hint,
+.settings-card .header-note,
+.page-sub,
+.tip-list,
+.empty-hint{
+  font-size:var(--ikev2-fs-xs);
+  color:var(--ikev2-fg-muted);
+  line-height:var(--ikev2-lh-snug);
+}
+/* chip 上的 uppercase+tracking 对中文同样有害 */
+.chip, .badge{
+  text-transform:none;
+  letter-spacing:.02em;
+}
+/* 表单 label 是用户真正要读的操作名，提到 body 基准而不是 13px */
+label,
+.form-section > .form-label{
+  font-size:var(--ikev2-fs-md);
+  line-height:var(--ikev2-lh-snug);
+}
+/* code / 环境变量名保持等宽 + 稍大 —— 这些是要照着敲的字符串，
+   太小会敲错。 */
+code{
+  font-size:.9em;
+  letter-spacing:0;
+}
+
+/* ============================================================================
+   30.5 降级
+   ----------------------------------------------------------------------------
+   §30.2 引入了循环动画，必须给 prefers-reduced-motion 用户一条完整退路：
+   全部动效停掉，但切角、受光边、噪点、配色、文字层级这些"静态设计"全部保留
+   —— 动效是加分项，不是理解界面的前提。
+   ========================================================================== */
+@media (prefers-reduced-motion: reduce){
+  *,*::before,*::after{
+    animation-duration:.01ms !important;
+    animation-iteration-count:1 !important;
+    transition-duration:.01ms !important;
+    scroll-behavior:auto !important;
+  }
+  /* 噪点漂移挂在 body 的 background-position 上（§30.2.3），
+     steps(1,end) + .01ms 会变成每帧重绘整页背景，必须整个停掉。
+     body 也一并 animation:none —— 它的 background 栈里还叠着 4 个
+     radial-gradient（舞台光 / 角落辉光 / vignette），同样不能每帧重绘。 */
+  body,
+  body::before,
+  body:not(.login-page)::after,
+  .login-card::before,
+  .metric-value,
+  .side-stat-value .v-num,
+  .settings-card[open] > summary::before,
+  .chip.ok::before,
+  .chip.warn::before,
+  .chip.danger::before,
+  .badge.ok::before,
+  .badge.warn::before,
+  .badge.danger::before,
+  .timeline-dot.ok,
+  .timeline-dot.warn,
+  .timeline-dot.danger,
+  .tunnel-row::after{
+    animation:none !important;
+  }
+  /* 状态色的语义不能丢：脉冲靠 box-shadow 扩散表达"活着"，
+     关掉后必须留一个实心环，否则 chip 只剩一个静止圆点，
+     和 muted 状态无法区分。 */
+  .chip.ok::before   { box-shadow:0 0 0 3px rgba(74,222,128,.28); }
+  .chip.danger::before{ box-shadow:0 0 0 3px rgba(248,113,113,.28); }
+  .timeline-dot.ok   { box-shadow:0 0 0 3px rgba(74,222,128,.28); }
+  .timeline-dot.danger{ box-shadow:0 0 0 3px rgba(248,113,113,.28); }
+  /* 网格漂移停在半格上会让底纹整体偏移，重置回原位。 */
+  body::before{ background-position:0 0, 0 0; }
+  /* 侧栏竖条靠 height 过渡表达"刚更新过"，静态下直接给终态。 */
+  .side-stat::before{ transition:none; }
+}
+
+/* ============================================================================
+   30.6 轴 4 — lane 轨（服务就绪链路）
+   ----------------------------------------------------------------------------
+   映射方案：8 格 = 8 个**固定子系统**，不是 8 条在线通道。
+
+   为什么不用"8 条在线通道"：格数会随在线用户数变，0 用户时 8 格全灭 ——
+   恰好在最需要引导的首次部署时刻显示一片死寂。这里 8 格恒在，
+   每格绑 homeData 的一个真实字段，任何部署状态下都有确定的值。
+
+   为什么不用"批次 E 的 8 项参数各占一格"：8 项里只有 2 项是布尔，
+   其余是枚举和数值（log level = info、审计 30 天），塞进一条亮/灭的轨道
+   读者拿不到任何信息。它们的归宿是聚合成第 8 格一个可读状态。
+
+   排序即依赖顺序：左半管理面与配置依赖，右半数据面。
+   任一格变红，它右边的格子语义上就不该再是绿的 —— 链路能读出断点。
+
+   下落光带是 lane 轨的"节奏感"来源，8 格错开 delay 形成波次。
+   ⚠ animation 简写里不能写 calc(var(--dur))：整条声明会被判为无效并
+   静默丢弃（不是只丢 duration 部分），computed 的 animationName 直接变 none，
+   而且不产生任何报错。CSS 变量在简写位置不被接受，必须用 longhand 分开写。
+
+   --- v2.88 视觉修订 ---
+   第一版只做了"一排带颜色的方块"，实测反馈三处不对：
+   1) 切角看不见 —— .lane-rail 的 10px 斜边压在 rgba(0,0,0,.34) 的暗底上，
+      斜边外侧仍是暗底，明暗差不到 2%，等于没切。改成"每格自己切角+描边"：
+      1px 亮边框被斜边削断的那一段，本身就是那条斜线的读法。
+   2) 格子只有 3px 灰缝、没有"槽位"感。改成每格独立切角 + 5px 缝，
+      轨本身不再画外框（外框套内框是最脏的一种做法）。
+   3) 没有像素光泽。§30.2 声明过 sheen 但一处未用，这里给每格加一道
+      静态对角高光（mask 限制在顶部一条），配合已有的下落光带，
+      静止时也有金属反射感，不依赖动画也读得出锐利。 */
+.lane-rail{
+  display:grid; grid-template-columns:repeat(8, minmax(0, 1fr)); gap:5px;
+  margin:0 0 1.25rem; padding:0;
+  background:transparent;
+  border:0;
+  clip-path:none;
+}
+/* 窄屏折行而不是压扁：8 列在 1100px 宽下每格不到 125px，
+   值文案（"未配置" / "27 天"）加中文标签会挤爆。折成 4×2 / 2×4 更稳。 */
+@media (max-width: 1100px){ .lane-rail{ grid-template-columns:repeat(4, minmax(0, 1fr)); } }
+@media (max-width: 620px){ .lane-rail{ grid-template-columns:repeat(2, minmax(0, 1fr)); } }
+
+/* --- v2.88 精致化重做 ---
+   上一版的问题（截图确认）：格子是"带颜色的扁平方块"，精致度不够。
+   差在四件事上，都是 EZ2ON / EZ2Dancer 的招牌：
+
+   1) 切角太小（6px）。EZ2ON 的斜切是又大又狠，读作"金属面板被切开"，
+      不是"圆角被削了一刀"。这里改成 12px 左上 + 10px 右下，非对称
+      （非对称才有机械感，对称切角太"软件"）。
+   2) 缺角标括号。EZ2ON 的面板四角有小 L 形角标，这是"科技 UI"最省力
+      识别度最高的一招 —— 一旦有了它，整块面板立刻从"网页卡片"变成
+      "仪器"。用 ::after 的两个 background 画，不额外占 DOM。
+   3) 缺内嵌层。上一版格子是一层平面。现在分三层：
+      底层暗面渐变 → 中层网格扫描线（repeating-linear-gradient）→
+      顶层斜切高光。层数就是精致度。
+   4) 缺外发光。暗底上只有 1px 描边，格子像贴纸。加上 box-shadow 外辉，
+      让格子"嵌在屏幕里发光"，这是 EZ2ON 夜景的核心观感。 */
+.lane{
+  /* --lc 是唯一的语义入口：四态只改它，视觉层其余部分全部引用它。 */
+  --lc:var(--ikev2-brand);
+  --d:0s; --dur:2.2s;
+  position:relative; height:68px; overflow:hidden;
+  /* 三层叠底，从下到上：暗面渐变 → 网格扫描线 → 顶部斜切高光 */
+  background:
+    linear-gradient(163deg,
+      rgba(255,255,255,.085) 0%, rgba(255,255,255,.02) 16%,
+      rgba(255,255,255,0) 42%),
+    repeating-linear-gradient(0deg,
+      rgba(120,190,255,.05) 0 1px, transparent 1px 5px),
+    linear-gradient(178deg,
+      color-mix(in srgb, var(--lc) 30%, transparent) 0%,
+      color-mix(in srgb, var(--lc) 9%,  rgba(4,8,20,.88)) 44%,
+      rgba(3,6,16,.94) 100%);
+  border:1px solid color-mix(in srgb, var(--lc) 52%, transparent);
+  /* 非对称切角：左上 12px、右下 10px。
+     对称切角读作"圆角"，非对称读作"切开的金属板" —— EZ2ON 用后者。 */
+  clip-path:polygon(
+    12px 0, 100% 0, 100% calc(100% - 10px),
+    calc(100% - 10px) 100%, 0 100%, 0 12px);
+  display:flex; flex-direction:column; align-items:center;
+  justify-content:flex-end; gap:2px; padding:0 4px 8px;
+  min-width:0;
+  color:inherit; text-decoration:none;
+  font-family:var(--ikev2-font-sans);
+  /* 内阴影做"内嵌面板"的凹陷感 + 外辉做发光。两者一起才有金属厚度。 */
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.10),
+    inset 0 -14px 22px -14px color-mix(in srgb, var(--lc) 55%, transparent),
+    0 0 16px -6px color-mix(in srgb, var(--lc) 50%, transparent);
+  transition:border-color .18s, box-shadow .18s, transform .12s;
+}
+
+/* 四角角标括号（EZ2ON 招牌）。
+   两道 gradient 画一个 L：横线在上、竖线在左；右下角反向。
+   之所以能只用两个 background：.lane::before 已经空出来了
+   （上一版是 sheen，现已并入 .lane 的背景层）。 */
+.lane::before{
+  content:''; position:absolute; inset:0; pointer-events:none;
+  /* 角标必须压过 ::after 的下落光带：两者同 specificity(0,1,0)，
+     ::after 定义在后 → 不加 z-index 时光带会盖住角标。 */
+  z-index:2;
+  --m:5px; --t:7px;
+  background:
+    /* 左上：横 + 竖 */
+    linear-gradient(var(--lc),var(--lc)) left var(--m) top var(--m)/calc(var(--t) + 3px) 1px no-repeat,
+    linear-gradient(var(--lc),var(--lc)) left var(--m) top var(--m)/1px calc(var(--t) + 3px) no-repeat,
+    /* 右下：横 + 竖（反向） */
+    linear-gradient(var(--lc),var(--lc)) right var(--m) bottom var(--m)/calc(var(--t) + 3px) 1px no-repeat,
+    linear-gradient(var(--lc),var(--lc)) right var(--m) bottom var(--m)/1px calc(var(--t) + 3px) no-repeat;
+  opacity:.85;
+}
+
+/* 左侧状态竖条：把"这一环是什么状态"从颜色提到形状。
+   只读颜色的话，色弱用户无法区分 ok/warn/danger —— 加一根实心条即可。
+   .lane-k 自己的 position:relative 在下方 .lane-k{} 里给（合并声明）。 */
+.lane-k::before{
+  content:''; position:absolute; left:-4px; top:2px; bottom:-8px; width:2px;
+  background:var(--lc);
+  box-shadow:0 0 8px color-mix(in srgb, var(--lc) 80%, transparent);
+}
+/* 可点击的格子（<a>）给 hover 反馈；IKE_SA 是 <div>，不设 pointer。 */
+a.lane:hover{
+  border-color:color-mix(in srgb, var(--lc) 95%, transparent);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.18),
+    inset 0 -14px 22px -14px color-mix(in srgb, var(--lc) 70%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--lc) 34%, transparent),
+    0 0 24px -4px color-mix(in srgb, var(--lc) 78%, transparent);
+  transform:translateY(-2px);
+}
+a.lane:focus-visible{
+  outline:2px solid var(--lc); outline-offset:2px;
+}
+/* 可点击的格子给一个"跳转"暗示：右上角小箭头。
+   之前只靠 cursor:pointer，用户看不出这格能点 —— 这是实测反馈的核心问题。 */
+a.lane .lane-go{
+  position:absolute; top:4px; right:5px; z-index:3;
+  font-family:var(--ikev2-font-mono); font-size:11px; line-height:1;
+  color:color-mix(in srgb, var(--lc) 85%, transparent);
+  text-shadow:0 0 8px color-mix(in srgb, var(--lc) 60%, transparent);
+  pointer-events:none;
+}
+/* 标签在上、数值在下，视觉重心落在数值上（和 .metric 的读法一致）。
+   fg-subtle 而不是 fg-muted：标签是辅助信息，压暗一档让数值更突出。
+   （原写 --ikev2-fg-dim 是我臆造的名字，项目里不存在，会整条失效。） */
+.lane-k{
+  position:relative; z-index:3;
+  font-size:var(--ikev2-fs-xs); line-height:1.1; font-weight:600;
+  color:var(--ikev2-fg-subtle); letter-spacing:.03em;
+  white-space:nowrap; max-width:100%; overflow:hidden; text-overflow:ellipsis;
+}
+.lane-v{
+  font-family:var(--ikev2-font-mono);
+  font-size:var(--ikev2-fs-xl); line-height:1.05; font-weight:800;
+  color:var(--lc);
+  letter-spacing:.01em;
+  /* 双层辉光：近距离一层锐、远距离一层散。EZ2ON 的数字发光是"贴脸"的，
+     单层 text-shadow 会显得脏。 */
+  text-shadow:
+    0 0 6px color-mix(in srgb, var(--lc) 70%, transparent),
+    0 0 18px color-mix(in srgb, var(--lc) 45%, transparent);
+  white-space:nowrap; max-width:100%; overflow:hidden; text-overflow:ellipsis;
+  /* 文字压在 ::after 光带之上，否则光带扫过时数值会糊一下。 */
+  position:relative; z-index:3;
+}
+
+@keyframes ikev2-lane-fall{
+  0%  { transform:translate3d(0,-18px,0); opacity:0; }
+  12% { opacity:1; }
+  88% { opacity:1; }
+  100%{ transform:translate3d(0,64px,0); opacity:0; }
+}
+.lane::after{
+  content:''; position:absolute; left:0; right:0; height:14px;
+  background:linear-gradient(to bottom,
+    transparent, color-mix(in srgb, var(--lc) 65%, transparent), transparent);
+  animation-name:ikev2-lane-fall;
+  animation-duration:var(--dur);
+  animation-timing-function:linear;
+  animation-iteration-count:infinite;
+  animation-delay:var(--d);
+}
+/* 波次：每格 delay 递增 0.24s，8 格共 1.68s，首尾相接成一个连续流。 */
+.lane:nth-child(1)::after{ animation-delay:0s;    }
+.lane:nth-child(2)::after{ animation-delay:.24s;  }
+.lane:nth-child(3)::after{ animation-delay:.48s;  }
+.lane:nth-child(4)::after{ animation-delay:.72s;  }
+.lane:nth-child(5)::after{ animation-delay:.96s;  }
+.lane:nth-child(6)::after{ animation-delay:1.20s; }
+.lane:nth-child(7)::after{ animation-delay:1.44s; }
+.lane:nth-child(8)::after{ animation-delay:1.68s; }
+
+/* --- 四态 ---
+   ok 借 --ikev2-lane-6、warn 借 lane-7、danger 借 lane-8，而不是
+   --ikev2-ok / --ikev2-warn：后者是"全站通用的语义色"，改动它不该
+   把这 8 格一起染掉。lane-N 才是"这格的状态色"，作用域正确。 */
+.lane[data-state="ok"]    { --lc:var(--ikev2-lane-6); }
+.lane[data-state="warn"]  { --lc:var(--ikev2-lane-7); }
+.lane[data-state="danger"]{ --lc:var(--ikev2-lane-8); }
+.lane[data-state="off"]   { --lc:var(--ikev2-fg-disabled); }
+/* off 不只是调暗 —— 光带跑得更慢，读作"没有流量"而不是"坏了"。 */
+.lane[data-state="off"]{ opacity:.62; }
+.lane[data-state="off"]::after{ animation-duration:4.4s; }
+/* danger 的光带加速：故障态不需要平静。 */
+.lane[data-state="danger"]::after{ animation-duration:1.5s; }
+
 @media (max-width: 960px){
   .password-shell{ grid-template-columns:1fr;}
 }
+
+/* ============================================================================
+   30.7 全站面板语言（EZ2ON / EZ2Dancer）
+   ----------------------------------------------------------------------------
+   为什么单独一节：§30.1 只做了"切角"这一件事，而且是逐个容器手写
+   border-radius:0 + clip-path —— 于是全站只有形状变了，其余（内嵌层、
+   角标、发光、厚度）一个都没变，视觉上就只是"圆角没了"。
+   实测反馈"EZ2ON 元素还是少、不够精致"，根因在这里：
+   不是某一处做得不够，而是缺少一套可复用的语言。
+
+   三个可复用的零件，用自定义属性拼装：
+     --ez-cut   非对称切角（左上 / 右下不同尺寸）
+     --ez-face  内嵌暗面渐变 + 网格扫描线（"仪器面板"的底）
+     --ez-glow  内凹 + 外辉（金属厚度）
+
+   用法：给容器加 .ez-panel，再按需覆盖 --ez-accent（状态色）。
+   为什么用 @apply 之外的普通声明：本文件不引构建工具，
+   纯 CSS 变量拼装是唯一能在运行时热更新的做法。
+
+   ⚠ 与 §30.1 的关系：§30.1 是"最小改动"（只加切角），本节是完整替换。
+     本节的选择器特异性更高（0,2,0 起），会自然覆盖 §30.1。 */
+.lane-rail{ --ez-accent:var(--ikev2-brand); }
+
+/* --- 零件 1：内嵌面板底 ---
+   单独一个类，方便按需叠加（比如卡片已有业务背景色时，
+   只加 .ez-face 补扫描线，不整个换成 .ez-panel）。
+   不用 @layer 包裹：@layer 会把这些规则排到所有未分层规则之后，
+   反而压不过组件自身的 background —— 顺序在这里要靠选择器特异性，
+   不是靠层级。 */
+.ez-face{
+  background:
+    linear-gradient(163deg,
+      rgba(255,255,255,.07) 0%, rgba(255,255,255,.015) 15%,
+      rgba(255,255,255,0) 40%),
+    repeating-linear-gradient(0deg,
+      rgba(120,190,255,.045) 0 1px, transparent 1px 5px);
+}
+
+/* --- 组装：切角 + 描边 + 厚度 ---
+   为什么非对称：对称切角读作"圆角被削了一刀"（软件感），
+   非对称读作"金属板被切开"（机械感）。EZ2ON 用后者。 */
+.ez-panel{
+  --ez-cut-tl:12px; --ez-cut-br:10px;
+  --ez-accent:var(--ikev2-brand);
+  border-radius:0 !important;
+  clip-path:polygon(
+    var(--ez-cut-tl) 0, 100% 0,
+    100% calc(100% - var(--ez-cut-br)),
+    calc(100% - var(--ez-cut-br)) 100%,
+    0 100%, 0 var(--ez-cut-tl));
+  border:1px solid color-mix(in srgb, var(--ez-accent) 38%, transparent);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.08),
+    inset 0 -16px 24px -16px color-mix(in srgb, var(--ez-accent) 45%, transparent),
+    0 0 18px -8px color-mix(in srgb, var(--ez-accent) 42%, transparent);
+  position:relative;
+  transition:border-color .18s, box-shadow .18s;
+}
+
+/* --- 四角角标（L 形括号）---
+   EZ2ON 最强的识别符号：面板四角各一个小 L。
+   用 4 个 background 画，不额外占 DOM，也不影响伪元素内容。
+   ::before 之所以可用：banner / card / metric 这几个容器都没把
+   ::before 派给别的用途（lane 轨用了，所以那里单独写）。 */
+.ez-panel::before{
+  content:''; position:absolute; inset:0; pointer-events:none;
+  z-index:2;
+  --ez-m:5px; --ez-t:7px;
+  background:
+    linear-gradient(var(--ez-accent),var(--ez-accent))
+      left var(--ez-m) top var(--ez-m)/calc(var(--ez-t) + 3px) 1px no-repeat,
+    linear-gradient(var(--ez-accent),var(--ez-accent))
+      left var(--ez-m) top var(--ez-m)/1px calc(var(--ez-t) + 3px) no-repeat,
+    linear-gradient(var(--ez-accent),var(--ez-accent))
+      right var(--ez-m) bottom var(--ez-m)/calc(var(--ez-t) + 3px) 1px no-repeat,
+    linear-gradient(var(--ez-accent),var(--ez-accent))
+      right var(--ez-m) bottom var(--ez-m)/1px calc(var(--ez-t) + 3px) no-repeat;
+  opacity:.55;
+  transition:opacity .18s;
+}
+.ez-panel:hover::before{ opacity:.9; }
+
+/* banner 的语义色要透进面板语言，否则四个变体看着还是"网页提示条"。 */
+.banner-ok,     .banner-success,
+.alert-ok,      .alert-success{ --ez-accent:var(--ikev2-ok); }
+.banner-info,   .alert-info               { --ez-accent:var(--ikev2-info); }
+.banner-warn,   .banner-warning,
+.alert-warn,    .alert-warning           { --ez-accent:var(--ikev2-warn); }
+.banner-danger, .banner-error,
+.alert-danger,  .alert-error             { --ez-accent:var(--ikev2-danger); }
+
+/* ============================================================================
+   30.8 把面板语言接到既有组件上
+   ----------------------------------------------------------------------------
+   上面定义的 .ez-panel 需要落到具体元素上。用 CSS 选择器而不是改模板：
+   banner 是 layout 里的共用宏（8 处调用方），改模板要动 8 个调用点；
+   而 login-card / metric / settings-card 分散在 4 个模板里。
+   样式层统一挂载，维护点只有这一处。
+
+   ⚠ 为什么 banner 的背景要重写而不是只加角标：
+     banner-* 变体自带 background:linear-gradient(180deg, 语义色 12%, 4%)，
+     那层渐变会把 .ez-face 的扫描线盖掉（background 是整体替换，
+     不是叠加）。所以这里把语义色从"背景渐变"改成"叠加层 + 边框"，
+     语义仍然一眼可辨（边框色 + 左侧条 + 文字色都还在），
+     但扫描线能透出来。 */
+.banner, .alert{
+  --ez-cut-tl:9px; --ez-cut-br:7px;
+  border-radius:0;
+  clip-path:polygon(
+    var(--ez-cut-tl) 0, 100% 0,
+    100% calc(100% - var(--ez-cut-br)),
+    calc(100% - var(--ez-cut-br)) 100%,
+    0 100%, 0 var(--ez-cut-tl));
+  /* 语义色从"整块背景"降为"左上角一层薄光"，扫描线得以透出 */
+  background:
+    linear-gradient(163deg,
+      rgba(255,255,255,.07) 0%, rgba(255,255,255,0) 46%),
+    repeating-linear-gradient(0deg,
+      rgba(120,190,255,.04) 0 1px, transparent 1px 5px),
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--ez-accent) 13%, transparent),
+      color-mix(in srgb, var(--ez-accent) 4%, transparent));
+  border:1px solid color-mix(in srgb, var(--ez-accent) 34%, transparent);
+  border-left:3px solid var(--ez-accent);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.07),
+    0 0 16px -8px color-mix(in srgb, var(--ez-accent) 46%, transparent);
+}
+/* banner 的角标用 ::after —— .banner 的 ::after 已被 .dismiss 的 ×
+   之外没有占用，但 .banner::after 在 dismissable 时可能被引用，
+   所以角标挂在 .banner::before 上并确认过不影响图标。 */
+.banner::before,
+.alert::before{
+  content:''; position:absolute; inset:0; pointer-events:none;
+  z-index:0;
+  --ez-m:4px; --ez-t:5px;
+  background:
+    linear-gradient(var(--ez-accent),var(--ez-accent))
+      left var(--ez-m) top var(--ez-m)/calc(var(--ez-t) + 2px) 1px no-repeat,
+    linear-gradient(var(--ez-accent),var(--ez-accent))
+      right var(--ez-m) top var(--ez-m)/calc(var(--ez-t) + 2px) 1px no-repeat;
+  opacity:.7;
+}
+/* banner 内容需要浮到角标之上。 */
+.banner > *, .alert > *{ position:relative; z-index:1; }
+
+/* --- metric 卡（首页 4 个统计块）--- */
+.metric{
+  --ez-cut-tl:11px; --ez-cut-br:9px;
+  --ez-accent:var(--ikev2-brand);
+  border-radius:0;
+  clip-path:polygon(
+    var(--ez-cut-tl) 0, 100% 0,
+    100% calc(100% - var(--ez-cut-br)),
+    calc(100% - var(--ez-cut-br)) 100%,
+    0 100%, 0 var(--ez-cut-tl));
+  background:
+    linear-gradient(163deg,
+      rgba(255,255,255,.075) 0%, rgba(255,255,255,.015) 15%,
+      rgba(255,255,255,0) 40%),
+    repeating-linear-gradient(0deg,
+      rgba(120,190,255,.045) 0 1px, transparent 1px 5px),
+    linear-gradient(178deg,
+      color-mix(in srgb, var(--ikev2-brand) 12%, transparent),
+      rgba(4,8,20,.86));
+  border:1px solid color-mix(in srgb, var(--ikev2-brand) 30%, transparent);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.08),
+    inset 0 -16px 24px -16px color-mix(in srgb, var(--ikev2-brand) 40%, transparent),
+    0 0 18px -8px color-mix(in srgb, var(--ikev2-brand) 38%, transparent);
+}
+.metric::before{
+  content:''; position:absolute; inset:0; pointer-events:none;
+  z-index:2;
+  --ez-m:5px; --ez-t:6px;
+  background:
+    linear-gradient(var(--ikev2-brand),var(--ikev2-brand))
+      left var(--ez-m) top var(--ez-m)/calc(var(--ez-t) + 3px) 1px no-repeat,
+    linear-gradient(var(--ikev2-brand),var(--ikev2-brand))
+      left var(--ez-m) top var(--ez-m)/1px calc(var(--ez-t) + 3px) no-repeat,
+    linear-gradient(var(--ikev2-brand),var(--ikev2-brand))
+      right var(--ez-m) bottom var(--ez-m)/calc(var(--ez-t) + 3px) 1px no-repeat,
+    linear-gradient(var(--ikev2-brand),var(--ikev2-brand))
+      right var(--ez-m) bottom var(--ez-m)/1px calc(var(--ez-t) + 3px) no-repeat;
+  opacity:.5;
+  transition:opacity .18s;
+}
+.metric:hover, .metric:focus-within{
+  border-color:color-mix(in srgb, var(--ikev2-brand) 70%, transparent);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.16),
+    inset 0 -16px 24px -16px color-mix(in srgb, var(--ikev2-brand) 60%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--ikev2-brand) 22%, transparent),
+    0 0 26px -6px color-mix(in srgb, var(--ikev2-brand) 68%, transparent);
+  transform:translateY(-2px);
+}
+.metric:hover::before, .metric:focus-within::before{ opacity:.95; }
+.metric > *{ position:relative; z-index:3; }
+
+/* --- 配置卡（settings-card：证书 / IP 段 / 阿里云 / 面板设置）---
+   这几张卡是首页主体，占屏最大，却一直只有 10px 对称切角。 */
+.settings-card{
+  --ez-cut-tl:13px; --ez-cut-br:10px;
+  --ez-accent:var(--ikev2-brand);
+  border-radius:0;
+  clip-path:polygon(
+    var(--ez-cut-tl) 0, 100% 0,
+    100% calc(100% - var(--ez-cut-br)),
+    calc(100% - var(--ez-cut-br)) 100%,
+    0 100%, 0 var(--ez-cut-tl));
+  background:
+    linear-gradient(163deg,
+      rgba(255,255,255,.07) 0%, rgba(255,255,255,.015) 15%,
+      rgba(255,255,255,0) 40%),
+    repeating-linear-gradient(0deg,
+      rgba(120,190,255,.04) 0 1px, transparent 1px 5px),
+    linear-gradient(178deg, rgba(10,16,32,.60), rgba(4,8,20,.70));
+  border:1px solid color-mix(in srgb, var(--ez-accent) 30%, transparent);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.07),
+    inset 0 -18px 26px -18px color-mix(in srgb, var(--ez-accent) 40%, transparent),
+    0 0 20px -10px color-mix(in srgb, var(--ez-accent) 36%, transparent);
+  transition:border-color .18s, box-shadow .18s;
+}
+/* 角标。settings-card 自身的 ::before 此前没被占用
+   （标题三角在 summary::before 上，是另一个元素），可以安全使用。 */
+.settings-card::before{
+  content:''; position:absolute; inset:0; pointer-events:none;
+  z-index:2;
+  --ez-m:6px; --ez-t:7px;
+  background:
+    linear-gradient(var(--ez-accent),var(--ez-accent))
+      left var(--ez-m) top var(--ez-m)/calc(var(--ez-t) + 3px) 1px no-repeat,
+    linear-gradient(var(--ez-accent),var(--ez-accent))
+      left var(--ez-m) top var(--ez-m)/1px calc(var(--ez-t) + 3px) no-repeat,
+    linear-gradient(var(--ez-accent),var(--ez-accent))
+      right var(--ez-m) bottom var(--ez-m)/calc(var(--ez-t) + 3px) 1px no-repeat,
+    linear-gradient(var(--ez-accent),var(--ez-accent))
+      right var(--ez-m) bottom var(--ez-m)/1px calc(var(--ez-t) + 3px) no-repeat;
+  opacity:.45;
+  transition:opacity .18s;
+}
+.settings-card[open]::before{ opacity:.85; }
+/* summary 需要浮到角标之上，否则标题被角标压住。 */
+.settings-card > summary{ position:relative; z-index:3; }
+.settings-card[open]{
+  border-color:color-mix(in srgb, var(--ez-accent) 55%, transparent);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.12),
+    inset 0 -18px 26px -18px color-mix(in srgb, var(--ez-accent) 60%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--ez-accent) 18%, transparent),
+    0 0 30px -8px color-mix(in srgb, var(--ez-accent) 60%, transparent);
+}
+/* :target 是 lane 轨跳转落点，给一道品牌色左边框提示"正被看着"。 */
+.settings-card:target{
+  border-left:3px solid var(--ez-accent);
+}
+
+/* --- login 卡片 ---
+   登录页是整套 UI 的第一印象，之前完全没参与 v2.88 的任何一轮。 */
+.login-card{
+  --ez-cut-tl:18px; --ez-cut-br:14px;
+  --ez-accent:var(--ikev2-brand);
+  border-radius:0;
+  clip-path:polygon(
+    var(--ez-cut-tl) 0, 100% 0,
+    100% calc(100% - var(--ez-cut-br)),
+    calc(100% - var(--ez-cut-br)) 100%,
+    0 100%, 0 var(--ez-cut-tl));
+  background:
+    linear-gradient(163deg,
+      rgba(255,255,255,.09) 0%, rgba(255,255,255,.02) 16%,
+      rgba(255,255,255,0) 44%),
+    repeating-linear-gradient(0deg,
+      rgba(120,190,255,.05) 0 1px, transparent 1px 5px),
+    linear-gradient(178deg,
+      rgba(10,18,36,.94), rgba(4,8,20,.97));
+  border:1px solid color-mix(in srgb, var(--ikev2-brand) 42%, transparent);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.12),
+    inset 0 -20px 30px -20px color-mix(in srgb, var(--ikev2-brand) 55%, transparent),
+    0 0 40px -12px color-mix(in srgb, var(--ikev2-brand) 70%, transparent),
+    var(--ikev2-shadow-pop);
+}
+/* login-card::before 原本是顶部渐变描边，现在让位给四角角标。 */
+.login-card::before{
+  content:''; position:absolute; inset:0; pointer-events:none;
+  z-index:3;
+  --ez-m:9px; --ez-t:12px;
+  background:
+    linear-gradient(var(--ikev2-brand),var(--ikev2-brand))
+      left var(--ez-m) top var(--ez-m)/calc(var(--ez-t) + 5px) 2px no-repeat,
+    linear-gradient(var(--ikev2-brand),var(--ikev2-brand))
+      left var(--ez-m) top var(--ez-m)/2px calc(var(--ez-t) + 5px) no-repeat,
+    linear-gradient(var(--ikev2-brand),var(--ikev2-brand))
+      right var(--ez-m) bottom var(--ez-m)/calc(var(--ez-t) + 5px) 2px no-repeat,
+    linear-gradient(var(--ikev2-brand),var(--ikev2-brand))
+      right var(--ez-m) bottom var(--ez-m)/2px calc(var(--ez-t) + 5px) no-repeat;
+  opacity:.85;
+}
+.login-card > *{ position:relative; z-index:4; }
+
+/* --- 通用容器（.card / .onboarding / .side-stats）---
+   这几个已经是切角 + 亮边框（§30.1），这里只补内嵌层和厚度，
+   不重复定义 clip-path —— 避免和 §30.1 的声明打架。 */
+.card, .onboarding, .side-stats{
+  background:
+    linear-gradient(163deg,
+      rgba(255,255,255,.06) 0%, rgba(255,255,255,.012) 16%,
+      rgba(255,255,255,0) 42%),
+    repeating-linear-gradient(0deg,
+      rgba(120,190,255,.04) 0 1px, transparent 1px 5px),
+    linear-gradient(178deg, rgba(10,16,32,.62), rgba(4,8,20,.72));
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.07),
+    inset 0 -16px 24px -18px color-mix(in srgb, var(--ikev2-brand) 34%, transparent),
+    0 0 18px -10px color-mix(in srgb, var(--ikev2-brand) 30%, transparent);
+  position:relative;
+}
+.card::before, .onboarding::before, .side-stats::before{
+  content:''; position:absolute; inset:0; pointer-events:none;
+  z-index:2;
+  --ez-m:5px; --ez-t:6px;
+  background:
+    linear-gradient(var(--ikev2-brand),var(--ikev2-brand))
+      left var(--ez-m) top var(--ez-m)/calc(var(--ez-t) + 3px) 1px no-repeat,
+    linear-gradient(var(--ikev2-brand),var(--ikev2-brand))
+      left var(--ez-m) top var(--ez-m)/1px calc(var(--ez-t) + 3px) no-repeat,
+    linear-gradient(var(--ikev2-brand),var(--ikev2-brand))
+      right var(--ez-m) bottom var(--ez-m)/calc(var(--ez-t) + 3px) 1px no-repeat,
+    linear-gradient(var(--ikev2-brand),var(--ikev2-brand))
+      right var(--ez-m) bottom var(--ez-m)/1px calc(var(--ez-t) + 3px) no-repeat;
+  opacity:.4;
+  transition:opacity .18s;
+}
+.card:hover::before, .onboarding:hover::before, .side-stats:hover::before{ opacity:.8; }
+.card > *, .onboarding > *, .side-stats > *{ position:relative; z-index:3; }
+
+/* --- 空状态（用户页 / 审计页 / 配置页的"还没有"占位）---
+   这三个页面当前唯一的容器就是 .empty-state，它此前既无切角也无内嵌，
+   页面看起来像"什么都没加载"。补上后与主页语言一致。 */
+.empty-state{
+  --ez-cut-tl:14px; --ez-cut-br:11px;
+  --ez-accent:var(--ikev2-brand);
+  border-radius:0;
+  clip-path:polygon(
+    var(--ez-cut-tl) 0, 100% 0,
+    100% calc(100% - var(--ez-cut-br)),
+    calc(100% - var(--ez-cut-br)) 100%,
+    0 100%, 0 var(--ez-cut-tl));
+  background:
+    linear-gradient(163deg,
+      rgba(255,255,255,.06) 0%, rgba(255,255,255,.012) 16%,
+      rgba(255,255,255,0) 42%),
+    repeating-linear-gradient(0deg,
+      rgba(120,190,255,.04) 0 1px, transparent 1px 5px),
+    linear-gradient(178deg, rgba(10,16,32,.58), rgba(4,8,20,.68));
+  border:1px solid color-mix(in srgb, var(--ez-accent) 26%, transparent);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.06),
+    0 0 20px -12px color-mix(in srgb, var(--ez-accent) 34%, transparent);
+  position:relative;
+}
+.empty-state::before{
+  content:''; position:absolute; inset:0; pointer-events:none;
+  z-index:2;
+  --ez-m:6px; --ez-t:7px;
+  background:
+    linear-gradient(var(--ez-accent),var(--ez-accent))
+      left var(--ez-m) top var(--ez-m)/calc(var(--ez-t) + 3px) 1px no-repeat,
+    linear-gradient(var(--ez-accent),var(--ez-accent))
+      left var(--ez-m) top var(--ez-m)/1px calc(var(--ez-t) + 3px) no-repeat,
+    linear-gradient(var(--ez-accent),var(--ez-accent))
+      right var(--ez-m) bottom var(--ez-m)/calc(var(--ez-t) + 3px) 1px no-repeat,
+    linear-gradient(var(--ez-accent),var(--ez-accent))
+      right var(--ez-m) bottom var(--ez-m)/1px calc(var(--ez-t) + 3px) no-repeat;
+  opacity:.5;
+}
+.empty-state > *{ position:relative; z-index:3; }
+
+/* --- 按钮与 chip：切角已到位，但缺 hover 的发光反馈 ---
+   与上面的容器同一套语言：hover 时边框提到主色 + 外辉加强。 */
+.btn-primary:hover,
+.btn-secondary:hover,
+.btn-danger:hover{
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--ikev2-brand) 40%, transparent),
+    0 0 18px -6px color-mix(in srgb, var(--ikev2-brand) 70%, transparent);
+}
+.chip{
+  border-radius:0;
+  clip-path:polygon(5px 0, 100% 0, 100% calc(100% - 5px), calc(100% - 5px) 100%, 0 100%, 0 5px);
+}
+
+/* ============================================================================
+   30.9 顶栏与拓扑图接入面板语言
+   ----------------------------------------------------------------------------
+   这两块是首页占面积最大的两个区域,之前整轮 v2.88 都没碰过 ——
+   结果是"内容区是 EZ2ON、导航区是普通网页",割裂感比 lane 轨更明显。
+
+   ⚠ 顶栏不套用 .ez-panel 的切角：
+     顶栏是 position:sticky 的通栏容器,四边贴着视口边缘。
+     clip-path 切角会在左右两端各挖掉一个角、露出页面背景,
+     读作"破了个洞"而不是"金属切口"。所以顶栏只借内嵌层 + 底缘光带 +
+     发光,不做切角 —— 这是同一套语言里"通栏容器"的合理变体。 */
+
+/* --- 顶栏 --- */
+.topbar{
+  --ez-accent:var(--ikev2-brand);
+  background:
+    /* 左上斜切高光 */
+    linear-gradient(163deg,
+      rgba(255,255,255,.06) 0%, rgba(255,255,255,.012) 18%,
+      rgba(255,255,255,0) 46%),
+    /* 网格扫描线 —— 通栏容器上密度要低,否则整条顶栏发脏 */
+    repeating-linear-gradient(0deg,
+      rgba(120,190,255,.035) 0 1px, transparent 1px 6px),
+    /* 底色比原来略压暗,让内容区显得更亮 */
+    linear-gradient(180deg, rgba(6,11,26,.95), rgba(3,6,16,.93));
+  border-bottom:1px solid color-mix(in srgb, var(--ez-accent) 28%, transparent);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.07),
+    inset 0 -14px 22px -18px color-mix(in srgb, var(--ez-accent) 55%, transparent),
+    0 6px 22px -10px rgba(0,0,0,.7);
+}
+/* 底缘光带：替代原来 1px 实线的分隔,给顶栏一道"通电"的边。 */
+.topbar::after{
+  content:''; position:absolute; left:0; right:0; bottom:-1px; height:1px;
+  pointer-events:none;
+  background:linear-gradient(90deg,
+    transparent,
+    color-mix(in srgb, var(--ez-accent) 55%, transparent) 22%,
+    color-mix(in srgb, var(--ez-accent) 78%, transparent) 50%,
+    color-mix(in srgb, var(--ez-accent) 55%, transparent) 78%,
+    transparent);
+  opacity:.8;
+}
+
+/* 品牌 mark：切角 + 更强的辉光 */
+.topbar-brand-mark{
+  border-radius:0;
+  clip-path:polygon(6px 0, 100% 0, 100% calc(100% - 5px), calc(100% - 5px) 100%, 0 100%, 0 6px);
+  box-shadow:
+    0 0 0 1px rgba(34,211,238,0.55) inset,
+    0 0 14px -2px var(--ikev2-brand-glow);
+}
+
+/* 导航项：pill 改切角,active 态从"纯底色"升级为带内嵌层的发光块 */
+.topbar-nav a{
+  border-radius:0;
+  clip-path:polygon(6px 0, 100% 0, 100% calc(100% - 5px), calc(100% - 5px) 100%, 0 100%, 0 6px);
+  transition:background .15s, color .15s, border-color .15s, box-shadow .15s;
+}
+.topbar-nav a.active{
+  background:
+    linear-gradient(163deg,
+      rgba(255,255,255,.08) 0%, rgba(255,255,255,0) 50%),
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--ez-accent) 16%, transparent),
+      color-mix(in srgb, var(--ez-accent) 5%, transparent));
+  border-color:color-mix(in srgb, var(--ez-accent) 55%, transparent);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.10),
+    0 0 0 1px color-mix(in srgb, var(--ez-accent) 18%, transparent),
+    0 0 18px -6px color-mix(in srgb, var(--ez-accent) 70%, transparent);
+}
+
+/* user pill + gear + 下拉菜单：同语言的小件 */
+.topbar-user-pill{
+  border-radius:0;
+  clip-path:polygon(7px 0, 100% 0, 100% calc(100% - 6px), calc(100% - 6px) 100%, 0 100%, 0 7px);
+  background:
+    linear-gradient(163deg,
+      rgba(255,255,255,.06) 0%, rgba(255,255,255,0) 50%),
+    linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,.01));
+  border-color:color-mix(in srgb, var(--ez-accent) 22%, transparent);
+}
+/* .topbar-gear 刻意不切角 —— §30.1 已把它列为控件级排除项：
+   它是 border-radius:50% 的圆形齿轮按钮，切角会毁掉圆形语义。
+   这里的语言体现在它 hover 时的品牌色反馈上（§7 已有）。 */
+/* 下拉菜单也要切角,否则从切角导航里弹出一个圆角菜单会很突兀 */
+.topbar-menu{
+  border-radius:0;
+  clip-path:polygon(9px 0, 100% 0, 100% calc(100% - 7px), calc(100% - 7px) 100%, 0 100%, 0 9px);
+  background:
+    linear-gradient(163deg,
+      rgba(255,255,255,.06) 0%, rgba(255,255,255,0) 46%),
+    linear-gradient(180deg, rgba(11,16,32,.97), rgba(5,9,20,.98));
+  border-color:color-mix(in srgb, var(--ez-accent) 30%, transparent);
+  box-shadow:
+    0 12px 32px rgba(0,0,0,.6),
+    0 0 0 1px color-mix(in srgb, var(--ez-accent) 12%, transparent),
+    0 0 26px -10px color-mix(in srgb, var(--ez-accent) 55%, transparent);
+}
+
+/* --- 拓扑图 ---
+   之前只有一条顶部 cyan 细光带 + 圆角边框,是全站仅剩的带圆角大容器。
+   这里换非对称切角 + 三层内嵌 + 四角角标。
+   ⚠ 角标只挂在 .topology 自身,不给 .topology-svg / .topology-empty ——
+     前者是 SVG 自己的矩形边界,后者是居中的裸内容。 */
+.topology{
+  --ez-cut-tl:16px; --ez-cut-br:12px;
+  --ez-accent:var(--ikev2-brand);
+  border-radius:0;
+  clip-path:polygon(
+    var(--ez-cut-tl) 0, 100% 0,
+    100% calc(100% - var(--ez-cut-br)),
+    calc(100% - var(--ez-cut-br)) 100%,
+    0 100%, 0 var(--ez-cut-tl));
+  background:
+    linear-gradient(163deg,
+      rgba(255,255,255,.055) 0%, rgba(255,255,255,.012) 16%,
+      rgba(255,255,255,0) 42%),
+    repeating-linear-gradient(0deg,
+      rgba(120,190,255,.04) 0 1px, transparent 1px 5px),
+    radial-gradient(ellipse at 50% 30%, rgba(34,211,238,0.05), transparent 62%),
+    linear-gradient(180deg, rgba(8,14,32,0.60) 0%, rgba(2,6,16,0.88) 100%);
+  border:1px solid color-mix(in srgb, var(--ez-accent) 26%, transparent);
+  box-shadow:
+    var(--ikev2-shadow-card),
+    inset 0 1px 0 rgba(255,255,255,.06),
+    inset 0 -20px 28px -20px color-mix(in srgb, var(--ez-accent) 40%, transparent),
+    0 0 24px -12px color-mix(in srgb, var(--ez-accent) 45%, transparent);
+}
+/* 四角角标占 ::before,顶部那道"通电缝"改由 ::after 画,两层不冲突。 */
+.topology::before{
+  content:''; position:absolute; inset:0; pointer-events:none;
+  z-index:2;
+  --ez-m:7px; --ez-t:9px;
+  background:
+    linear-gradient(var(--ez-accent),var(--ez-accent))
+      left var(--ez-m) top var(--ez-m)/calc(var(--ez-t) + 4px) 1px no-repeat,
+    linear-gradient(var(--ez-accent),var(--ez-accent))
+      left var(--ez-m) top var(--ez-m)/1px calc(var(--ez-t) + 4px) no-repeat,
+    linear-gradient(var(--ez-accent),var(--ez-accent))
+      right var(--ez-m) bottom var(--ez-m)/calc(var(--ez-t) + 4px) 1px no-repeat,
+    linear-gradient(var(--ez-accent),var(--ez-accent))
+      right var(--ez-m) bottom var(--ez-m)/1px calc(var(--ez-t) + 4px) no-repeat;
+  opacity:.45;
+  transition:opacity .2s;
+}
+.topology:hover::before{ opacity:.85; }
+.topology::after{
+  content:"";
+  position:absolute; top:0; left:14%; right:14%; height:1px;
+  background:linear-gradient(90deg, transparent,
+    color-mix(in srgb, var(--ez-accent) 60%, transparent), transparent);
+  pointer-events:none; z-index:3;
+}
+.topology > *{ position:relative; z-index:1; }
+/* §26 给 .topology-svg 留的 border-radius 必须清掉：
+   外层已经是 clip-path 切角,内层再套一个圆角矩形,
+   四角会出现"斜切边里嵌一个圆角"的错位。 */
+.topology-svg{
+  border-radius:0;
+}
+
+
+

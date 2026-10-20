@@ -329,11 +329,17 @@
 
         // v2.86-pr21:顶栏 user pill 齿轮下拉 ——
         //   点齿轮切 hidden / 点外部 / Esc 关
+        // v2.88 修订:整个账号区(头像 + 用户名 + 齿轮)都可点。
+        // 原来只有齿轮有反应,点用户名是个空处理器(见下方注释),
+        // 用户报「点登录的账号没反应」—— 顶栏右上角的账号块本来就是
+        // 一个整体入口,只让 28px 的齿轮响应、旁边的用户名点了没反应,
+        // 属于可预期性缺失。
         function initTopbarMenu() {
-          var pill = document.getElementById('topbar-user');
+          var wrap = document.getElementById('topbar-user');
+          var pill = document.getElementById('topbar-user-pill');
           var gear = document.getElementById('topbar-gear');
           var menu = document.getElementById('topbar-menu');
-          if (!pill || !gear || !menu) return;
+          if (!wrap || !pill || !gear || !menu) return;
           if (menu.__ikev2TopbarMenuInit) return;
           menu.__ikev2TopbarMenuInit = true;
 
@@ -349,21 +355,30 @@
             if (menu.hidden) open(); else close();
           }
 
+          // 点齿轮:切换
           gear.addEventListener('click', function (ev) {
             ev.preventDefault();
             ev.stopPropagation();
             toggle();
           });
-          // 点 pill 内非齿轮区域也切下拉(对移动端友好)
+          // 点账号区(头像/用户名):同样切换。
+          // stopPropagation 是必须的 —— 否则冒泡到 document 的"点外部关闭"
+          // 会立刻把刚打开的菜单关掉(齿轮那边已 stopPropagation,这里同理)。
           pill.addEventListener('click', function (ev) {
-            if (ev.target === gear || gear.contains(ev.target)) return;
-            // 不要在点击 username 文字时打开(避免误触)
+            if (gear.contains(ev.target)) return; // 齿轮自己处理
+            ev.preventDefault();
+            ev.stopPropagation();
+            toggle();
+          });
+          // 菜单项点击后关闭(登出会跳转,账号设置会跳转,都不需要留着)
+          menu.addEventListener('click', function (ev) {
+            if (ev.target.closest('a, button')) close();
           });
 
           // 点页面别处关闭
           document.addEventListener('click', function (ev) {
             if (menu.hidden) return;
-            if (pill.contains(ev.target)) return;
+            if (wrap.contains(ev.target)) return;
             close();
           });
           // Esc 关闭
@@ -756,6 +771,42 @@
           }
         }
 
+        // initLaneAnchors — lane 轨（§30.6）点击后展开落点卡片。
+        //
+        // 背景：4 个 lane 落点都是 <details open=false>，浏览器锚点跳转
+        // 只滚动、不展开，用户落在折叠标题行上，体感是"点了没反应"。
+        //
+        // ⚠ 为什么必须放在这个带 nonce 的脚本里：
+        //   CSP 是 script-src 'self' 'nonce-...'，没有 'unsafe-inline'。
+        //   在 home_content.html 里写裸 <script> 会被浏览器直接拒绝执行
+        //   （控制台报 Refused to execute inline script）—— 这也是为什么
+        //   本函数不放在页面模板里，而是挂在 layout 的既有交互块中。
+        //
+        // ⚠ 为什么只监听 hashchange、不能监听 click：
+        //   锚点跳转必然伴随 hashchange（hash 从空变成 #xxx），
+        //   hashchange 一个就够。
+        //   早期版本额外监听 click + setTimeout(openTarget, 0)，想覆盖
+        //   "点同一个锚点两次"的情况，结果引入了 bug：用户点 summary 想把
+        //   卡片折回去，click 同样冒泡到 document，此时 location.hash
+        //   还是上一次留下的 #xxx，setTimeout 里又把它 open=true ——
+        //   卡片被强行重新展开，表现为"展开后无法折叠"。
+        //   现在删掉 click 监听；重复点同一格由 hashchange 不触发，
+        //   但那种情况下卡片本来就是展开的，无需再开一次。
+        function initLaneAnchors() {
+          if (document.__ikev2LaneAnchorsInit) return;
+          document.__ikev2LaneAnchorsInit = true;
+
+          function openTarget() {
+            if (!location.hash || location.hash.length < 2) return;
+            var el = document.getElementById(location.hash.slice(1));
+            // 只展开 details，避免误开其他元素
+            if (el && el.tagName === 'DETAILS') el.open = true;
+          }
+
+          window.addEventListener('hashchange', openTarget);
+          openTarget();
+        }
+
         // initConfirmGuard —破坏性操作的二次确认(P0-2)。
         //
         // 为什么不用 onclick="return confirm(...)":
@@ -1016,6 +1067,7 @@
           initBtnSpinKeyframes();
           initButtonLoading();
           initDetailsPersistence();
+          initLaneAnchors();
           initConfirmGuard();
           initSettingsValidation();
         }
@@ -1052,6 +1104,10 @@
     DismissKey string  关闭后 localStorage key(供 initDismissable 用)
     ExtraClass string  额外 class(如 margin-top)
     Id         string  可选 DOM id
+    Detail     string  可选,第二行的补充说明(如失败原因原文)。走默认转义,
+               所以可以安全传外部输入(阿里云 API 报错等)。
+    DetailTime string  可选,第三行的时间戳前缀,如 "最近一次同步 2026-10-20 12:00:00"。
+               空串则整行不渲染 —— 兜底分支拿不到时间时不该显示空标签。
 */}}
 {{define "banner"}}
   {{$kind := or (and .Kind (printf "%s" .Kind)) "info"}}
@@ -1087,7 +1143,15 @@
        必须先用 {{.}} 走默认转义再拼,或在 banner 外用独立元素承载。
        见 banner_xss_test.go 的回归断言。*/}}
     {{if $iconSvg}}<span class="banner-icon" aria-hidden="true">{{$iconSvg | safeHTML}}</span>{{end}}
-    <div class="banner-body">{{if .MsgHTML}}{{.MsgHTML | safeHTML}}{{else}}{{.Msg}}{{end}}</div>
+    <div class="banner-body">
+      <span class="banner-msg">{{if .MsgHTML}}{{.MsgHTML | safeHTML}}{{else}}{{.Msg}}{{end}}</span>
+      {{/* Detail / DetailTime 留在 .banner-body 内部 —— v2.88 之前它们是
+         banner 外面独立的 .ddns-failed-detail，靠 margin:-0.5rem 负边距
+         硬贴在框边上,实测文字裸露在切角外、一条条 banner 糊成一片。
+         放进框内后跟着切角一起被裁剪,间距由 .banner-body 的 gap 管。 */}}
+      {{if .Detail}}<span class="banner-detail">{{.Detail}}</span>{{end}}
+      {{if .DetailTime}}<span class="banner-detail-time">{{.DetailTime}}</span>{{end}}
+    </div>
     {{/* v2.86-pr23l:× 由 .dismissable .dismiss::after 的 content 渲染,
        这里不放文字内容,避免和 pseudo 的 × 重叠(双 X 视觉 bug)。 */}}
     {{if .Dismissible}}<button type="button" class="dismiss" aria-label="关闭" title="关闭"></button>{{end}}
@@ -1154,17 +1218,27 @@
             账号设置  /  登出
     点齿轮切下拉显示，点页面别处关闭 (JS inline)。
   */}}
-  <span class="topbar-user-pill" id="topbar-user">
-    <span class="avatar">{{slice .AdminUsername 0 1}}</span>
-    <span class="topbar-user-name">{{.AdminUsername}}</span>
-    <button type="button" class="topbar-gear" id="topbar-gear"
-            aria-label="账号菜单" aria-haspopup="true" aria-expanded="false" title="账号菜单">
-      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
-           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <circle cx="12" cy="12" r="3"/>
-        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-      </svg>
-    </button>
+  {{/*
+    v2.88 修订：菜单从 .topbar-user-pill 内部挪到同级的 .topbar-user-wrap。
+    原因：§30.9 给 .topbar-user-pill 加了 clip-path 切角，而 clip-path 会连同
+    子元素一起裁剪 —— 下拉菜单是 pill 的子元素、且定位在 pill 盒子之外
+    (top: hud-h + 6px)，于是整个菜单被切角裁掉：DOM 里 hidden=false，
+    视觉上完全不可见（实测 elementFromPoint 落在 banner 上）。
+    改成同级兄弟后，菜单只受 .topbar-user-wrap 的定位约束，不再被裁。
+  */}}
+  <span class="topbar-user-wrap" id="topbar-user">
+    <span class="topbar-user-pill" id="topbar-user-pill">
+      <span class="avatar">{{slice .AdminUsername 0 1}}</span>
+      <span class="topbar-user-name">{{.AdminUsername}}</span>
+      <button type="button" class="topbar-gear" id="topbar-gear"
+              aria-label="账号菜单" aria-haspopup="true" aria-expanded="false" title="账号菜单">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        </svg>
+      </button>
+    </span>
     <div class="topbar-menu" id="topbar-menu" role="menu" hidden>
       <a href="/account" class="topbar-menu-item" role="menuitem">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
@@ -1179,7 +1253,7 @@
         <button type="submit" class="topbar-menu-item topbar-menu-item-danger" role="menuitem">
           <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
                stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+            <path d="M9 21H5a4 4 0 0 1-2-2V5a4 4 0 0 1 2-2h4"/>
             <polyline points="16 17 21 12 16 7"/>
             <line x1="21" y1="12" x2="9" y2="12"/>
           </svg>

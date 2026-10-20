@@ -20,7 +20,7 @@
 <div class="dashboard-grid">
   <div class="dashboard-main">
 
-    <h3 style="letter-spacing: 0.10em;">Android 上的步骤</h3>
+    <h3 class="section-title">Android 上的步骤</h3>
     <article class="card card-pad">
       <ol style="padding-left: 1.5rem; line-height: 1.8; color: var(--ikev2-fg);">
         <li>设置 → <strong>网络和互联网</strong> → <strong>VPN</strong> → 右上角 <strong>+</strong></li>
@@ -30,7 +30,7 @@
       </ol>
     </article>
 
-    <h3 style="letter-spacing: 0.10em;">CA 证书信任</h3>
+    <h3 class="section-title">CA 证书信任</h3>
     <article class="card card-pad">
       {{if .CertIncludeCA}}
         <p><strong>自签模式</strong>：必须先装 CA 根证书，否则会报「证书不受信任」导致连接失败。</p>
@@ -52,7 +52,7 @@
       {{end}}
     </article>
 
-    <h3 class="mt-5" style="letter-spacing: 0.10em;">strongSwan App 用户</h3>
+    <h3 class="section-title mt-5">strongSwan App 用户</h3>
     <article class="card card-pad">
       <p>如果你用的是 <strong>strongSwan App</strong>（而非系统原生），走的是另一条路：</p>
       <ol style="padding-left: 1.5rem; line-height: 1.8; color: var(--ikev2-fg);">
@@ -71,7 +71,7 @@
 
   <aside class="dashboard-side">
 
-    <h3 style="letter-spacing: 0.10em;">连接参数</h3>
+    <h3 class="section-title">连接参数</h3>
     <div class="terminal-card">
       <div class="term-header">
         <span class="term-title">手动填入</span>

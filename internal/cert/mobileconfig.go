@@ -740,8 +740,12 @@ func xmlEscape(s string) string {
 //     logrotate / DDNS jitter retry
 //   - Sprint 3: VICI SA lifecycle 审计
 //
+// v2.88：UI 质感层 —— 轴 1 切角 / 轴 2 常驻动效 / 轴 3 HUD 数字 /
+// 轴 4 lane 轨（服务就绪链路 8 格），全站面板语言统一（banner / metric /
+// settings-card / login-card / 拓扑图 / 顶栏）。详见 docs/CHANGELOG.md（v2.88）。
+//
 // 详见 docs/CHANGELOG.md（v2.87）。
-const PanelVersion = "v2.87"
+const PanelVersion = "v2.88"
 
 // generateUUID RFC 4122 v4 随机 UUID。
 // mobileconfig 的 PayloadUUID/ProfileUUID 必须全局唯一，否则 iOS 覆盖会乱。
