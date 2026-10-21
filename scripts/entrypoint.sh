@@ -893,6 +893,52 @@ if [ "$IKEV2_IPV6_ONLY" = "true" ]; then
         || echo "${LOG_PREFIX} WARN: failed to add table 220 default route" >&2
     fi
 
+    # 1b. table 220 必须同时带**直连网段**路由,否则同网段回包会绕网关。
+    #
+    # 背景（v2.92 实测,192.168.50.63 + ipvlan + 固定 IP 192.168.50.66）:
+    #   面板 8443 从局域网访问时,TCP 能建连但 TLS 握手必被 RST,浏览器打不开。
+    #   抓包定位:RST 的源 MAC 是**网关**的 MAC(不是容器的),且
+    #   SYN-ACK / ServerHello 的源 MAC 同样被换成网关的 —— 说明
+    #   容器发往同网段的对端回包,**先经过了网关**。
+    #
+    # 根因:strongSwan charon 的 kernel-netlink 插件会装一条
+    #   `ip rule add priority 220 from all lookup 220`
+    # 把**所有**出向流量的查表强制到 table 220。而 table 220 里只有
+    #   default via <网关>
+    # 这一条 —— 同网段的 192.168.50.0/24 在 table 220 里查不到直连路由,
+    # 于是**回包也被 default 带走,绕网关出去**。
+    # 绕网关 = 源 MAC 被换成网关的 + 网关对该会话做了不对称路径处理
+    # → 注入 RST → 浏览器侧表现为"连上了但立刻被重置"。
+    #
+    # 为什么 host 模式没事:host 模式下容器共享宿主 netns,宿主有
+    # `ip rule 10: from <宿主IP> lookup route_ens18` 这条更优先的规则,
+    # 源地址是宿主 IP 的流量走 route_ens18 表,压根不进 table 220。
+    # L2 模式容器是独立 netns,没有这条规则,只能靠 table 220 自己带直连路由。
+    #
+    # 修法:把 main 表里 dev $OUT_IF 的直连(scope link)路由**复制**到 table 220。
+    #   - 同网段回包 → table 220 命中直连路由 → 源 MAC 是容器自己的 → 不绕网关 → 正常
+    #   - 出公网     → table 220 仍走 default via 网关 → XFRM 出向行为完全不变
+    # 注意:不能用 `ip route show ... dev $OUT_IF` —— 带了 dev 过滤后
+    # 输出里**不再有 dev 字段**,后面就没法判断这条路由属于哪个接口了。
+    # 所以这里先取全部 scope link 路由,再用 awk 按 dev 过滤。
+    _t220_pfx_list="$(ip -4 route show table main scope link 2>/dev/null \
+      | awk -v want="$OUT_IF" '{for (i=1;i<=NF;i++) if ($i=="dev" && $(i+1)==want) {print $1; exit}}' \
+      || true)"
+    if [ -n "$_t220_pfx_list" ]; then
+      while read -r _lr_pfx; do
+        [ -n "$_lr_pfx" ] || continue
+        # scope link 表示"直连,不经网关" —— 抄进 table 220 后同网段回包不再绕网关
+        ip route replace "$_lr_pfx" dev "$OUT_IF" scope link table 220 2>/dev/null \
+          && echo "${LOG_PREFIX} table 220 direct route added: ${_lr_pfx} dev ${OUT_IF} scope link" \
+          || echo "${LOG_PREFIX} WARN: failed to add table 220 direct route ${_lr_pfx}" >&2
+      done <<EOF
+$_t220_pfx_list
+EOF
+      unset _t220_pfx_list _lr_pfx
+    else
+      echo "${LOG_PREFIX} WARN: no scope-link route on $OUT_IF, table 220 may lack direct route" >&2
+    fi
+
     # 2. v2.86-PR12.16:nft 自定义表 ikev2 / ikev26 一次性原子提交
     #    替换原来的 iptables -I FORWARD / -t nat -A POSTROUTING 零散操作
     #    docker daemon 重写 filter/nat 表不会碰自定义表,根治 PR12.13 二次 iptables-restore 挤掉规则

@@ -12,6 +12,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NETMODE_SH="${SCRIPT_DIR}/../scripts/network-mode.sh"
+ENTRYPOINT_SH="${SCRIPT_DIR}/../scripts/entrypoint.sh"
 
 PASS=0
 FAIL=0
@@ -976,6 +977,45 @@ else
   fi
 fi
 rm -rf "$CG_DIR"
+
+# ---------- NM-61 table 220 必须带直连(scope link)路由 ----------
+#
+# 真实故障（v2.92 实机,192.168.50.63 + ipvlan + 固定 IP 192.168.50.66）:
+#   面板 8443 从局域网访问时 TCP 能建连但 TLS 握手必被 RST,浏览器打不开。
+#   抓包:RST 的源 MAC 是**网关**的 MAC,连 SYN-ACK 的源 MAC 也是网关的
+#        —— 说明容器发往同网段对端的回包**绕了网关**。
+#
+# 根因:strongSwan charon 装 `ip rule 220: from all lookup 220`,
+#   把所有出向流量的查表强制到 table 220;而 table 220 里只有
+#   `default via <网关>`,同网段直连路由缺失 → 回包也被 default 带走。
+#   绕网关 → 源 MAC 被替换 + 网关按不对称路径处理 → 注入 RST。
+#
+# 修法:entrypoint.sh §3.5 在加 default 的同时,把 main 表里
+#   dev $OUT_IF 的 scope link 直连路由复制进 table 220。
+#
+# 本项锁死两条不变量:
+#   1. entrypoint.sh 里必须有「把 scope link 路由抄进 table 220」这段逻辑
+#   2. 那段逻辑必须用 scope link(直连),不能是普通 dev 路由
+if grep -qE 'scope link table 220' "$ENTRYPOINT_SH" 2>/dev/null; then
+  ok "NM-61 entrypoint.sh 把 scope link 直连路由写入 table 220"
+else
+  bad "NM-61 entrypoint.sh 把 scope link 直连路由写入 table 220" "缺少该逻辑（L2 模式回包会绕网关 → TLS 握手被 RST）"
+fi
+
+# 必须同时存在 default via 网关那条(出公网仍要走它) —— 修 NM-61 不能把 default 拆掉
+if grep -qE 'ip route add default via .* table 220' "$ENTRYPOINT_SH" 2>/dev/null; then
+  ok "NM-61 entrypoint.sh 保留 table 220 的 default via 网关路由"
+else
+  bad "NM-61 entrypoint.sh 保留 table 220 的 default via 网关路由" "缺少（出公网会断）"
+fi
+
+# 抄直连路由时不能带 dev 过滤 —— `ip route show ... dev X` 的输出里没有 dev 字段，
+# 照着解析会拿到空结果（真机上就是这样踩的坑）。
+if grep -qE 'ip -4 route show table main scope link dev' "$ENTRYPOINT_SH" 2>/dev/null; then
+  bad "NM-61 抄直连路由时未用 dev 过滤" "带了 dev 过滤 → 输出无 dev 字段 → 解析为空"
+else
+  ok "NM-61 抄直连路由时未用 dev 过滤（避免输出丢 dev 字段）"
+fi
 
 # ---------- IPv4 段校验：每段必须 0-255 且无前导 0 ----------
 # 修 _nm_valid_ipv4_cidr 之前的漏洞：只查字符集与段数，

@@ -18,6 +18,122 @@ hotfix。升级前请重点看目标版本的「⚠️ 行为变更」。
 
 ---
 
+## v2.92（2026-10-21）— 修复 L2 模式下 web 打不开（TLS 握手被网关 RST）
+
+**用户反馈：「用 ipvlan 的 compose 启动，配置 IP 是 192.168.50.66，端口 8443，
+为什么 web 打不开」。** 属实 —— v2.91 交付的固定 IP 功能在实机上暴露了一个
+**与固定 IP 无关**的既有缺陷：L2 模式下从局域网访问面板，TCP 能建连但
+**TLS 握手必被 RST**，浏览器完全打不开。
+
+### 现象
+
+| 观察点 | 结果 |
+|--------|------|
+| `ping 192.168.50.66` | **通** |
+| 容器 `docker ps` | `Up`，重启次数 **0** |
+| `docker logs` | `https listening addr=0.0.0.0:8443` 正常 |
+| 容器内 `curl https://127.0.0.1:8443/login` | **200** |
+| 容器内 `curl https://192.168.50.66:8443/login` | **200** |
+| 容器日志 | 刷满 `http: TLS handshake error ...: write: connection reset by peer` |
+| 外部走 **IPv6** 访问容器全局地址 | **正常**，能拿到面板证书 |
+| 外部走 **IPv4** 访问 `192.168.50.66:8443` | **失败**，TLS 握手被重置 |
+
+### 根因：table 220 缺直连路由 → 同网段回包绕网关
+
+strongSwan charon 的 kernel-netlink 插件会装一条策略路由规则：
+
+```
+220:    from all lookup 220
+```
+
+它把**所有**出向流量的查表强制到 `table 220`。而 v2.91 之前 `table 220` 里
+只有一条 `default via <网关>`（`scripts/entrypoint.sh` §3.5 加的，XFRM 出向要用），
+**同网段的直连路由是缺的**。
+
+于是容器发往同网段对端（比如你的电脑）的**回包也被 default 带走，绕网关出去**：
+
+- 回包源 MAC 被换成**网关的 MAC**（抓包实证）；
+- 路径变成「容器 → 网关 → 对端」，与入站方向不对称；
+- 网关按不对称路径处理，**注入 RST**。
+
+抓包证据（192.168.50.66:8443，客户端 192.168.50.176）：
+
+```
+# 中招时：SYN-ACK 与 RST 的源 MAC 都是网关的 04:42:1a:5f:60:70
+11:43:52.622506 04:42:1a:5f:60:70 > bc:24:11:fb:01:bb: 192.168.50.66.8443 > 192.168.50.176.53154: Flags [S.]
+11:43:52.628972 04:42:1a:5f:60:70 > bc:24:11:fb:01:bb: 192.168.50.66.8443 > 192.168.50.176.53154: Flags [R]
+```
+
+**为什么 host 模式没事**：host 模式下容器共享宿主 netns，宿主有
+`ip rule 10: from <宿主IP> lookup route_ens18` 这条**优先级更高**的规则，
+源地址是宿主 IP 的流量走 `route_ens18` 表，压根不进 `table 220`。
+L2 模式容器是独立 netns，没有这条规则，只能靠 `table 220` 自己带直连路由。
+
+### 修复
+
+`scripts/entrypoint.sh` §3.5 在加 `default` 的同时，把 `main` 表里
+`dev $OUT_IF` 的直连（`scope link`）路由**复制**进 `table 220`：
+
+```
+[entrypoint] table 220 default route added via 192.168.50.1 dev eth0
+[entrypoint] table 220 direct route added: 192.168.50.0/24 dev eth0 scope link
+```
+
+效果：
+
+- 同网段回包 → 命中 `table 220` 的直连路由 → 源 MAC 是容器自己的 → 不绕网关；
+- 出公网 → 仍走 `table 220` 的 `default via 网关` → **XFRM 出向行为完全不变**。
+
+### 实机验证（192.168.50.63，ipvlan，固定 IP 192.168.50.66）
+
+| 测试 | 修复前 | 修复后 |
+|------|--------|--------|
+| 容器内 `curl https://127.0.0.1:8443/login` | 200 | 200 |
+| 容器内 `curl https://192.168.50.66:8443/login` | 200 | 200 |
+| `ip route get 192.168.50.176` | `via 192.168.50.1 dev eth0 table 220` | `dev eth0 table 220` |
+| `ip route get 8.8.8.8` | `via 192.168.50.1 dev eth0 table 220` | `via 192.168.50.1 dev eth0 table 220`（不变） |
+| 外部 `openssl s_client` TLS 握手 | `write:errno=104`（被 RST） | 成功，拿到 `CN=vpn.example.com` 面板证书 |
+| 抓包 RST 计数 | 每连接 1 个 | **0** |
+| 抓包回包源 MAC | 网关 `04:42:1a:5f:60:70` | 容器 `bc:24:11:8c:32:36` |
+| **重启容器后** | — | 修复**自动恢复**（entrypoint 每次启动都会加） |
+
+### ⚠️ 踩过的坑：`ip route show ... dev X` 的输出里没有 dev 字段
+
+第一版修复写成：
+
+```bash
+ip -4 route show table main scope link dev "$OUT_IF" | awk '{... $i=="dev" ...}'
+```
+
+`ip route show` **带了 dev 过滤后，输出里就不再有 `dev` 字段**：
+
+```
+$ ip -4 route show table main scope link dev eth0
+192.168.50.0/24 proto kernel src 192.168.50.66     ← 没有 dev！
+```
+
+照着解析必然拿到空结果，修复静默失效。正确写法是**先取全部 `scope link` 路由，
+再用 awk 按 dev 过滤**：
+
+```bash
+ip -4 route show table main scope link \
+  | awk -v want="$OUT_IF" '{for (i=1;i<=NF;i++) if ($i=="dev" && $(i+1)==want) {print $1; exit}}'
+```
+
+已用 NM-61 锁死这条不变量（见下）。
+
+### 回归测试
+
+`tests/network_mode_test.sh` 新增 **NM-61**（3 项），锁死三条不变量：
+
+1. `entrypoint.sh` 必须有「把 scope link 直连路由写入 table 220」的逻辑；
+2. 必须**保留** `default via 网关` 那条（出公网不能断）；
+3. 抄直连路由时**不得**用 `ip route show ... dev X` 过滤（输出丢 dev 字段）。
+
+测试总数：**155 → 158，全部通过**。
+
+---
+
 ## v2.91（2026-10-21）— L2 模式支持固定容器 IPv4 + `up.sh` 认得 anchor 写法
 
 **用户反馈：「L2 模式应该有 ipv4 固定地址参数」。** 属实 —— v2.90 之前

@@ -755,7 +755,11 @@ func xmlEscape(s string) string {
 // v2.91：L2 模式支持固定容器 IPv4（compose 顶部 x-l2-ipv4 第四行，
 // 落在 service 段的 networks.<name>.ipv4_address；留空 = Docker 自动分配）。
 // 详见 docs/CHANGELOG.md（v2.91）。
-const PanelVersion = "v2.91"
+//
+// v2.92：修复 L2 模式下 web 打不开 —— table 220 补直连(scope link)路由，
+// 同网段回包不再绕网关（绕网关会被网关注入 RST，TLS 握手必失败）。
+// 详见 docs/CHANGELOG.md（v2.92）与 docs/TROUBLESHOOTING.md §1.7.8。
+const PanelVersion = "v2.92"
 
 // generateUUID RFC 4122 v4 随机 UUID。
 // mobileconfig 的 PayloadUUID/ProfileUUID 必须全局唯一，否则 iOS 覆盖会乱。

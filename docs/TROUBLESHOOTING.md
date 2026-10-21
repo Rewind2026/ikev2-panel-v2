@@ -780,6 +780,87 @@ docker logs ikev2-panel 2>&1 | grep 'static ipv4'
 不是顶层 `networks` 段的 `ipam` 里 —— 塞进 ipam 会被 Docker **静默忽略**
 （无报错、地址不生效）。
 
+#### 1.7.8 L2 模式下 web 打不开：TCP 连上了但 TLS 握手被重置（v2.92 修复）
+
+**症状**（L2 模式，macvlan / ipvlan）：
+
+- 浏览器访问 `https://<容器IP>:8443` **打不开**，转圈或直接报连接被重置。
+- 但 `ping <容器IP>` **通**。
+- 容器**看起来完全正常**：`docker ps` 显示 `Up`、重启次数 0、
+  `docker logs` 里 `https listening addr=0.0.0.0:8443` 也在。
+- **容器内部访问一切正常**：
+  ```bash
+  docker exec ikev2-panel curl -sk -o /dev/null -w '%{http_code}\n' https://127.0.0.1:8443/login
+  # → 200
+  docker exec ikev2-panel curl -sk -o /dev/null -w '%{http_code}\n' https://192.168.50.66:8443/login
+  # → 200
+  ```
+- **走 IPv6 访问正常**：容器有 SLAAC 全局地址，用那个地址访问能拿到面板证书。
+- 容器日志里刷满：
+  ```
+  http: TLS handshake error from 192.168.50.130:62665: write tcp 192.168.50.66:8443->192.168.50.130:62665: write: connection reset by peer
+  ```
+
+**根因**：strongSwan charon 的 kernel-netlink 插件会装一条策略路由规则：
+
+```
+220:    from all lookup 220
+```
+
+它把**所有**出向流量的查表强制到 `table 220`。而 `table 220` 里原本只有一条
+`default via <网关>` —— **同网段的直连路由是缺的**。于是容器发往同网段对端
+（比如你的电脑）的**回包也被 default 带走，绕网关出去**：
+
+- 回包源 MAC 被换成**网关的 MAC**（抓包可见）；
+- 路径变成「容器 → 网关 → 对端」，与入站方向不对称；
+- 网关按不对称路径处理，直接**注入 RST**。
+
+浏览器侧就表现为「TCP 握上了、TLS 握手立刻被重置」。
+
+**为什么 host 模式没事**：host 模式下容器共享宿主 netns，宿主有
+`ip rule 10: from <宿主IP> lookup route_ens18` 这条**优先级更高**的规则，
+源地址是宿主 IP 的流量走 `route_ens18` 表，压根不进 `table 220`。
+L2 模式容器是独立 netns，没有这条规则，只能靠 `table 220` 自己带直连路由。
+
+**确认是不是这个问题**（两条命令就够）：
+
+```bash
+# 1. 同网段回包是否绕网关？
+#    出现 "via <网关>" = 绕网关了 = 中招
+#    出现 "dev eth0"    = 直连 = 正常
+docker exec ikev2-panel ip route get 192.168.50.176
+
+# 2. table 220 里有没有直连(scope link)路由？
+docker exec ikev2-panel ip route show table 220
+# 中招时长这样（只有 default，缺直连）：
+#   default via 192.168.50.1 dev eth0
+# 正常时多一行：
+#   192.168.50.0/24 dev eth0 scope link
+```
+
+**修复**：v2.92 起 `scripts/entrypoint.sh` §3.5 在加 `default` 的同时，
+会把 `main` 表里 `dev $OUT_IF` 的直连（`scope link`）路由**复制**进 `table 220`：
+
+```
+[entrypoint] table 220 default route added via 192.168.50.1 dev eth0
+[entrypoint] table 220 direct route added: 192.168.50.0/24 dev eth0 scope link
+```
+
+这样：
+
+- 同网段回包 → 命中 `table 220` 的直连路由 → 源 MAC 是容器自己的 → 不绕网关；
+- 出公网 → 仍走 `table 220` 的 `default via 网关` → **XFRM 出向行为完全不变**。
+
+**v2.92 之前的临时处置**（容器内改一下，重启会丢）：
+
+```bash
+docker exec ikev2-panel ip route replace 192.168.50.0/24 dev eth0 scope link table 220
+```
+
+⚠️ 网段要换成你自己 `IKEV2_L2_SUBNET` 的值。
+
+**升级到 v2.92 后** 这个问题自动消失，不需要任何手工操作。
+
 ---
 
 ## 2. mobileconfig 装不上 / 连不上
