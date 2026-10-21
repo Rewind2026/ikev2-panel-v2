@@ -610,6 +610,19 @@
       <button type="submit" class="btn-primary">保存证书配置</button>
     </div>
   </form>
+
+  {{/*
+    v2.94:证书 save / clear 的反馈 —— 内联在表单按钮组下方。
+    之前失败走 http.Error,浏览器直接跳到 /api/cert/save 显示裸文本,
+    表单内容全丢、页面上看不到任何上下文。现在统一由 respondFlashSlot
+    写 "cert" slot,回到首页时就近渲染。
+  */}}
+  {{if .CertFlash}}
+    {{$bannerKind := "info"}}
+    {{if eq .CertFlashKind "error"}}{{$bannerKind = "error"}}{{end}}
+    {{if eq .CertFlashKind "success"}}{{$bannerKind = "success"}}{{end}}
+    {{template "banner" (dict "Kind" $bannerKind "Msg" .CertFlash "Dismissible" true "DismissKey" "cert-flash" "ExtraClass" "cert-action-flash")}}
+  {{end}}
 </div>
 {{end}}
 
@@ -979,6 +992,18 @@ environment:
       <button type="submit" class="btn-primary">保存并立即生效</button>
     </div>
   </form>
+
+  {{/*
+    v2.94:IP 段 save / clear 的反馈 —— 内联在表单按钮组下方。
+    这张卡之前**完全没有反馈**:成功是裸 302,失败是裸文本错误页。
+    用户点完"保存并立即生效"不知道有没有生效、客户端要不要重新拨号。
+  */}}
+  {{if .SubnetFlash}}
+    {{$bannerKind := "info"}}
+    {{if eq .SubnetFlashKind "error"}}{{$bannerKind = "error"}}{{end}}
+    {{if eq .SubnetFlashKind "success"}}{{$bannerKind = "success"}}{{end}}
+    {{template "banner" (dict "Kind" $bannerKind "Msg" .SubnetFlash "Dismissible" true "DismissKey" "subnet-flash" "ExtraClass" "subnet-action-flash")}}
+  {{end}}
 </div>
 {{end}}
 

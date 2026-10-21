@@ -1063,26 +1063,7 @@ func optInt(form map[string][]string, key string) (*int, error) {
 
 // respondSettingsFlash 统一 save / clear 的响应出口(跟 respondAliyunFlash 同构)。
 //
-// AJAX → JSON;普通表单 → 写 "settings" slot 的 flash + 302 回 /,
-// 模板里 banner 就近内联显示,用户不会看到裸文本错误页。
+// v2.94:实现收敛到 respondFlashSlot,这里只固定住 "settings" 这个 slot。
 func (s *Server) respondSettingsFlash(w http.ResponseWriter, r *http.Request, kind, msg string) {
-	if wantsJSON(r) {
-		w.Header().Set("Content-Type", "application/json")
-		status := http.StatusOK
-		if kind == "error" {
-			status = http.StatusBadRequest
-		}
-		w.WriteHeader(status)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"ok":    kind != "error",
-			"kind":  kind,
-			"error": msg,
-		})
-		return
-	}
-	sess, _ := SessionFrom(r.Context())
-	if sess != nil && s.FlashStore != nil {
-		s.FlashStore.SetFor(sess.ID, "settings", Flash{Message: msg, Kind: kind})
-	}
-	http.Redirect(w, r, "/", http.StatusFound)
+	s.respondFlashSlot(w, r, "settings", kind, msg, nil)
 }

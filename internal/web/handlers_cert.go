@@ -106,11 +106,11 @@ func (s *Server) handleCertStatus(w http.ResponseWriter, r *http.Request) {
 //   - 写审计(只记 mode/domain/cn/email,不算敏感凭证)
 func (s *Server) handleCertSave(w http.ResponseWriter, r *http.Request) {
 	if s.CertConfigStore == nil {
-		http.Error(w, "证书配置存储未初始化", http.StatusInternalServerError)
+		s.respondFlashSlot(w, r, "cert", "error", "证书配置存储未初始化", nil)
 		return
 	}
 	if err := r.ParseForm(); err != nil {
-		http.Error(w, "表单解析失败", http.StatusBadRequest)
+		s.respondFlashSlot(w, r, "cert", "error", "表单解析失败", nil)
 		return
 	}
 
@@ -123,7 +123,7 @@ func (s *Server) handleCertSave(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.CertConfigStore.WriteCertConfig(cfg); err != nil {
 		s.Logger.Warn("cert config save failed", "err", err)
-		http.Error(w, "保存失败："+err.Error(), http.StatusBadRequest)
+		s.respondFlashSlot(w, r, "cert", "error", "保存失败："+err.Error(), nil)
 		return
 	}
 
@@ -132,12 +132,9 @@ func (s *Server) handleCertSave(w http.ResponseWriter, r *http.Request) {
 	s.Logger.Info("cert config saved via panel", "masked", masked)
 	s.writeAudit(r, "cert.save", masked)
 
-	if r.Header.Get("Accept") == "application/json" {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"ok":true,"restart_required":true,"msg":"保存成功,需重启容器才能生效(证书/域名变更需要重启 charon)"}`))
-		return
-	}
-	http.Redirect(w, r, "/", http.StatusFound)
+	s.respondFlashSlot(w, r, "cert", "success",
+		"证书配置已保存。⚠️ 需 docker compose restart 后生效(证书/域名变更需要重启 charon),所有客户端需重新安装 profile。",
+		map[string]any{"restart_required": true})
 }
 
 // handleCertClear POST /api/cert/clear
@@ -147,21 +144,18 @@ func (s *Server) handleCertSave(w http.ResponseWriter, r *http.Request) {
 //   - 重启后 Go 进程从 env 读 CertMode/Domain/CN
 func (s *Server) handleCertClear(w http.ResponseWriter, r *http.Request) {
 	if s.CertConfigStore == nil {
-		http.Error(w, "证书配置存储未初始化", http.StatusInternalServerError)
+		s.respondFlashSlot(w, r, "cert", "error", "证书配置存储未初始化", nil)
 		return
 	}
 	if err := s.CertConfigStore.ClearCertConfig(); err != nil {
 		s.Logger.Error("cert config clear failed", "err", err)
-		http.Error(w, "清除失败："+err.Error(), http.StatusInternalServerError)
+		s.respondFlashSlot(w, r, "cert", "error", "清除失败："+err.Error(), nil)
 		return
 	}
 	s.Logger.Info("cert config cleared via panel")
 	s.writeAudit(r, "cert.clear", "")
 
-	if r.Header.Get("Accept") == "application/json" {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"ok":true,"restart_required":true,"msg":"已清除,需重启容器回到 env 默认配置"}`))
-		return
-	}
-	http.Redirect(w, r, "/", http.StatusFound)
+	s.respondFlashSlot(w, r, "cert", "success",
+		"证书配置已清除。⚠️ 需 docker compose restart 后回到 env 默认配置。",
+		map[string]any{"restart_required": true})
 }

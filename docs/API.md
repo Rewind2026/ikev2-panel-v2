@@ -304,6 +304,12 @@ mobileconfig 渲染是**三层合并**：builtin 出厂值 + admin 全局默认 
 | POST | `/api/subnet/save` | 保存 + **立即 reload**（无需重启） |
 | POST | `/api/subnet/clear` | 清 panelstate（重启后回 env/自动探测） |
 
+**v2.94 行为变更**：这两个模块的 `save` / `clear` 不再返回 `text/plain` 错误页。
+浏览器表单提交一律收到 `302 → /`，成功/失败提示由 flash 写回会话、在对应卡片
+内联渲染（`cert` / `subnet` 两个独立 slot，互不覆盖）。
+带 `Accept: application/json` 或 `X-Requested-With: XMLHttpRequest` 的调用方
+仍拿到 JSON（`ok` / `kind` / `error` / `msg` + cert 的 `restart_required`）。
+
 ### 5.5 mobileconfig 全局默认值
 
 | 方法 | 路径 | 说明 |
@@ -321,4 +327,5 @@ mobileconfig 渲染是**三层合并**：builtin 出厂值 + admin 全局默认 
 3. 写操作**必须**校验 `r.ParseForm()` 的错误
 4. JSON 端点设 `Content-Type: application/json`
 5. 写操作产生敏感变更 → 调 `audit` 记一笔
-6. 补测试：新端点至少覆盖"未登录被拦"和"CSRF 缺失被拦"
+6. **面板上有表单的写操作，成功和失败都调 `respondFlashSlot(w, r, slot, kind, msg, extra)` 收尾**（`slot` 用该卡专属名字）。不要用 `http.Error` —— 那会让浏览器停在 `/api/xxx` 显示裸文本页，表单内容全丢、没有返回路径。参见 [handlers_aliyun.go](https://github.com/yourname/ikev2-panel-v2/blob/main/internal/web/handlers_aliyun.go) 的 `respondFlashSlot`。
+7. 补测试：新端点至少覆盖"未登录被拦"和"CSRF 缺失被拦"

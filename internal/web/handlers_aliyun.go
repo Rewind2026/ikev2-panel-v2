@@ -144,40 +144,62 @@ func (s *Server) handleAliyunClear(w http.ResponseWriter, r *http.Request) {
 
 // respondAliyunFlash v2.86-pr23l:统一 aliyun save/clear 的响应出口。
 //
-// 行为:
-//   - AJAX 请求(Accept: application/json 或 X-Requested-With)→ JSON 响应,
-//     避免被前端 fetch 误判跳转。
-//   - 普通表单提交 → 写 flash 到 session + 302 redirect 回 /
-//     (由 layout.html 的 scroll-restore JS 恢复原位置 + 模板 banner 就近渲染)。
+// 实现已收敛到 respondFlashSlot(见下),这里只固定住 "aliyun" 这个 slot。
 func (s *Server) respondAliyunFlash(w http.ResponseWriter, r *http.Request, kind, msg string) {
+	s.respondFlashSlot(w, r, "aliyun", kind, msg, nil)
+}
+
+// respondFlashSlot v2.94:所有「保存 / 清除」类 handler 的**唯一**响应出口。
+//
+// 为什么要有这个统一出口(v2.94 修的问题):
+//
+//	每张配置卡各写各的响应方式,漏一处就是一处裸文本错误页 —— 用户点保存后
+//	浏览器直接跳到 https://host/api/cert/save 显示
+//	「保存失败: letsencrypt 模式必须填域名(IKEV2_DOMAIN)」,
+//	表单内容全丢、没有返回路径。v2.94 之前 cert / subnet 两张卡就是这么写的。
+//
+// 两条路径:
+//
+//	1. AJAX / API 客户端(wantsJSON 为真)→ JSON。
+//	   error / msg 两个键都给同一个值:error 是 aliyun/settings 一直在用的键,
+//	   msg 是 cert/subnet 原有契约的键,两个都留着避免打断已有调用方。
+//	   extra 用来补端点自己的字段(如 cert 的 restart_required)。
+//	2. 普通表单提交 → 写 flash 到 session 的指定 slot + 302 回 /。
+//	   模板在对应卡片内部就近渲染 banner,配合 layout.html 的
+//	   initDetailsPersistence() 恢复卡片展开态和滚动位置,用户停在原地看到反馈。
+func (s *Server) respondFlashSlot(w http.ResponseWriter, r *http.Request, slot, kind, msg string, extra map[string]any) {
 	if wantsJSON(r) {
 		w.Header().Set("Content-Type", "application/json")
-		ok := kind != "error"
 		// 4xx 表达业务校验失败,但仍走 JSON,前端用 resp.ok 判断。
 		status := http.StatusOK
+		ok := kind != "error"
 		if !ok {
 			status = http.StatusBadRequest
 		}
 		w.WriteHeader(status)
-		_ = json.NewEncoder(w).Encode(map[string]any{
+		body := map[string]any{
 			"ok":    ok,
 			"kind":  kind,
 			"error": msg,
-		})
+			"msg":   msg,
+		}
+		for k, v := range extra {
+			body[k] = v
+		}
+		_ = json.NewEncoder(w).Encode(body)
 		return
 	}
 
-	// 普通浏览器表单:flash + redirect
+	// 普通浏览器表单:flash + redirect。
 	//
-	// v2.86-pr23l:用 "aliyun" slot 写 flash — 跟 ddns 默认 slot 分开,
-	// 模板端 home_content.html 各自从不同 slot 消费,alipay banner 显示在
-	// aliyun 表单按钮下方,ddns banner 显示在 ddns 表单下方,互不干扰。
+	// slot 分开写是为了让每张卡的反馈落在自己的卡片里 —— ddns 默认 slot 顶部横幅、
+	// aliyun / settings / cert / subnet 各在自己的 slot,互不覆盖。
 	sess, _ := SessionFrom(r.Context())
 	if sess != nil && s.FlashStore != nil {
-		s.FlashStore.SetFor(sess.ID, "aliyun", Flash{Message: msg, Kind: kind})
-		s.Logger.Info("aliyun flash written", "kind", kind, "msg", msg, "sessionID", sess.ID[:8]+"...")
+		s.FlashStore.SetFor(sess.ID, slot, Flash{Message: msg, Kind: kind})
 	} else {
-		s.Logger.Warn("aliyun flash NOT written (no session/flashstore)", "sessNil", sess == nil, "storeNil", s.FlashStore == nil)
+		s.Logger.Warn("card flash NOT written (no session/flashstore)",
+			"slot", slot, "sessNil", sess == nil, "storeNil", s.FlashStore == nil)
 	}
 	http.Redirect(w, r, "/", http.StatusFound)
 }

@@ -1238,6 +1238,12 @@ main#main, .main-area{
 .settings-action-flash{
   margin-top:0.85rem;
 }
+/* v2.94:证书卡 / IP 段卡的保存反馈。证书卡底部那条 ⚠️ 重启提示是
+   .banner-warn(banner 默认 margin:0),反馈紧跟它下面,留 0.85rem 跟上面分层。 */
+.cert-action-flash,
+.subnet-action-flash{
+  margin-top:0.85rem;
+}
 
 /* onboarding */
 .onboarding{

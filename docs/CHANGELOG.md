@@ -18,6 +18,63 @@ hotfix。升级前请重点看目标版本的「⚠️ 行为变更」。
 
 ---
 
+## v2.94（2026-10-21）— 证书 / IP 段保存不再跳裸文本页，两张卡补上成功失败提示
+
+**用户反馈：「配置证书时，保存失败的提示直接跳转到新页面 这不对吧 然后客户端IP段
+相关配置保存 清除等 也没有成功失败提示」**
+
+### 一、证书保存失败 → 浏览器停在 /api/cert/save 显示裸文本
+
+**现象**：切到 Let's Encrypt、域名留空，点「保存证书配置」，浏览器直接跳到
+`https://192.168.50.66:8443/api/cert/save`，整页一行黑底白字：
+
+```
+保存失败: letsencrypt 模式必须填域名 (IKEV2_DOMAIN)
+```
+
+表单里已填的 Server CN、ACME 邮箱全丢，没有返回路径。
+
+**根因**：`handleCertSave` / `handleCertClear` 是全项目**最后两个还在用
+`http.Error` 的写操作**。阿里云卡（v2.86-pr23l）和面板设置卡（批次 D）早就改成
+flash + 302 + 卡片内联 banner 了，cert / subnet 两张卡当时没跟上 ——
+「每张卡各写各的响应方式，漏一处就多一个裸文本页」。
+
+### 二、客户端 IP 段卡完全没有反馈
+
+`handleSubnetSave` / `handleSubnetClear` 成功是裸 `302`（页面上什么提示都没有，
+用户不知道自己点的那下生效没有、客户端要不要重新拨号），失败是裸文本错误页。
+dev 模式清除那条分支更坑：不重启容器根本不会回到上一段，但界面一声不吭。
+
+### 三、修复：抽出 `respondFlashSlot` 作为所有写操作的唯一响应出口
+
+`respondAliyunFlash` / `respondSettingsFlash` 两个近乎重复的实现收敛成
+`respondFlashSlot(w, r, slot, kind, msg, extra)`，cert / subnet 各占一个
+flash slot（`cert` / `subnet`），互不覆盖。模板在对应卡片内部就近渲染 banner，
+配合 `layout.html` 的 `initDetailsPersistence()` 恢复卡片展开态和滚动位置 ——
+用户停在原地看到反馈，不跳顶、不白屏。
+
+**⚠️ 行为变更**：
+
+| 端点 | 之前（浏览器表单） | 现在 |
+|---|---|---|
+| `POST /api/cert/save` | 失败 400 `text/plain`，成功裸 302 | 一律 `302 → /` + flash |
+| `POST /api/cert/clear` | 同上 | 同上 |
+| `POST /api/subnet/save` | 失败 500 `text/plain`，成功裸 302 | 同上 |
+| `POST /api/subnet/clear` | 同上 | 同上 |
+
+API 调用方不受影响：`Accept: application/json` 或
+`X-Requested-With: XMLHttpRequest` 仍拿到 JSON（`ok` / `kind` / `error` /
+`msg`，cert 额外带 `restart_required`）。顺手修掉一个隐患：cert 原来的
+`Accept` 判定是**精确字符串相等**（`== "application/json"`），`fetch()` 默认发的
+`Accept: */*` 会漏判 → 拿到 302 HTML 而不是 JSON；现在改用统一的
+`wantsJSON(r)`。
+
+**回归测试**：`internal/web/config_cards_flash_test.go` 12 条，覆盖
+「失败不是裸文本页」「成功也有提示」「反馈渲染在对应卡片内」「两个 slot 互不覆盖」
+「失败不落脏配置」「JSON 契约字段没丢」。全量 `go test ./...` 通过。
+
+---
+
 ## v2.93（2026-10-21）— 首页 8 张「就绪链路」卡片说实话 + 自签模式 conn 漏加载
 
 **用户反馈：「为什么我改了密码 这里还显示默认 我觉得这一排的所有功能 和显示

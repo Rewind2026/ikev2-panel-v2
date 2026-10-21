@@ -156,6 +156,18 @@ type homeData struct {
 	SettingsFlash     string
 	SettingsFlashKind string
 
+	// v2.94:证书卡 / IP 段卡的专属 flash slot。
+	//
+	// 之前这两张卡的 save / clear 走 http.Error,浏览器直接跳到
+	// /api/cert/save 显示裸文本错误页,表单内容全丢、没有返回路径;
+	// 而成功路径是裸 302,页面上什么提示都没有 —— 用户不知道自己点的那下
+	// 到底生效没有。现在两条路径都归 respondFlashSlot 管,就近渲染 banner。
+	CertFlash     string
+	CertFlashKind string
+
+	SubnetFlash     string
+	SubnetFlashKind string
+
 	// v2.85-PR2:默认密码横幅(/data/panel-state/INITIAL_ADMIN_PASSWORD.txt 存在 → 提示改密码)
 	IsDefaultPassword bool
 
@@ -214,6 +226,20 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 		if f, err := s.FlashStore.ConsumeFor(sess.ID, "settings"); err == nil {
 			settingsFlashMsg = f.Message
 			settingsFlashKind = f.Kind
+		}
+	}
+
+	// v2.94:证书卡 / IP 段卡 flash slot(各自独立,互不覆盖)。
+	var certFlashMsg, certFlashKind string
+	var subnetFlashMsg, subnetFlashKind string
+	if sess != nil && s.FlashStore != nil {
+		if f, err := s.FlashStore.ConsumeFor(sess.ID, "cert"); err == nil {
+			certFlashMsg = f.Message
+			certFlashKind = f.Kind
+		}
+		if f, err := s.FlashStore.ConsumeFor(sess.ID, "subnet"); err == nil {
+			subnetFlashMsg = f.Message
+			subnetFlashKind = f.Kind
 		}
 	}
 
@@ -303,6 +329,11 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 		Settings:          settingsCfg,
 		SettingsFlash:     settingsFlashMsg,
 		SettingsFlashKind: settingsFlashKind,
+		// v2.94:证书卡 / IP 段卡操作反馈
+		CertFlash:         certFlashMsg,
+		CertFlashKind:     certFlashKind,
+		SubnetFlash:       subnetFlashMsg,
+		SubnetFlashKind:   subnetFlashKind,
 		IsDefaultPassword: isDefaultPassword,
 		// v2.86-PR12.21:Visual-first topology
 		TopologyClients: buildHomeTopology(r.Context(), s, activeSAs),

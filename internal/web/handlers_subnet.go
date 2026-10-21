@@ -101,15 +101,15 @@ func (s *Server) handleSubnetStatus(w http.ResponseWriter, r *http.Request) {
 //   - swanctl 写入/Reload 失败 → 500 + 错误(此时 panelstate 已写,swanctl 未生效,需要重试)
 func (s *Server) handleSubnetSave(w http.ResponseWriter, r *http.Request) {
 	if s.SubnetConfigStore == nil {
-		http.Error(w, "IP 段配置存储未初始化", http.StatusInternalServerError)
+		s.respondFlashSlot(w, r, "subnet", "error", "IP 段配置存储未初始化", nil)
 		return
 	}
 	if s.Swanctl == nil {
-		http.Error(w, "swanctl 管理器未初始化", http.StatusInternalServerError)
+		s.respondFlashSlot(w, r, "subnet", "error", "swanctl 管理器未初始化", nil)
 		return
 	}
 	if err := r.ParseForm(); err != nil {
-		http.Error(w, "表单解析失败", http.StatusBadRequest)
+		s.respondFlashSlot(w, r, "subnet", "error", "表单解析失败", nil)
 		return
 	}
 
@@ -121,7 +121,7 @@ func (s *Server) handleSubnetSave(w http.ResponseWriter, r *http.Request) {
 	// 1. 校验 + 写 panelstate
 	if err := s.SubnetConfigStore.WriteSubnetConfig(cfg); err != nil {
 		s.Logger.Warn("subnet config save failed", "err", err)
-		http.Error(w, "保存失败："+err.Error(), http.StatusBadRequest)
+		s.respondFlashSlot(w, r, "subnet", "error", "保存失败："+err.Error(), nil)
 		return
 	}
 
@@ -137,7 +137,8 @@ func (s *Server) handleSubnetSave(w http.ResponseWriter, r *http.Request) {
 			"ipv4", cfg.IPv4Subnet,
 			"ipv6", effectiveV6,
 		)
-		http.Error(w, "面板已保存，但 swanctl 重载失败："+err.Error(), http.StatusInternalServerError)
+		s.respondFlashSlot(w, r, "subnet", "error",
+			"面板已保存，但 swanctl 重载失败："+err.Error(), nil)
 		return
 	}
 
@@ -145,13 +146,10 @@ func (s *Server) handleSubnetSave(w http.ResponseWriter, r *http.Request) {
 	s.Logger.Info("subnet config saved + reloaded via panel", "masked", masked)
 	s.writeAudit(r, "subnet.save", masked)
 
-	if r.Header.Get("Accept") == "application/json" {
-		w.Header().Set("Content-Type", "application/json")
-		// 不需要 restart_required:运行期已生效
-		_, _ = w.Write([]byte(`{"ok":true,"restart_required":false,"msg":"客户端 IP 段已更新,客户端需重新拨号获取新 IP"}`))
-		return
-	}
-	http.Redirect(w, r, "/", http.StatusFound)
+	// restart_required=false:运行期已生效
+	s.respondFlashSlot(w, r, "subnet", "success",
+		"客户端 IP 段已保存并立即生效。⚠️ 客户端需重新拨号才能拿到新 IP。",
+		map[string]any{"restart_required": false})
 }
 
 // handleSubnetClear POST /api/subnet/clear
@@ -168,7 +166,7 @@ func (s *Server) handleSubnetSave(w http.ResponseWriter, r *http.Request) {
 //     返回 msg 提示用户"重启容器后回 env"。老语义保留,避免 dev 模式 crash。
 func (s *Server) handleSubnetClear(w http.ResponseWriter, r *http.Request) {
 	if s.SubnetConfigStore == nil {
-		http.Error(w, "IP 段配置存储未初始化", http.StatusInternalServerError)
+		s.respondFlashSlot(w, r, "subnet", "error", "IP 段配置存储未初始化", nil)
 		return
 	}
 
@@ -179,7 +177,7 @@ func (s *Server) handleSubnetClear(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.SubnetConfigStore.ClearSubnetConfig(); err != nil {
 		s.Logger.Error("subnet config clear failed", "err", err)
-		http.Error(w, "清除失败："+err.Error(), http.StatusInternalServerError)
+		s.respondFlashSlot(w, r, "subnet", "error", "清除失败："+err.Error(), nil)
 		return
 	}
 	s.Logger.Info("subnet config cleared via panel", "audit", "subnet.clear")
@@ -187,6 +185,7 @@ func (s *Server) handleSubnetClear(w http.ResponseWriter, r *http.Request) {
 
 	// 2. 立即把 swanctl.conf 改回启动时的 pool 段,确保"清掉 panelstate 后
 	//    客户端不需要重启就能拿到上一段"。
+	msg := "面板 IP 段配置已清除。⚠️ 未读到启动时的 IP 段(dev 模式),需重启容器后回落到 env / 自动探测。"
 	if s.Swanctl != nil && targetV4 != "" && targetV6 != "" {
 		if err := s.Swanctl.UpdatePoolsAndReload(r.Context(), targetV4, targetV6); err != nil {
 			s.Logger.Error("swanctl pool revert failed after subnet.clear (panelstate removed but charon not reloaded)",
@@ -194,20 +193,18 @@ func (s *Server) handleSubnetClear(w http.ResponseWriter, r *http.Request) {
 				"target_v4", targetV4,
 				"target_v6", targetV6,
 			)
-			http.Error(w, "面板已清除，但 swanctl 回滚失败："+err.Error(), http.StatusInternalServerError)
+			s.respondFlashSlot(w, r, "subnet", "error",
+				"面板已清除，但 swanctl 回滚失败："+err.Error(), nil)
 			return
 		}
 		s.Logger.Info("subnet config cleared + swanctl reverted to startup pools",
 			"v4", targetV4, "v6", targetV6)
+		msg = fmt.Sprintf("面板 IP 段配置已清除，客户端 IP 段已立即回到 %s。", targetV4)
 	} else {
 		// dev 模式或 swanctl 不可用,告诉用户需要重启。
 		s.Logger.Info("subnet config cleared (swanctl not reverted; dev mode or unavailable)")
 	}
 
-	if r.Header.Get("Accept") == "application/json" {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"ok":true,"restart_required":false,"msg":"已清除,客户端 IP 段已立即回到上一段"}`))
-		return
-	}
-	http.Redirect(w, r, "/", http.StatusFound)
+	s.respondFlashSlot(w, r, "subnet", "success", msg,
+		map[string]any{"restart_required": false})
 }
