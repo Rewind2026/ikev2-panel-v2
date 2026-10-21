@@ -70,8 +70,30 @@ API 调用方不受影响：`Accept: application/json` 或
 `wantsJSON(r)`。
 
 **回归测试**：`internal/web/config_cards_flash_test.go` 12 条，覆盖
-「失败不是裸文本页」「成功也有提示」「反馈渲染在对应卡片内」「两个 slot 互不覆盖」
-「失败不落脏配置」「JSON 契约字段没丢」。全量 `go test ./...` 通过。
+→「失败不是裸文本页」「成功也有提示」「反馈渲染在对应卡片内」「两个 slot 互不覆盖」
+→「失败不落脏配置」「JSON 契约字段没丢」。全量 `go test ./...` 通过。
+
+**实机验证**（192.168.50.63，飞牛 fnOS / Docker 28.5.2 / Compose v2.40.3，
+ipvlan + 固定容器 IP `192.168.50.66`，正式镜像 `v2.94`）：
+真实 HTTP 提交流程 **39 条断言全绿** ——
+
+| 场景 | 响应 | 首页渲染 |
+|---|---|---|
+| 证书保存失败（LE + 域名留空） | `302 → /`，CT 非 `text/plain` | 证书卡内 `cert-action-flash` + `banner-danger` |
+| 证书保存成功 | `302 → /` | `banner-success` + 提示需 restart |
+| 证书清除 | `302 → /` | `banner-success` |
+| IP 段保存失败（非法 CIDR） | `302 → /`，CT 非 `text/plain` | IP 段卡内 `subnet-action-flash` + `banner-danger` |
+| IP 段保存成功 | `302 → /` | `banner-success` + 提示需重新拨号 |
+| IP 段清除 | `302 → /` | `banner-success` |
+| JSON 失败 / 成功分支 | `400` / `200` | `ok` / `kind` / `error` / `msg` / `restart_required` 齐全 |
+
+按行号确认反馈落在卡片内：`cert-action-flash` 在第 485 行，落在
+`cert-card`（395–504 行）区间内；`subnet-action-flash` 在第 540 行，落在
+`subnet-card`（472–558 行）区间内 —— 不是页顶横幅。
+
+8 张 lane 卡片仍与实际一致（v2.93 成果未被本轮破坏），
+`swanctl --list-conns` 有 conn、`--list-pools` 池正常。测试残留
+（`cert.conf` / 10 行审计）已清理。
 
 ---
 

@@ -128,6 +128,70 @@ cert 端点原来的 `Accept` 判定是**精确字符串相等**（`== "applicat
 
 ---
 
+## 实机验证
+
+192.168.50.63（飞牛 fnOS NAS，Docker 28.5.2 / Compose v2.40.3），
+**ipvlan 模式 + 固定容器 IP `192.168.50.66`**，
+正式镜像 `ghcr.io/rewind2026/ikev2-panel-v2:v2.94`。
+
+### 一、真实 HTTP 提交流程（39 条断言全绿）
+
+用 wget 打真实端到端流程（登录 → 带 CSRF 提交 → 跟回首页抓渲染后的 HTML）：
+
+| 场景 | 响应 | 首页渲染 | 结果 |
+|------|------|---------|------|
+| **证书保存失败**（LE 模式 + 域名留空） | `302 → /`，CT 非 `text/plain` | 证书卡内 `cert-action-flash` + `banner-danger`，文案「保存失败：letsencrypt 模式必须填域名(IKEV2_DOMAIN)」 | ✅ **不再跳裸文本页** |
+| 证书保存成功（自签模式） | `302 → /` | `cert-action-flash` + `banner-success`，文案「证书配置已保存…需 docker compose restart」 | ✅ |
+| 证书清除 | `302 → /` | `banner-success`，文案「证书配置已清除」 | ✅ |
+| **IP 段保存失败**（非法 CIDR） | `302 → /`，CT 非 `text/plain` | IP 段卡内 `subnet-action-flash` + `banner-danger`，文案「保存失败：ipv4_subnet 不合法…」 | ✅ |
+| IP 段保存成功 | `302 → /` | `subnet-action-flash` + `banner-success`，文案「已保存并立即生效…客户端需重新拨号」 | ✅ |
+| IP 段清除 | `302 → /` | `banner-success`，文案「已清除…已立即回到 10.10.0.0/24」 | ✅ |
+| JSON 失败分支（`Accept: application/json`） | `400` + `{"ok":false,"kind":"error","error":…,"msg":…}` | — | ✅ 契约未丢字段 |
+| JSON 成功分支 | `200` + `{"ok":true,…,"restart_required":true}` | — | ✅ |
+
+### 二、反馈确实落在卡片内（不是页顶横幅）
+
+抓首页真实 HTML，按行号定位：
+
+```
+395:  <details class="settings-card" id="cert-card">
+426:    <form method="POST" action="/api/cert/save">
+485:    <div class="banner banner-success dismissable cert-action-flash" …>   ← 在 cert-card 内
+505:  <details class="settings-card" id="subnet-card">
+540:    <div class="banner banner-success dismissable subnet-action-flash" …> ← 在 subnet-card 内
+```
+
+`cert-action-flash`（485 行）落在 `cert-card`（395–504 行）区间内，
+`subnet-action-flash`（540 行）落在 `subnet-card`（472–558 行）区间内。
+
+### 三、两个 slot 互不覆盖
+
+`cert` / `subnet` 各占一个 flash slot，连续操作两张卡，
+先做的 cert 反馈不会被后做的 subnet 反馈顶掉。
+
+### 四、8 张 lane 卡片仍与实际一致（v2.93 成果未被本轮破坏）
+
+| 卡片 | 显示 | state |
+|------|------|-------|
+| 管理口令 | 默认 | 🔴 danger |
+| IP 池 | `10.10.0.0/24` | 🟢 ok |
+| 服务端证书 | 自签 | 🟡 warn |
+| LE 续签 | 不适用 | ⚪ off |
+| 阿里云凭证 | 未配置 | ⚪ off |
+| DNS 同步 | — | 🟡 warn |
+| IKE_SA | — | ⚪ off |
+| 面板设置 | — | 🟡 warn |
+
+`swanctl --list-conns` → `ikev2-rw: IKEv2, no reauthentication, rekeying every 86400s, dpd delay 30s`（conn 已注册）
+`swanctl --list-pools` → `ikev2-pool 10.10.0.1 0 / 0 / 254`
+
+### 五、测试后 63 状态
+
+`panel-state/` 只剩 `INITIAL_ADMIN_PASSWORD.txt`（初始口令横幅还在，符合预期）
++ `ratelimit.json`；测试产生的 `cert.conf` 已清除，`audit_log` 已清空（0 行）。
+
+---
+
 ## 升级方法
 
 ### 用 docker compose 部署的
