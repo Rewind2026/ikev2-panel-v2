@@ -145,6 +145,24 @@ func (s *Server) handleAccountChangePassword(w http.ResponseWriter, r *http.Requ
 	s.writeAudit(r, "admin.password.change",
 		"username="+fresh.Username+",remote="+auth.ClientIP(r))
 
+	// 7b. 删除 INITIAL_ADMIN_PASSWORD.txt。
+	//
+	// 改密成功后，首页「管理口令」卡片必须从「默认」翻成「已改」，
+	// 顶部默认密码横幅也必须消失 —— 两者都靠这个文件是否存在来判断
+	// （loadIsDefaultPassword）。
+	//
+	// 这笔欠账是 v2.85-PR2 留下的：当时注释写着「admin 改密后需要删这个文件
+	// (本 PR 不做,留 v3.0 admin 改密页)」。但 v2.86-pr21 已经把 admin 改密页
+	// 做出来了(POST /api/account/password),欠账没还 —— 结果是**改完密码
+	// 卡片还一直显示「默认」**,用户以为没改成功。
+	//
+	// 删除失败**不能**中断改密(密码已经落库了,回滚不了),
+	// 只记 warn —— 下次启动会再写一次,状态依旧准确。
+	//
+	// 安全上顺带解决了一个小问题:这个文件里躺着初始明文密码,
+	// 改完密码后它就是纯垃圾(还多一份凭据副本),删掉是对的。
+	s.clearInitialPasswordFile()
+
 	// 8. flash 成功 → 重定向到 /account
 	sess2, _ := SessionFrom(r.Context())
 	if sess2 != nil && s.FlashStore != nil {

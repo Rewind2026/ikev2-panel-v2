@@ -36,6 +36,11 @@ type pr9Env struct {
 	handler http.Handler
 	Store   *store.Store // v2.86-pr21:暴露给 pr21 test 读审计
 	Logger  *slog.Logger // 同上,日志断言用
+	DataDir string       // v2.93:暴露给 lane 卡片 test 定位 panel-state 路径
+	// v2.93:暴露 Server 本身 —— lane 卡片 test 要按场景注入
+	// Swanctl / SubnetConfigStore / CertConfigStore,模拟不同的部署形态。
+	// handler 持有的是同一个指针,改完字段再发请求即可生效。
+	Srv *Server
 }
 
 func newPR9Env(t *testing.T) *pr9Env {
@@ -83,7 +88,7 @@ func newPR9Env(t *testing.T) *pr9Env {
 	srv.Templates = tpl
 
 	handler := New(srv, filepath.Join("..", "..", "web", "static"))
-	return &pr9Env{handler: handler, Store: st, Logger: logger}
+	return &pr9Env{handler: handler, Store: st, Logger: logger, DataDir: dir, Srv: srv}
 }
 
 func TestSmoke_PR9_LoginRateLimit_BlocksAfterFiveFailures(t *testing.T) {

@@ -137,10 +137,11 @@
         </svg>
       </span>
     </div>
-    <span class="metric-value {{if eq .CertMode "letsencrypt"}}ok{{end}}">
-      {{if eq .CertMode "letsencrypt"}}LE{{else}}自签{{end}}
+    {{/* v2.93:证书 metric 走「运行中实际生效」的口径,跟 lane 卡第 3 格一致 */}}
+    <span class="metric-value {{if eq .CertLiveMode "letsencrypt"}}ok{{end}}">
+      {{if eq .CertLiveMode "letsencrypt"}}LE{{else}}自签{{end}}
     </span>
-    <span class="metric-hint">{{.CertDomain}}</span>
+    <span class="metric-hint">{{if eq .CertLiveMode "letsencrypt"}}{{.CertDomain}}{{else}}需手动信任 CA{{end}}</span>
   </div>
 
   <div class="metric">
@@ -184,28 +185,53 @@
     <span class="lane-v">{{if .IsDefaultPassword}}默认{{else}}已改{{end}}</span>
   </a>
 
-  {{/* 2 IP 池 —— 配了但运行态读不到 = 面板改了 swanctl 还没生效,这是真问题,所以是 warn 不是 off */}}
-  <a class="lane" data-state="{{if and .SubnetConfigured .SubnetCurrentIPv4}}ok{{else if .SubnetConfigured}}warn{{else}}off{{end}}" href="#subnet-card"
-     title="{{if and .SubnetConfigured .SubnetCurrentIPv4}}客户端虚拟 IP 段已配置且运行态生效{{else if .SubnetConfigured}}已配置但 swanctl 运行态未读到,可能未重启或配置未下发{{else}}未配置客户端虚拟 IP 段{{end}}">
+  {{/*
+    2 IP 池 —— 判据看**运行态**(swanctl.conf 里实际在用的段),不是"用户配过没有"。
+
+    旧判据是 and .SubnetConfigured .SubnetCurrentIPv4,而 SubnetConfigured 的
+    语义是「subnet.conf 文件是否存在」= 用户在面板里显式设过 IP 段。走
+    env / compose 默认池的用户(绝大多数)从没在面板设过 → SubnetConfigured=false
+    → 卡片显示「未配置」,可池明明在跑(swanctl --list-pools 有 ikev2-pool)。
+    同一页 header-note 用的是 {{else if .SubnetCurrentIPv4}} 兜底,两处说法打架
+    —— v2.93 统一成运行态口径。
+
+    三档:运行态有段 = ok(绿);面板配了但运行态读不到 / 对不上 = warn(黄,未生效);
+    什么都没有 = off(灰)。
+  */}}
+  <a class="lane" data-state="{{if .SubnetPoolDrift}}warn{{else if or .SubnetCurrentIPv4 .SubnetCurrentIPv6}}ok{{else if .SubnetConfigured}}warn{{else}}off{{end}}" href="#subnet-card"
+     title="{{if .SubnetPoolDrift}}面板配置 {{.SubnetIPv4}} 与运行态 {{.SubnetCurrentIPv4}} 不一致,swanctl 尚未应用新配置{{else if or .SubnetCurrentIPv4 .SubnetCurrentIPv6}}客户端虚拟 IP 段运行态生效:{{if .SubnetCurrentIPv4}}{{.SubnetCurrentIPv4}}{{else}}{{.SubnetCurrentIPv6}}{{end}}{{else if .SubnetConfigured}}已配置但 swanctl 运行态未读到,可能未重启或配置未下发{{else}}未配置客户端虚拟 IP 段{{end}}">
     <span class="lane-go" aria-hidden="true">↗</span>
     <span class="lane-k">IP 池</span>
-    <span class="lane-v">{{if and .SubnetConfigured .SubnetCurrentIPv4}}{{.SubnetCurrentIPv4}}{{else if .SubnetConfigured}}未生效{{else}}未配置{{end}}</span>
+    <span class="lane-v">{{if .SubnetPoolDrift}}未生效{{else if .SubnetCurrentIPv4}}{{.SubnetCurrentIPv4}}{{else if .SubnetCurrentIPv6}}{{.SubnetCurrentIPv6}}{{else if .SubnetConfigured}}未生效{{else}}未配置{{end}}</span>
   </a>
 
-  {{/* 3 服务端证书 —— 自签是"能用但要手动信任客户端",降级可用而非故障 */}}
-  <a class="lane" data-state="{{if eq .CertMode "letsencrypt"}}ok{{else if .CertConfigured}}warn{{else}}off{{end}}" href="#cert-card"
-     title="{{if eq .CertMode "letsencrypt"}}Let's Encrypt 自动签发,有效期 {{.CertExpiresAt}}{{else if .CertConfigured}}自签证书,客户端需手动安装信任{{else}}未配置服务端证书{{end}}">
+  {{/*
+    3 服务端证书 —— 判据看**运行中实际生效**的证书(CertLiveMode + CertInPlace),
+    不是"用户配过没有"(CertConfigured = cert.conf 文件是否存在)。
+
+    自签模式(默认)下 cert.conf 根本不存在,但自签证书一直都在用
+    (/data/server/server.cert.pem + /data/panel-tls/),旧判据会误报「未配置」,
+    而实际 HTTPS 握手正常、8443 正常监听 —— 卡片报的是假象。
+
+    四档:LE 且证书在位 = ok;自签且证书在位 = warn(能用但客户端需手动信任 CA);
+    LE 但文件缺失 = danger(证书栈坏了);都没有 = off。
+  */}}
+  <a class="lane" data-state="{{if and (eq .CertLiveMode "letsencrypt") .CertInPlace}}ok{{else if eq .CertLiveMode "letsencrypt"}}danger{{else if .CertInPlace}}warn{{else}}off{{end}}" href="#cert-card"
+     title="{{if and (eq .CertLiveMode "letsencrypt") .CertInPlace}}Let's Encrypt 自动签发,有效期至 {{.CertExpiresAt}}{{else if eq .CertLiveMode "letsencrypt"}}LE 模式但证书文件缺失,续签与新客户端签发都会失败{{else if .CertInPlace}}自签证书,客户端需手动安装信任 CA{{else}}未配置服务端证书{{end}}">
     <span class="lane-go" aria-hidden="true">↗</span>
     <span class="lane-k">服务端证书</span>
-    <span class="lane-v">{{if eq .CertMode "letsencrypt"}}LE{{else if .CertConfigured}}自签{{else}}未配置{{end}}</span>
+    <span class="lane-v">{{if and (eq .CertLiveMode "letsencrypt") .CertInPlace}}LE{{else if eq .CertLiveMode "letsencrypt"}}缺失{{else if .CertInPlace}}自签{{else}}未配置{{end}}</span>
   </a>
 
-  {{/* 4 LE 续签 —— 自签模式没有续签概念,置 off 而不是假装正常 */}}
-  <a class="lane" data-state="{{if ne .CertMode "letsencrypt"}}off{{else if .CertLastRenewFailed}}danger{{else if and (gt .CertDaysLeft 0) (lt .CertDaysLeft 14)}}warn{{else}}ok{{end}}" href="#cert-card"
-     title="{{if ne .CertMode "letsencrypt"}}自签模式不适用续签{{else if .CertLastRenewFailed}}最近一次续签失败,面板仍用旧证书运行{{else if and (gt .CertDaysLeft 0) (lt .CertDaysLeft 14)}}证书将在 {{.CertDaysLeft}} 天后过期{{else if gt .CertDaysLeft 0}}证书有效期剩余 {{.CertDaysLeft}} 天{{else}}续签状态正常{{end}}">
+  {{/*
+    4 LE 续签 —— 用 CertLiveMode(运行中实际生效的模式)判"适不适用":
+    自签模式没有续签概念,置 off 而不是假装正常。
+  */}}
+  <a class="lane" data-state="{{if ne .CertLiveMode "letsencrypt"}}off{{else if .CertLastRenewFailed}}danger{{else if and (gt .CertDaysLeft 0) (lt .CertDaysLeft 14)}}warn{{else}}ok{{end}}" href="#cert-card"
+     title="{{if ne .CertLiveMode "letsencrypt"}}自签模式不适用续签{{else if .CertLastRenewFailed}}最近一次续签失败,面板仍用旧证书运行{{else if and (gt .CertDaysLeft 0) (lt .CertDaysLeft 14)}}证书将在 {{.CertDaysLeft}} 天后过期{{else if gt .CertDaysLeft 0}}证书有效期剩余 {{.CertDaysLeft}} 天{{else}}续签状态正常{{end}}">
     <span class="lane-go" aria-hidden="true">↗</span>
     <span class="lane-k">LE 续签</span>
-    <span class="lane-v">{{if ne .CertMode "letsencrypt"}}不适用{{else if .CertLastRenewFailed}}失败{{else if gt .CertDaysLeft 0}}{{.CertDaysLeft}} 天{{else}}正常{{end}}</span>
+    <span class="lane-v">{{if ne .CertLiveMode "letsencrypt"}}不适用{{else if .CertLastRenewFailed}}失败{{else if gt .CertDaysLeft 0}}{{.CertDaysLeft}} 天{{else}}正常{{end}}</span>
   </a>
 
   {{/* 5 阿里云凭证 —— 没配只影响 LE+DDNS,隧道本身照跑,所以是 off 不是 danger */}}
@@ -224,11 +250,16 @@
     <span class="lane-v">{{if not .DDNSConfigured}}未配置{{else if .DDNSFailed}}失败{{else if .DDNSReady}}运行中{{else if and .DDNSEnabled (or .DDNSEnableA .DDNSEnableAAAA)}}未就绪{{else}}已关闭{{end}}</span>
   </a>
 
-  {{/* 7 IKE_SA —— swanctl 超时是真故障(danger),0 条连接只是当前没人连(off) */}}
-  <div class="lane" data-state="{{if .SAsUnavailable}}danger{{else if gt .TotalActive 0}}ok{{else}}off{{end}}"
-     title="{{if .SAsUnavailable}}swanctl 响应超时,SA 列表暂不可用{{else if gt .TotalActive 0}}当前 {{.TotalActive}} 个 IKE_SA 已建立{{else}}当前没有已建立的 IKE_SA{{end}}">
+  {{/*
+    7 IKE_SA —— 三种状态要分清:
+      - swanctl 响应超时        → danger(查不到,不能当成"没人连")
+      - charon 里一个 conn 都没加载 → danger(客户端连都连不上,63 实机踩过)
+      - 0 条活跃 SA              → off(真的只是当前没人连)
+  */}}
+  <div class="lane" data-state="{{if .SAsUnavailable}}danger{{else if .ConnsUnloaded}}danger{{else if gt .TotalActive 0}}ok{{else}}off{{end}}"
+     title="{{if .SAsUnavailable}}swanctl 响应超时,SA 列表暂不可用{{else if .ConnsUnloaded}}charon 里没有已加载的 connection,客户端无法建立隧道{{else if gt .TotalActive 0}}当前 {{.TotalActive}} 个 IKE_SA 已建立{{else}}当前没有已建立的 IKE_SA{{end}}">
     <span class="lane-k">IKE_SA</span>
-    <span class="lane-v">{{if .SAsUnavailable}}超时{{else if gt .TotalActive 0}}{{.TotalActive}} 在线{{else}}0 在线{{end}}</span>
+    <span class="lane-v">{{if .SAsUnavailable}}超时{{else if .ConnsUnloaded}}未加载{{else if gt .TotalActive 0}}{{.TotalActive}} 在线{{else}}0 在线{{end}}</span>
   </div>
 
   {{/*
@@ -444,8 +475,8 @@
       </div>
       <div class="side-stat">
         <span class="side-stat-label">证书</span>
-        <span class="side-stat-value {{if eq .CertMode "letsencrypt"}}ok{{end}}">
-          {{if eq .CertMode "letsencrypt"}}LE{{else}}自签{{end}}
+        <span class="side-stat-value {{if eq .CertLiveMode "letsencrypt"}}ok{{end}}">
+          {{if eq .CertLiveMode "letsencrypt"}}LE{{else}}自签{{end}}
         </span>
       </div>
       <div class="side-stat">
@@ -518,9 +549,18 @@
     顶部仍显示当前生效模式 + 来源(panelstate / env-default)做提示。
   */}}
   <p>
-    状态：<span class="chip {{if eq .CertMode "letsencrypt"}}ok{{else}}warn{{end}} no-dot">
-      {{if eq .CertMode "letsencrypt"}}Let's Encrypt 自动签发{{else}}自签证书{{end}}
+    {{/*
+      v2.93:这里显示的是**运行中实际生效**的证书(CertLiveMode),不是配置值。
+      配置值(CertMode)继续用在下面的 radio / 输入框上 —— 那是"表单里存了什么"。
+      两者不一致时(CertRestartRequired)明确提示"改了但没重启",避免用户
+      以为切了模式就立刻生效。
+    */}}
+    运行中：<span class="chip {{if eq .CertLiveMode "letsencrypt"}}ok{{else}}warn{{end}} no-dot">
+      {{if eq .CertLiveMode "letsencrypt"}}Let's Encrypt 自动签发{{else}}自签证书{{end}}
     </span>
+    {{if .CertRestartRequired}}
+      <br><small>⚠️ 面板配置为 <code>{{if eq .CertMode "letsencrypt"}}Let's Encrypt{{else}}自签{{end}}</code>，需 <code>docker compose restart</code> 后生效</small>
+    {{end}}
     {{if eq .CertMode "letsencrypt"}}
       {{if .CertDomain}}<br><small>域名：<code>{{.CertDomain}}</code></small>{{end}}
       {{if .CertServerCN}}<br><small>Server CN：<code>{{.CertServerCN}}</code></small>{{end}}
@@ -528,7 +568,7 @@
     {{end}}
     <br>
     <small>配置来源：<code>{{if .CertSource}}{{.CertSource}}{{else}}env-default{{end}}</code>
-      {{if eq .CertSource "panelstate"}}(需 <code>docker compose restart</code> 生效){{end}}
+      {{if and (eq .CertSource "panelstate") .CertRestartRequired}}(需 <code>docker compose restart</code> 生效){{end}}
     </small>
   </p>
   <form method="POST" action="/api/cert/save">

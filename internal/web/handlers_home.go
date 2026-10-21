@@ -43,6 +43,17 @@ type homeData struct {
 	// v2.85-PR8(Q1-04):swanctl.ListSAs 超过 3s 时设 true,模板渲染 fallback
 	SAsUnavailable bool
 
+	// v2.93:charon 里**一个 connection 都没加载**。
+	//
+	// 为什么单独一个字段:SA 数为 0 有两种完全不同的含义 ——
+	//   a) "当前没人连"        → 正常,off 态
+	//   b) "conn 压根没注册进 charon" → 客户端连都连不上,是故障,danger 态
+	// 光看 SA 数分不出来。63 实机就踩过 b):
+	//   自签模式 entrypoint §7 的 load-all 发生在证书装好之前 →
+	//   "loaded 0 of 1 connections, 1 failed to load" → conn 一直是空的。
+	// 查询失败(没 swanctl 二进制 / 超时)时保持 false,不误报故障。
+	ConnsUnloaded bool
+
 	// v2-82 DDNS 状态,v2-84 加 family / per-family IP,v2.86-pr23a 改独立 A/AAAA bool
 	DDNSConfigured      bool   // 同步器是否配置
 	DDNSEnabled         bool   // 当前是否启用(总开关)
@@ -79,6 +90,25 @@ type homeData struct {
 	CertACMEEmail  string // LE 注册邮箱
 	CertSource     string // 来源: panelstate / env-default / ""
 
+	// v2.93:证书「实际状态」—— 给 lane 卡的「服务端证书」「LE 续签」用。
+	//
+	// 为什么不能复用上面两个字段:
+	//   - CertConfigured 的语义是「cert.conf 文件是否存在」= 用户在面板里
+	//     **显式配过**证书。自签模式(默认)下 cert.conf 根本不存在,
+	//     但自签证书一直都在用(/data/server/server.cert.pem + /data/panel-tls/)。
+	//     拿它当「有没有证书在用」→ 卡片误报「未配置」,而实际 HTTPS 正常握手。
+	//   - CertMode 的语义是「cert.conf 里写的模式」,改完要重启容器才生效。
+	//     未重启的那段时间它跟**实际跑的**模式可能不一样。
+	//
+	// lane 卡是「服务就绪链路」,必须反映**当前实际**的状态,否则用户看到的是假象。
+	CertInPlace  bool   // 服务端证书文件真的在位(LE: le/fullchain.pem;自签: server/server.cert.pem)
+	CertLiveMode string // 运行中实际生效的证书模式(self-signed / letsencrypt)
+
+	// v2.93:面板里的证书配置与运行中实际生效的配置是否不一致
+	// (= 改完 cert.conf 还没 docker compose restart)。
+	// 只有 panelstate 来源的改动才需要重启;env 改动不在面板管辖范围内。
+	CertRestartRequired bool
+
 	// v2.86-PR13.2:客户端虚拟 IP 段配置状态(给 home 模板渲染用)
 	SubnetConfigured bool   // subnet.conf 文件是否存在
 	SubnetIPv4       string // panelstate 里的 IPv4 pool CIDR
@@ -108,6 +138,15 @@ type homeData struct {
 	// 当前 swanctl.conf 正在生效的值(独立于 panelstate,看运行态)
 	SubnetCurrentIPv4 string
 	SubnetCurrentIPv6 string
+
+	// v2.93:IP 池「运行态漂移」—— 面板配的段与 swanctl 实际在用的段不一致。
+	//
+	// 成因:面板保存 subnet.conf 后要执行 swanctl --load-all,charon 正忙 /
+	// swanctl 异常时 reload 失败,但 panelstate 已经写进去了 → 两边对不上
+	// (handlers_subnet.go: reload 失败返回 500,panelstate 不回滚)。
+	//
+	// 漂移时卡片必须报「未生效」(warn)而不是绿 —— 绿的意思是"配置已落地"。
+	SubnetPoolDrift bool
 
 	// v2.86 配置统一批次 D:面板设置状态(给 home 模板渲染「面板设置」卡)
 	Settings settingsStatusData
@@ -190,6 +229,9 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 	// v2.86-PR12.5:证书配置状态
 	certCfg := loadCertConfigStatus(s)
 
+	// v2.93:运行中**实际生效**的证书状态(lane 卡必须反映这个,不是配置值)
+	certLive := loadCertLiveStatus(s)
+
 	// v2.86-PR13.2:客户端虚拟 IP 段配置状态
 	subnetCfg := loadSubnetConfigStatus(s)
 
@@ -209,6 +251,8 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 		ActiveSAs:           activeSAs,
 		TotalActive:         totalActive,
 		SAsUnavailable:      sasUnavailable,
+		// v2.93:SA 为 0 时再查一次 conn(有 SA 就没必要 —— 有 SA 必然 conn 已加载)
+		ConnsUnloaded: !sasUnavailable && loadConnHealth(r.Context(), s, totalActive),
 		LEWarning:           leWarning,
 		ServerAddr:          s.ServerAddr,
 		DDNSConfigured:      ddnsStatus.configured,
@@ -241,6 +285,10 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 		CertServerCN:        certCfg.serverCN,
 		CertACMEEmail:       certCfg.acmeEmail,
 		CertSource:          certCfg.source,
+		// v2.93:运行中实际生效的证书状态
+		CertInPlace:         certLive.inPlace,
+		CertLiveMode:        certLive.mode,
+		CertRestartRequired: certRestartRequired(s, certCfg, certLive.mode),
 		// v2.86-PR13.2:subnet 状态
 		SubnetConfigured:  subnetCfg.configured,
 		SubnetIPv4:        subnetCfg.ipv4,
@@ -249,6 +297,8 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 		SubnetUpdatedAt:   subnetCfg.updatedAt,
 		SubnetCurrentIPv4: subnetCfg.currentIPv4,
 		SubnetCurrentIPv6: subnetCfg.currentIPv6,
+		// v2.93:面板配的段 vs swanctl 实际在用的段 —— 不一致就是没生效
+		SubnetPoolDrift: subnetPoolDrift(subnetCfg),
 		// v2.86 配置统一批次 D:面板设置
 		Settings:          settingsCfg,
 		SettingsFlash:     settingsFlashMsg,
@@ -261,7 +311,11 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// v2.86-pr22:证书有效期(LE 模式从 acme 包拿)
-	if s.CertMode == "letsencrypt" {
+	//
+	// v2.93:判据从 s.CertMode 改成 data.CertLiveMode —— 两者目前相等
+	// (CertLiveMode 就是从 s.CertMode 推出来的),但用「运行中实际生效的
+	// 模式」做判据语义更准:卡片上的天数必须对应**正在用的那张证书**。
+	if data.CertLiveMode == "letsencrypt" {
 		certPath := filepath.Join(s.DataDir, "le", "fullchain.pem")
 		st := cert.CheckLERenewStatus(certPath)
 		data.CertDaysLeft = st.DaysLeft
@@ -295,6 +349,27 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.RenderPage(w, r, http.StatusOK, "home", data)
+}
+
+// loadConnHealth 检查 charon 里有没有已加载的 connection。
+//
+// 返回 true = 查到了,而且**一个 conn 都没加载** → 客户端根本连不上,
+//         是故障(面板上要报 danger,而不是"0 在线"这种看着像正常的文案)。
+// 返回 false = conn 在 / 查不了(没 swanctl 二进制、超时、SA 非 0)。
+//
+// 只在"没有活跃 SA"时才查:有 SA 说明 conn 必然已加载,再查是白花钱
+// (这个检查要 spawn 一个 swanctl 进程)。
+func loadConnHealth(ctx context.Context, s *Server, totalActive int) bool {
+	if s.Swanctl == nil || totalActive > 0 {
+		return false
+	}
+	conns, err := s.Swanctl.ListLoadedConns(ctx)
+	if err != nil {
+		// 查不了 ≠ 没加载。查不了就保持"正常"语义,不误报故障。
+		s.Logger.Debug("home: list loaded conns failed", "err", err)
+		return false
+	}
+	return len(conns) == 0
 }
 
 // loadActiveSAs 从 swanctl 拿活跃 SA 列表。
@@ -367,6 +442,88 @@ func loadCertConfigStatus(s *Server) certStatusData {
 		serverCN:   s.ServerCN,
 		source:     s.CertConfigSource,
 	}
+}
+
+// certLiveStatus v2.93:运行中**实际生效**的证书状态。
+//
+// 与 certStatusData(配置状态)是两回事:
+//   - certStatusData 说「配置文件里写着什么」
+//   - certLiveStatus 说「这个进程现在用的是哪张证书、它在不在」
+type certLiveStatus struct {
+	mode    string // self-signed / letsencrypt —— 当前进程真正在用的模式
+	inPlace bool   // 该模式的证书文件真的在位
+}
+
+// loadCertLiveStatus 探测运行中实际生效的证书模式。
+//
+// 为什么不能直接用 homeData.CertMode:
+//   homeData.CertMode 来自 loadCertConfigStatus,语义是「**配置里写的**模式」
+//   (cert.conf 优先,其次 env)。用户在面板里保存 cert.conf 之后必须重启容器
+//   才生效 —— 这段时间配置说 LE、实际跑的还是自签,卡片显示"LE"就是假的。
+//
+// 判定方式:按 main.go 的启动分支反查证书文件在不在:
+//   - LE 分支:  读 {DataDir}/le/fullchain.pem,读不到直接 os.Exit(1)
+//   - 自签分支: 生成 {DataDir}/server/server.cert.pem
+//   文件在位 = 该模式的证书确实被这个进程用着。
+//
+// s.CertMode 是**启动时**读进来的值(runtime.Merge 合并了当时的 env +
+// cert.conf),正是 main.go 选哪个分支的依据,所以用它来选要查哪个文件。
+func loadCertLiveStatus(s *Server) certLiveStatus {
+	out := certLiveStatus{mode: s.CertMode}
+	if out.mode != "letsencrypt" {
+		out.mode = "self-signed"
+	}
+	var p string
+	if out.mode == "letsencrypt" {
+		p = filepath.Join(s.DataDir, "le", "fullchain.pem")
+	} else {
+		p = filepath.Join(s.DataDir, "server", "server.cert.pem")
+	}
+	if st, err := os.Stat(p); err == nil && !st.IsDir() {
+		out.inPlace = true
+	}
+	return out
+}
+
+// certRestartRequired 判断「面板里的证书配置」是否还没在运行中生效
+// (= 需要 docker compose restart)。
+//
+// 只有 panelstate 来源的改动才归面板管:env 改动要改 compose 文件再重启,
+// 面板看不到也管不了,不该在这里报"待重启"。
+//
+// LE 模式还要看域名:main.go 强制 cfg.ServerCN = cfg.Domain(LE 模式
+// 无条件),所以 s.ServerCN 就是启动时用的域名 —— 域名改了同样要重启。
+func certRestartRequired(s *Server, cfg certStatusData, liveMode string) bool {
+	if cfg.source != "panelstate" {
+		return false
+	}
+	if cfg.mode != liveMode {
+		return true
+	}
+	if liveMode == "letsencrypt" && cfg.domain != "" && cfg.domain != s.ServerCN {
+		return true
+	}
+	return false
+}
+
+// subnetPoolDrift 判断「面板配的 IP 段」与「swanctl 运行态在用的段」是否不一致。
+//
+// 典型场景:面板保存 subnet.conf → 写文件成功 → swanctl --load-all 失败
+// (charon 正忙)→ 接口返回 500,但 panelstate 不会回滚,于是两边对不上。
+// 这种情况下 IP 池卡片必须报「未生效」,不能报绿 —— 绿代表"配置已落地"。
+//
+// 有一侧为空不算漂移(那是"根本没读到运行态",由模板单独处理成 warn)。
+func subnetPoolDrift(cfg subnetStatusData) bool {
+	if !cfg.configured {
+		return false
+	}
+	if cfg.ipv4 != "" && cfg.currentIPv4 != "" && cfg.ipv4 != cfg.currentIPv4 {
+		return true
+	}
+	if cfg.ipv6 != "" && cfg.currentIPv6 != "" && cfg.ipv6 != cfg.currentIPv6 {
+		return true
+	}
+	return false
 }
 
 // subnetStatusData v2.86-PR13.2:homeData 用的 subnet 配置状态集合。
@@ -623,13 +780,43 @@ func loadAliyunStatus(s *Server) (bool, string) {
 // dev 模式(cfg.DataDir 非 /data)→ 检测 <DataDir>/panel-state/INITIAL_ADMIN_PASSWORD.txt,
 // 这样 dev 本地开发也能验证横幅效果。
 func loadIsDefaultPassword(s *Server) bool {
+	pwPath := initialPasswordPath(s)
+	_, err := os.Stat(pwPath)
+	return err == nil
+}
+
+// initialPasswordPath 返回 INITIAL_ADMIN_PASSWORD.txt 的绝对路径。
+//
+// dev 模式(cfg.DataDir 非 /data)→ <DataDir>/panel-state/INITIAL_ADMIN_PASSWORD.txt,
+// 这样 dev 本地开发也能验证横幅效果。
+//
+// 生产 → panelstate.Dir(= /data/panel-state)。
+func initialPasswordPath(s *Server) string {
 	pwDir := panelstate.Dir
 	if s.DataDir != "/data" {
 		pwDir = filepath.Join(s.DataDir, "panel-state")
 	}
-	pwPath := filepath.Join(pwDir, "INITIAL_ADMIN_PASSWORD.txt")
-	_, err := os.Stat(pwPath)
-	return err == nil
+	return filepath.Join(pwDir, "INITIAL_ADMIN_PASSWORD.txt")
+}
+
+// clearInitialPasswordFile 删除 INITIAL_ADMIN_PASSWORD.txt。
+//
+// 调用时机：admin 改密成功后（handleAccountChangePassword）。
+// 作用：让首页「管理口令」卡片从「默认」翻成「已改」，
+// 同时让顶部默认密码横幅消失 —— 两者都靠这个文件是否存在来判断。
+//
+// 失败只记 warn 不中断：密码已经落库，改密不可能因为删一个文件失败而回滚。
+func (s *Server) clearInitialPasswordFile() {
+	pwPath := initialPasswordPath(s)
+	if err := os.Remove(pwPath); err != nil {
+		if !os.IsNotExist(err) {
+			s.Logger.Warn("account change password: remove INITIAL_ADMIN_PASSWORD.txt failed",
+				"path", pwPath, "err", err)
+		}
+		return
+	}
+	s.Logger.Info("account change password: removed INITIAL_ADMIN_PASSWORD.txt",
+		"path", pwPath)
 }
 
 // 仅用于 LE 告警场景,负数返回 "未知"(对应"证书过期/无效")。
