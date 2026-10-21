@@ -184,10 +184,21 @@ UI 面板联动：
 | L2 模式下 UI 改参数 | ✅ 保存 / 生效 / 重启保留全通过 |
 | compose → 容器 env → UI 展示 | ✅ 三者完全一致（ipvlan / macvlan 各验一次） |
 
-> 已知差异：63 上跑的是 `ghcr.io/rewind2026/ikev2-panel-v2:latest`（v2.89 镜像），
-> Go 侧的 `deployOnlyParamList()` 新增行尚未进镜像，所以 UI「部署级参数」区
-> **暂时看不到** `IKEV2_L2_IPV4`。容器 env 里该变量已正确存在，
-> v2.91 镜像发布后 UI 即会显示。
+**v2.91 正式镜像复验**（`ghcr.io/rewind2026/ikev2-panel-v2:v2.91`，63 上真实拉取）：
+
+| 用例 | 结果 |
+|------|------|
+| 镜像内 `/etc/ikev2-panel-version` | ✅ `2.91` |
+| ipvlan + 固定 `.77` | ✅ 容器 IP = `.77`，env / 别名 / 日志 / 路由全对 |
+| macvlan + 固定 `.78` | ✅ 容器 IP = `.78`，出网 `http=200` |
+| host 模式 | ✅ `Up`，`restarts=0`，面板 302 → 登录页 |
+| `.env` 覆盖固定 IP | ✅ `environment` 与 `networks` **两段同步**取 `.88` |
+| up.sh 冲突拦截（固定 = 宿主 `.63`） | ✅ 拒绝启动，容器未被重建，宿主网络完好 |
+| **UI「部署级参数」区显示 `IKEV2_L2_IPV4`** | ✅ `192.168.50.77`（此前用 v2.89 镜像时该项不存在） |
+
+> 补充：v2.89 镜像上做的 UI 验证里，部署级参数区**看不到** `IKEV2_L2_IPV4` ——
+> 因为 Go 侧 `deployOnlyParamList()` 的新增行未进镜像。v2.91 镜像已包含，
+> 该项现已在 UI 上正常显示（值与容器 env 一致）。
 
 ### 安全约束（本次未触碰）
 
