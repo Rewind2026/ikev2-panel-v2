@@ -145,6 +145,65 @@ vici load-creds (initial) ok
 
 ---
 
+## 实机验证
+
+192.168.50.63（群晖 NAS，Docker 28.5.2 / Compose v2.40.3），
+**ipvlan 模式 + 固定容器 IP `192.168.50.66`**，
+正式镜像 `ghcr.io/rewind2026/ikev2-panel-v2:v2.93`。
+
+### 一、conn 注册：v2.92 → v2.93
+
+启动日志里第四步链条真实重现，v2.93 补上了最后一步：
+
+```
+[entrypoint] WARN: swanctl --load-all failed (will retry after Go installs certs)
+level=WARN msg="swanctl --load-all at startup" err="... loaded 0 of 1 connections, 1 failed to load ..."
+level=INFO msg="swanctl --load-all after cert install ok (conns registered)"   ← v2.93 新增
+```
+
+| 检查 | v2.92 | v2.93 |
+|------|--------|--------|
+| `swanctl --list-conns` | **空** | `ikev2-rw: IKEv2, no reauthentication, rekeying every 86400s, dpd delay 30s` → `conn_count=1` |
+| 客户端能否建隧道 | **不能** | 能 |
+
+### 二、8 张卡片逐张对照（真实渲染 HTML，非源码推断）
+
+抓首页 HTML 解析出的 `data-state` + 渲染值，与命令行交叉核对：
+
+| # | 卡片 | 判据 | 63 实机显示 | state | 交叉核对 |
+|---|------|------|-------------|-------|----------|
+| 1 | 管理口令 | `INITIAL_ADMIN_PASSWORD.txt` 是否存在 | 已改 | 🟢 ok | 文件已删除，顶部横幅同时消失 |
+| 2 | IP 池 | 运行态 CIDR / 漂移 | `10.10.0.0/24` | 🟢 ok | `--list-pools` → `ikev2-pool 10.10.0.1 0/0/254`；`swanctl.conf` → `addrs = 10.10.0.0/24, fd00:1::/64` |
+| 3 | 服务端证书 | `CertLiveMode` + `CertInPlace` | 自签 | 🟡 warn | `server.cert.pem` 在位，`CN=vpn.example.com`，`notAfter=Oct 18 05:06:01 2036`；`le/fullchain.pem` 不存在 |
+| 4 | LE 续签 | 仅 LE 模式 | 不适用 | ⚪ off | 运行态是自签 → 本就不适用 |
+| 5 | 阿里云凭证 | `AliyunConfigured` | 已配置 | 🟢 ok | `panel-state/aliyun.creds` 存在 |
+| 6 | DNS 同步 | ready / failed / enabled | 未就绪 | 🟡 warn | 凭证有但 `ALIYUN_DOMAIN=` 为空 → 确实跑不起来 |
+| 7 | IKE_SA | 超时 / conn 未加载 / N 在线 / 0 在线 | 0 在线 | ⚪ off | conn 已注册（`conn_count=1`）且活跃 SA 为 0 → 真的只是没人连 |
+| 8 | 面板设置 | 8 个 `Set*` 计数 | 4/8 | 🟡 warn | 与面板设置页实际未设置的项一致 |
+
+### 三、改密端到端（真实 HTTP 提交流程）
+
+| 步骤 | 预期 | 实测 |
+|------|------|------|
+| 改密前「管理口令」卡 | 默认 | 🔴 默认 + 顶部横幅在 |
+| `POST /api/account/password`（旧密码 + 新密码 + 确认） | 200 | **200** |
+| 改密后 `INITIAL_ADMIN_PASSWORD.txt` | 被删 | **已删除** |
+| 改密后「管理口令」卡 | 已改 | **已改** + 🟢 ok |
+| 改密后顶部默认密码横幅 | 消失 | **消失** |
+
+### 四、63 最终状态
+
+| 项 | 值 |
+|----|----|
+| 镜像 | `ghcr.io/rewind2026/ikev2-panel-v2:v2.93` |
+| 网络 | ipvlan，固定 IP `192.168.50.66` |
+| `swanctl --list-conns` | `conn_count=1` |
+| `INITIAL_ADMIN_PASSWORD.txt` | 已删除（v2.92 遗留的过期明文副本，内含已失效的初始口令） |
+| admin `password_hash` | 已还原为原值（bcrypt cost=12） |
+| `audit_log` 行数 | 3（与测试前一致，测试产生的行已清理） |
+
+---
+
 ## 回归测试
 
 新增 **19 条**（全部通过）：
