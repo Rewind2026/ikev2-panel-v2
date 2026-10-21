@@ -817,10 +817,41 @@ docker logs ikev2-panel 2>&1 | grep 'static ipv4'
 
 浏览器侧就表现为「TCP 握上了、TLS 握手立刻被重置」。
 
-**为什么 host 模式没事**：host 模式下容器共享宿主 netns，宿主有
-`ip rule 10: from <宿主IP> lookup route_ens18` 这条**优先级更高**的规则，
-源地址是宿主 IP 的流量走 `route_ens18` 表，压根不进 `table 220`。
-L2 模式容器是独立 netns，没有这条规则，只能靠 `table 220` 自己带直连路由。
+**为什么 host 模式没事**：host 模式下容器共享宿主 netns，宿主 netns 里有这条
+**优先级更高**的规则（`10` < `220`，先命中）：
+
+```
+0:      from all lookup local
+10:     from 192.168.50.63 lookup 10 proto static   ← 源地址是宿主 IP，走这张表
+220:    from all lookup 220                          ← charon 装的
+32766:  from all lookup main
+```
+
+源地址是宿主 IP（`192.168.50.63`）的回包命中规则 10，走 `10` 表（直连 ens18），
+**压根不进 `table 220`**，所以绕网关的问题不会发生。
+
+⚠️ 但要注意：host 模式的 `table 220` 里**同样只有 default**（实测确认）。
+它只是被规则 10 挡住了，**不是不存在**。如果哪天宿主上这条
+`from <宿主IP> lookup <表>` 规则没了（比如换了别的网络管理工具、或者
+宿主是多网卡/多 IP 场景），host 模式也会中招。
+
+**L2 模式（macvlan / ipvlan）为什么必中**：容器是**独立 netns**，
+netns 里只有 charon 装的那条 `220: from all lookup 220`，
+**没有任何"源地址是宿主 IP"的高优先级规则**。容器的回包源地址是
+容器自己的 IP（macvlan/ipvlan 各自的固定 IP），匹配不上任何特殊规则，
+于是直接落进 `table 220` —— 而那里只有 default。
+
+**⚠️ macvlan 和 ipvlan 都会中招，两者没有区别。** 实测（192.168.50.63）：
+
+| 模式 | 修复前外部访问 | 抓包回包源 MAC |
+|------|---------------|---------------|
+| host | **正常** | `bc:24:11:8c:32:36`（宿主自己的） |
+| macvlan（容器 MAC `fa:ed:67:c1:97:9d`） | **失败**，RST 计数 1 | `04:42:1a:5f:60:70`（**网关的**） |
+| ipvlan | **失败**，RST 计数 1 | `04:42:1a:5f:60:70`（**网关的**） |
+
+macvlan 失败的抓包和 ipvlan 一模一样：SYN-ACK 的源 MAC 是网关的，
+不是容器自己的 MAC。**容器有没有独立 MAC 跟这个问题无关** ——
+问题出在路由表，不在二层。
 
 **确认是不是这个问题**（两条命令就够）：
 
@@ -858,6 +889,8 @@ docker exec ikev2-panel ip route replace 192.168.50.0/24 dev eth0 scope link tab
 ```
 
 ⚠️ 网段要换成你自己 `IKEV2_L2_SUBNET` 的值。
+（host 模式一般不需要这条 —— 它被规则 10 挡住了；但如果你的宿主没有那条
+`from <宿主IP> lookup <表>` 规则，同样要加。）
 
 **升级到 v2.92 后** 这个问题自动消失，不需要任何手工操作。
 
