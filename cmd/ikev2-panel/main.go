@@ -350,18 +350,48 @@ func main() {
 
 	// ---------- 自签模式证书安装到 swanctl（LE 模式证书由 entrypoint §7.5 装好）----------
 	// 注意：scm 已在 store 打开后初始化（swanctl 用户密码同步见那段代码）。
-	// 这里只补 self-signed 模式的 cert 安装 + load-creds。
+	// 这里只补 self-signed 模式的 cert 安装 + 加载。
 	if cfg.CertMode == "self-signed" && includeCA {
 		if _, err := os.Stat("/etc/swanctl"); err == nil {
 			if err := installCertsToSwanctl(cfg.DataDir); err != nil {
 				logger.Error("install certs to swanctl", "err", err)
 				os.Exit(1)
 			}
-			if err := scm.LoadCreds(ctx); err != nil {
-				logger.Error("vici load-creds (initial)", "err", err)
-				// 不致命：用户第一次添加时也会触发
+			// v2.93:这里必须 load-**all**,不能只 load-creds。
+			//
+			// 背景(192.168.50.63 实机日志):
+			//   [entrypoint] WARN: swanctl --load-all failed (will retry after Go installs certs)
+			//   swanctl --load-all failed: ... loading certs certificate
+			//     '/etc/swanctl/x509/server.cert.pem' failed: No such file or directory
+			//     loaded 0 of 1 connections, 1 failed to load
+			//   ...
+			//   vici load-creds (initial) ok
+			//
+			// 展开说:
+			//   1. entrypoint §7 的第一次 load-all 发生在证书装好之前 → conn 加载失败
+			//      (conn 引用 send_cert=always 的服务端证书,证书不在 → 连 conn 都注册不进去)
+			//   2. Go 进程启动时的 scm.ReloadAll(本文件上方)同样失败 —— 那时证书还没装
+			//   3. entrypoint §7.6 的"证书装好后补一次 load-all"**只在 LE 模式跑**
+			//      (SWAN_X509 只在 §7.5 的 LE 分支里赋值),自签模式整段跳过
+			//   4. Go 进程原来只调 load-creds —— 它只装证书,**不装 conn**
+			//   ⇒ 自签模式下 conn 永远注册不进 charon:swanctl --list-conns 是空的。
+			//     之后只有在"新增/启用用户"触发写 conf.d + reload 时才会顺带把 conn 装上;
+			//     全新部署(一个用户都没有)就一直空着 → 客户端连不上。
+			//
+			// 修法:证书装好后补一次完整的 ReloadAll(--load-all = conns + creds +
+			// authorities + pools),把 conn 真正注册进去。失败不致命,退一步
+			// 至少 load-creds 把证书装上,conn 等下一次 reload(加/启用用户)补。
+			if err := scm.ReloadAll(ctx); err != nil {
+				logger.Warn("swanctl --load-all after cert install", "err", err,
+					"hint", "conn may not be registered; next user add/enable will reload")
+				if err := scm.LoadCreds(ctx); err != nil {
+					logger.Error("vici load-creds (initial)", "err", err)
+					// 不致命：用户第一次添加时也会触发
+				} else {
+					logger.Info("vici load-creds (initial) ok")
+				}
 			} else {
-				logger.Info("vici load-creds (initial) ok")
+				logger.Info("swanctl --load-all after cert install ok (conns registered)")
 			}
 		}
 	}
