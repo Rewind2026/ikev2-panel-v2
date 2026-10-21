@@ -175,19 +175,69 @@ ip link add link ens18 name mvtest0 type macvlan mode bridge
 | **两个 project 加入同一条 macvlan 网络** | ✅ 都 running，IP `192.168.71.2` / `.3`，MAC 各不相同 |
 | `compose down` | ✅ 共享网络仍在，另一个 project 的容器不受影响 |
 
-### 三、真实面板容器
+### 三、真实面板容器（24 条断言全绿）
 
 正式镜像 `ghcr.io/rewind2026/ikev2-panel-v2:v2.96` 部署到 63，
-**ipvlan 模式**（生产配置，固定容器 IP `192.168.50.66`）：
+**ipvlan 模式**（生产配置：parent `ens18` / 子网 `192.168.50.0/24` /
+固定容器 IP `192.168.50.66`）。
 
-- 升级前网络叫 `vpn_ikev2-l2`，升级后默认名为 `ipvlan` ——
-  `up.sh` **自动接管**了原网络（parent + 子网 + 模式全等），升级零操作；
-- 面板首页、登录、证书卡、IP 段卡全部正常；
-- 容器仍拿到 `192.168.50.66` 与 v6 GUA。
+**升级路径零操作** —— 这是本次最关键的验证点：
+
+| 项 | 升级前 | 升级后 |
+|----|--------|--------|
+| 镜像 | `:latest` | `:v2.96`（程序自报 `version=2.96`） |
+| 网络名 | `vpn_ikev2-l2` | `vpn_ikev2-l2`（**未改名**） |
+| 是否新建了 `ipvlan` 网络 | —— | **没有**（自动接管了旧网络） |
+| 容器 IP | `192.168.50.66` | `192.168.50.66` |
+| v6 GUA | `fd56:e94c:f97f::2` | `fd56:e94c:f97f::2` + 公网 `2408:832e:8a4:5be0:…` |
+| 数据卷 | `ikev2-panel-data` | `ikev2-panel-data`（老库复用） |
+
+`up.sh` 的输出：
+
+```
+[up.sh] ! 网络模式: ipvlan（parent=ens18 subnet=192.168.50.0/24 gateway=192.168.50.1）
+[up.sh] ! 容器固定 IPv4: 192.168.50.66
+[up.sh] ✓ 宿主机上已有兼容的 ipvlan 网络 'vpn_ikev2-l2'（parent/子网/模式一致）→ 直接复用
+[up.sh] !   提示：可用 IKEV2_L2_NETWORK_NAME=vpn_ikev2-l2 显式指定，避免以后误判
+[up.sh] running: docker compose -f docker-compose.ipvlan.yml up -d
+```
+
+**面板功能实测**（容器内 `openssl s_client` 发裸 HTTP，24 条断言全绿）：
+
+| 检查 | 结果 |
+|------|------|
+| `GET /login` | ✅ 200，带 CSP 头，返回 HTML |
+| `GET /` | ✅ 未登录跳登录页 |
+| `GET /healthz` / `GET /readyz` | ✅ 200 |
+| `GET /api/cert/status` | ✅ 正常鉴权响应（不是 500） |
+| `GET /login` 经容器**自身 IP** | ✅ 200（证明监听在 `0.0.0.0`） |
+| `swanctl --load-all` | ✅ 成功，连接已注册 |
+| `swanctl --list-conns` | ✅ 能列出 `ikev2` 连接 |
+| 老数据卷复用 | ✅ `panel.db` 在位 |
+| 旧 IP 段配置读回 | ✅ `[subnet.conf] applied: ipv4=10.10.0.0/24`（`panel state wins`） |
+| 容器日志 | ✅ 无 `level=ERROR`（仅 1 条自签证书生成前的瞬态 WARN） |
 
 > 另：63 的 `ens18` 不支持 macvlan 设备（宿主限制，见上文「被纠正的误判」），
 > 所以 macvlan 的实机验证在 `docker0` 上做 —— macvlan 在 `docker0` 上能正常
 > 建设备，共享能力与 parent 无关。
+
+### 四、一个既有限制（不是本次回归）：宿主访问不到容器 IP
+
+宿主访问 `192.168.50.66:8443` 报 `No route to host`（ARP `FAILED`）。
+**对照实验证明与 v2.96 无关** —— 同一网络上的 v2.94 容器**同样**不可达：
+
+| 容器 | 镜像 | 宿主 → 容器 IP |
+|------|------|---------------|
+| `cmp94` | `:v2.94` | `No route to host` |
+| `cmp96` | `:v2.96` | `No route to host` |
+| `ikev2-panel` | `:v2.96` | `No route to host` |
+
+这是 **ipvlan 模式本身**的特性：宿主自己的 `192.168.50.63` 与容器 IP 之间
+ARP 不通（`ip neigh show 192.168.50.66` → `FAILED`）。**IPv6 同样**
+（邻居发现 `FAILED`），但容器确实拿到了公网 GUA，外部客户端走 IPv6 可达。
+
+> 排查这类问题时**先做对照实验**（同网络、同 parent，换个镜像版本起临时容器），
+> 否则很容易把宿主的既有限制误判成新版本的回归。
 
 ---
 

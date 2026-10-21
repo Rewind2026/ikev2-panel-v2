@@ -119,6 +119,14 @@ networks:
   - **两个 project 的容器加入同一条 macvlan 网络**：都 running，
     IP `192.168.71.2` / `.3`，MAC 各不相同
   - `compose down` 后共享网络仍在，另一个 project 的容器不受影响
+- **真实面板容器**（正式镜像 `:v2.96` 部署到 63，ipvlan 生产配置）**24 条断言全绿**：
+  - **升级零操作** —— 容器仍在旧网络 `vpn_ikev2-l2` 上（**未改名**），
+    **没有**新建 `ipvlan` 网络；`up.sh` 自动接管了旧网络
+  - 容器 IP 仍是 `192.168.50.66`，v6 GUA（`fd56:…` + 公网 `2408:…`）都在
+  - 面板 `/login` 200、`/healthz` 200、`/readyz` 200、`/api/cert/status` 鉴权正常
+  - `swanctl --load-all` 成功、连接已注册
+  - 老数据卷复用（`panel.db` 在位），旧 IP 段配置读回（`10.10.0.0/24`）
+  - 容器日志无 `level=ERROR`
 - **回归测试**：`tests/network_mode_test.sh` 的 NM-62 / NM-63 泛化到两种驱动，
   全量 **180 passed / 0 failed**。
 
