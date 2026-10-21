@@ -1777,6 +1777,32 @@ docker compose exec ikev2-panel swanctl --list-conns
 docker compose exec ikev2-panel swanctl --list-sas
 ```
 
+**顺带核对「登录本身通不通」**（管理口令卡是入口，登录不通时先排除它）：
+
+```bash
+# 登录路由是 POST /login，不是 POST /api/login
+# 错误口令应返回 401；打 /api/login 会拿到 404 —— 那是路由不存在，不是「密码错」
+docker compose exec ikev2-panel curl -sk -o /dev/null -w '%{http_code}\n' \
+  -X POST https://127.0.0.1:8443/login -d 'username=admin' -d 'password=wrong'
+
+# 库里的 hash 是不是合法 bcrypt（长度 60 / cost 12）
+docker compose exec ikev2-panel sqlite3 /data/panel.db \
+  "SELECT length(password_hash), substr(password_hash,1,7) FROM admins;"
+```
+
+> 排障时若要直接改 `password_hash`，**SQL 必须走文件**：
+> bcrypt hash 里的 `$` 会被 `sh -c` 的双引号层当变量展开（`$2a$12$…` → 变成
+> `a.mbMAn.qZH…`），写进库的是垃圾串，登录直接失效。
+> ```bash
+> # 容器内
+> cat > /root/_q.sql <<'EOF'
+> UPDATE admins SET password_hash='$2a$12$……';
+> EOF
+> sqlite3 /data/panel.db < /root/_q.sql
+> ```
+> 注意 `docker cp` 的目标路径用 `/root/`，不要用 `/tmp/`（容器里 `/tmp` 有特殊处理，
+> 复制会静默失败）。
+
 **几个容易误判的点**：
 
 - **「IP 池」显示「未生效」但看着配置是对的** → 面板配的段和 `swanctl` 里在用的段
