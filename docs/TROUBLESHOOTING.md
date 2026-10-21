@@ -360,15 +360,26 @@ ip -4 addr show <父接口>          # 真实子网 + 前缀
 ```
 
 > ✅ v2.89 起，两份 L2 compose 的 `environment:` 段也改用 `:?`（必填）。
-> 缺变量会在 `docker compose up` 阶段**直接失败**并指名变量：
+> 缺变量会在 `docker compose up` 阶段**直接失败**并指名变量，**且报错自带查法**：
 >
 > ```
-> error while interpolating services.ikev2-panel.environment.IKEV2_L2_PARENT:
-> required variable IKEV2_L2_PARENT is missing a value: 必填：宿主父接口名，如 eth0
+> error while interpolating services.ikev2-panel.environment.IKEV2_L2_SUBNET:
+> required variable IKEV2_L2_SUBNET is missing a value: 必填=宿主所在 IPv4 子网 CIDR(只支持 v4)。
+> 查法: ip -4 addr show <上面的dev名> → inet 那行的地址,但要把主机位归零(192.168.50.63/24 → 192.168.50.0/24)
 > ```
 >
 > 不用再等容器起来从刷屏日志里反推。host 模式那份保持 `:-`（host 根本不用
 > 这三个变量，写成必填会让所有 host 部署起不来）。
+
+> �� 报错文本是对面板用户**唯一能触达**的排查通道。1Panel / 宝塔 / dpanel
+> 的 compose 编排执行的是纯 `docker compose up`，不会调 `scripts/up.sh`，
+> 所以指望不上任何脚本替用户自动填 —— 能指望的只有这行报错本身。
+> 这就是 `:?` 消息里要写「查法」而不只是「必填：xxx」的原因。
+
+> ⚠️ 别自己把 `networks:` 段的 `parent` / `subnet` / `gateway` 改成 `:-<默认值>`
+> 来「让它先起得来」。那会重新制造上面那个静默故障（compose 插值通过 →
+> 容器创建成功 → 容器里三个变量是空串 → entrypoint `exit 12` 无限重启），
+> 而根因藏在两段插值语法的差异里，日志上完全看不出来。缺变量就补变量。
 
 #### 1.3.3 规格表文件缺失
 

@@ -602,6 +602,71 @@ for v in IKEV2_L2_PARENT IKEV2_L2_SUBNET IKEV2_L2_GATEWAY; do
   fi
 done
 
+# ---------- NM-58 `:?` 的报错文案必须自带「查法」，不能只写「必填」 ----------
+#
+# 背景：这三个值都能从宿主直接查到，用户唯一需要的是**去哪查**。
+# 而报错文本是对「面板用户」唯一能触达的排查通道 ——
+# 1Panel / 宝塔 / dpanel 的 compose 编排执行的是纯 `docker compose up`，
+# 不会跑 scripts/up.sh，所以指望不上任何脚本替用户自动填。
+# 能指望的只有这行报错本身。只写「必填：宿主父接口名，如 eth0」的话，
+# 拿到报错的人还得再去翻文档；带上查法则是当场就能照着敲、照着填。
+#
+# 断言口径：L2 两份里每一处 `:?` 消息都必须含「查法」二字，
+# 且 networks 段与 environment 段的文案必须**逐字一致**（同一变量的两条
+# 插值路径给出同一条排查指引，用户在哪一段看到报错都能照着填）。
+for p in "$MACV" "$IPVL"; do
+  f="$(basename "$p")"
+  for v in IKEV2_L2_PARENT IKEV2_L2_SUBNET IKEV2_L2_GATEWAY; do
+    # 模式用单引号 + 变量拼接，不要写成 "...\$\{..." ——
+    # bash 在双引号里会把 `\$` 吃掉成 `$`，`$` 在 ERE 中是行尾锚点，
+    # 于是模式静默失配（实测 count=0，报「应为 2」但看不出模式写错了）。
+    # 同理 `\{` 也无需转义，`\{` 在 ERE 里是区间量词的起始符，不是字面花括号。
+    needle='${'"$v"':?'
+    n=$(grep -F "$needle" "$p" | grep -c '查法')
+    if [ "$n" -ge 2 ]; then
+      ok "NM-58 ${f} ${v} 两处 :? 报错均自带查法"
+    else
+      bad "NM-58 ${f} ${v} 两处 :? 报错均自带查法" "含查法的 :? 行数=${n}（应为 2）"
+    fi
+  done
+  # 逐字一致：抽 networks 段与 environment 段各自的 :? 消息比对。
+  # 用 awk 的 index()/substr() 按字面量定位，不用 grep -E ——
+  # 消息里同时有 $ { } ? 四种正则元字符，转义层级一多就容易静默失配。
+  # 截到消息自带的收尾 `}` 为止：两段现在**都**被双引号包着，
+  # awk 从 `${` 起截到 `}` 止，外层引号自然被剥掉。
+  for v in IKEV2_L2_PARENT IKEV2_L2_SUBNET IKEV2_L2_GATEWAY; do
+    msgs="$(awk -v pat='${'"$v"':?' 'index($0,pat){
+      s = index($0, pat); e = index(substr($0, s), "}");
+      print substr($0, s, e - 1)
+    }' "$p")"
+    envmsg="$(printf '%s\n' "$msgs" | sed -n 1p)"
+    netmsg="$(printf '%s\n' "$msgs" | sed -n 2p)"
+    if [ -n "$envmsg" ] && [ "$envmsg" = "$netmsg" ]; then
+      ok "NM-58 ${f} ${v} 两段文案一致"
+    else
+      bad "NM-58 ${f} ${v} 两段文案一致" "env=${envmsg} / net=${netmsg}"
+    fi
+  done
+
+  # ---------- NM-59 networks 段的三处 :? 必须加双引号 ----------
+  #
+  # 真实故障（本机没装 Docker，靠 63 实测才发现）：
+  # networks 段的 parent/subnet/gateway 原本是**裸标量**，
+  # 而 `:?` 消息里有 ASCII「冒号+空格」（如「查法: ip ...」）——
+  # YAML 裸标量里出现 `: ` 会被当成新的映射键，直接解析失败：
+  #   yaml: line 492: mapping values are not allowed in this context
+  # 这比缺变量报错还早，用户连「哪个变量缺了」都看不到。
+  # 加双引号后 compose 照常插值，报错文案就能自由用 ASCII 标点。
+  for key in 'parent: ' 'subnet: ' 'gateway: '; do
+    raw="$(grep -E "^[[:space:]]+(- )?${key}" "$p" | grep -F ':?' | head -1)"
+    if printf '%s' "$raw" | grep -qE ":[[:space:]]+\"\\\$\{"; then
+      ok "NM-59 ${f} ${key}加双引号包裹"
+    else
+      bad "NM-59 ${f} ${key}加双引号包裹" "got: ${raw}"
+    fi
+  done
+done
+
 # ---------- 非法模式 ----------
 validate_rc "MODE=foobar"
 if [ "$RC" -ne 0 ]; then

@@ -315,19 +315,34 @@ services:
       #
       # 两段都写成 `:?` 之后，缺变量在 `docker compose up` 阶段就直接失败：
       #   error while interpolating services.ikev2-panel.environment.IKEV2_L2_PARENT:
-      #   required variable IKEV2_L2_PARENT is missing a value: 必填：宿主父接口名，如 eth0
+      #   required variable IKEV2_L2_PARENT is missing a value: 必填=宿主父接口名…
       # 不用等容器起来再从刷屏日志里反推。
       #
       # host 模式那份（docker-compose.yml）必须保持 `:-` —— host 模式根本
       # 不用这三个变量，写成 `:?` 会让所有 host 部署直接起不来。
       #
+      # ---- 为什么 `:?` 后面要写「查法」而不只是「必填：xxx」----
+      #
+      # 这三个值都能从宿主直接查到，用户唯一需要的是**去哪查**。
+      # 报错文本是对「面板用户」唯一能触达的排查通道：1Panel / 宝塔 / dpanel
+      # 的 compose 编排不会跑 scripts/up.sh（那里面本来可以做自动探测），
+      # 面板点「启动」执行的就是纯 `docker compose up` —— 所以不能指望
+      # 任何脚本替他们填好，能指望的只有这行报错本身。
+      #
+      # 只写「必填：宿主父接口名，如 eth0」的话，拿到报错的人还得再去翻文档；
+      # 带上查法则是当场就能照着敲、照着填。
+      #
+      # 注意 `:?` 的消息不支持换行（会破坏 YAML 标量），所以实际是一整行长文本，
+      # 日志里会被折行 —— 这是可接受的代价，比让人去翻文档强。
+      # 另有 .env.example 第 70/80/84 行给同一组查法，可交叉参考。
+      #
       # 宿主父接口名。ipvlan 虚拟网卡挂在它上面。不能填 lo。
-      IKEV2_L2_PARENT: "${IKEV2_L2_PARENT:?必填：宿主父接口名，如 eth0}"
+      IKEV2_L2_PARENT: "${IKEV2_L2_PARENT:?必填=宿主父接口名(如 eth0,不能填 lo)。查法: ip -o -4 route show default → dev 后面的那个词}"
       # 宿主所在 IPv4 子网（CIDR）。**只支持 IPv4** —— IPv6 走 RA/SLAAC。
       # 若填 v6 子网，Docker IPAM 会接管 IPv6 并默认分配 ULA(fd00::/8)，公网不可达。
-      IKEV2_L2_SUBNET: "${IKEV2_L2_SUBNET:?必填：宿主所在 IPv4 子网，如 203.0.113.0/24}"
+      IKEV2_L2_SUBNET: "${IKEV2_L2_SUBNET:?必填=宿主所在 IPv4 子网 CIDR(只支持 v4)。查法: ip -4 addr show <上面的dev名> → inet 那行的地址,但要把主机位归零(192.168.50.63/24 → 192.168.50.0/24)}"
       # 该子网的宿主网关（必须是宿主自己的网关，容器经它出网）。
-      IKEV2_L2_GATEWAY: "${IKEV2_L2_GATEWAY:?必填：该子网的宿主网关，必须落在上面的子网内}"
+      IKEV2_L2_GATEWAY: "${IKEV2_L2_GATEWAY:?必填=该子网的宿主网关(必须落在上面的 SUBNET 内)。查法: ip -o -4 route show default → via 后面的那个 IP}"
       # ipvlan 专属：l2(默认，强推荐) | l3 | l3s。非 l2 会丢弃广播/组播
       # （只打 WARN，不拒绝），IKEv2 多用户并发场景不友好。
       IKEV2_IPVLAN_MODE: "${IKEV2_IPVLAN_MODE:-}"
@@ -474,7 +489,12 @@ networks:
     driver: ipvlan
     driver_opts:
       # 宿主父接口。ipvlan 虚拟网卡挂在它上面。
-      parent: ${IKEV2_L2_PARENT:?必填：宿主父接口名，如 eth0}
+      # networks 段这三行必须**加双引号** —— 与 environment 段不同，这里原本
+      # 是裸标量。`:?` 消息里有 ASCII「冒号+空格」（如「查法: ip ...」），
+      # 裸标量里出现 `: ` 会被 YAML 当成新的映射键，报
+      #   yaml: line N: mapping values are not allowed in this context
+      # 加引号后 compose 照常插值，报错文案可以自由用 ASCII 标点。
+      parent: "${IKEV2_L2_PARENT:?必填=宿主父接口名(如 eth0,不能填 lo)。查法: ip -o -4 route show default → dev 后面的那个词}"
       # l2(默认，强推荐) | l3 | l3s
       # l3 / l3s 丢弃广播与组播，IKEv2 多用户并发不友好（只打 WARN，不拒绝）。
       ipvlan_mode: ${IKEV2_IPVLAN_MODE:-l2}
@@ -484,8 +504,8 @@ networks:
     # Docker 会接管 IPv6 并默认分配 ULA(fd00::/8)，公网不可达。
     ipam:
       config:
-        - subnet: ${IKEV2_L2_SUBNET:?必填：宿主所在 IPv4 子网，如 203.0.113.0/24}
-          gateway: ${IKEV2_L2_GATEWAY:?必填：该子网的宿主网关，必须落在上面的子网内}
+        - subnet: "${IKEV2_L2_SUBNET:?必填=宿主所在 IPv4 子网 CIDR(只支持 v4)。查法: ip -4 addr show <上面的dev名> → inet 那行的地址,但要把主机位归零(192.168.50.63/24 → 192.168.50.0/24)}"
+          gateway: "${IKEV2_L2_GATEWAY:?必填=该子网的宿主网关(必须落在上面的 SUBNET 内)。查法: ip -o -4 route show default → via 后面的那个 IP}"
     # IPv6 不用 IPAM 静态下发，交给上游路由器的 RA + 容器 SLAAC。
     #
     # 但必须显式打开 enable_ipv6，否则 Docker 会在端点建好时把

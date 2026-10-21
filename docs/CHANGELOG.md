@@ -18,7 +18,7 @@ hotfix。升级前请重点看目标版本的「⚠️ 行为变更」。
 
 ---
 
-## v2.89（2026-10-20）— L2 模式必填变量：compose 插值语义对称化
+## v2.89（2026-10-20）— L2 模式必填变量：compose 插值语义对称化 + 报错自带查法
 
 修一个**部署期静默故障**：容器起得来、日志反复刷「缺少必填变量」、无限重启，
 但日志上完全看不出真实原因。
@@ -85,20 +85,53 @@ required variable IKEV2_L2_PARENT is missing a value: 必填：宿主父接口�
 变量（entrypoint 对 host 分支只打 WARN 不拦截），写成 `:?` 会让所有 host
 部署在 up 阶段就失败。
 
+### `:?` 的报错文本自带「查法」
+
+上面的报错原本只写到「必填：宿主所在 IPv4 子网，如 203.0.113.0/24」就结束了。
+拿到报错的人还得再去翻文档才知道那三个值怎么查。这次把查法直接写进报错：
+
+```
+error while interpolating services.ikev2-panel.environment.IKEV2_L2_SUBNET:
+required variable IKEV2_L2_SUBNET is missing a value: 必填=宿主所在 IPv4 子网 CIDR(只支持 v4)。
+查法: ip -4 addr show <上面的dev名> → inet 那行的地址,但要把主机位归零(192.168.50.63/24 → 192.168.50.0/24)
+```
+
+**为什么值得单独做**：这三个值都能从宿主直接查到，用户唯一需要的信息是
+**去哪查**。而报错文本是对「面板用户」唯一能触达的排查通道 ——
+1Panel / 宝塔 / dpanel 的 compose 编排执行的是纯 `docker compose up`，
+**不会调 `scripts/up.sh`**（那里本来可以做自动探测），所以指望不上任何脚本
+替用户填好。`scripts/up.sh` 自动探测对 CLI 用户有效、对面板用户无效，
+而面板用户恰恰是踩这个坑的那一类。
+
+顺带修掉一个**新引入的故障**：`networks:` 段的 `parent` / `subnet` / `gateway`
+原本是裸标量，而 `:?` 消息里有 ASCII「冒号+空格」（「查法: ip ...」），
+YAML 裸标量里出现 `: ` 会被当成新的映射键，**解析直接失败**：
+
+```
+yaml: line 492: mapping values are not allowed in this context
+```
+
+这比缺变量报错还早 —— 用户连「哪个变量缺了」都看不到。三处已加双引号
+（compose 照常插值，报错文案从此可以自由用 ASCII 标点）。
+
 ### 改动文件
 
 | 文件 | 改动 |
 |------|------|
-| `docker-compose.macvlan.yml` | `environment:` 段三个 L2 变量 → `:?` + 根因注释块 |
+| `docker-compose.macvlan.yml` | `environment:` 段三个 L2 变量 → `:?` + 根因注释块；两段 `:?` 消息改为自带查法；`networks:` 段三处加双引号 |
 | `docker-compose.ipvlan.yml` | 同上 |
 | `docker-compose.yml` | 补注释：说明为什么本文件必须保持 `:-` |
-| `tests/network_mode_test.sh` | 新增 **NM-57**：锁住「L2 两份 `:?` / host 一份 `:-`」两端 |
-| `docs/TROUBLESHOOTING.md` | 新增 §1.3.2.1：第三方面板部署场景的完整排查步骤 |
+| `tests/network_mode_test.sh` | 新增 **NM-58**：两段 `:?` 文案须逐字一致且都含查法；**NM-59**：`networks:` 段三处须加双引号 |
+| `docs/TROUBLESHOOTING.md` | 新增 §1.3.2.1：第三方面板部署场景的完整排查步骤 + 「别改 `networks:` 段」的警告 |
 
 ### 验收
 
-- `tests/network_mode_test.sh` → 120 passed / 0 failed（含新增 NM-57 共 9 项断言）
-- 三份 compose 的 YAML 结构解析通过，`environment` 键数一致（46）
+- `tests/network_mode_test.sh` → 138 passed / 0 failed（NM-58 共 12 项、NM-59 共 6 项）
+- 实机（63，Compose v2.40.3）`docker compose config` 五种场景：
+  三项全缺 → 报错指名变量 + 带查法；缺 GATEWAY → 指名 GATEWAY（不是笼统报错）；
+  三项全齐 → `parent: ens18` / `subnet: 192.168.50.0/24` / `gateway: 192.168.50.1`
+  插值正确；macvlan 文案一致；host 模式缺 L2 变量仍 `config` 通过
+- 三份 compose 的 YAML 结构解析通过
 - `go build ./...` / `go vet ./...` / `go test -count=1 ./...` 全绿
 
 ### 实机验证（192.168.50.63，Docker 28.5.2 / Compose v2.40.3）
