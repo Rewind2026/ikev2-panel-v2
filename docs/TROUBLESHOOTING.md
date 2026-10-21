@@ -16,10 +16,11 @@
 6. [admin 密码忘](#6-admin-密码忘)
 7. [DB 损坏](#7-db-损坏)
 8. [数据 / 证书看不到](#8-数据--证书看不到)
-9. [面板 UI 异常](#9-面板-ui-异常)（确认弹窗 / 横幅乱码 / 滚动位置 / 复制假成功 / 双层滚动条）
+9. [面板 UI 异常](#9-面板-ui-异常)（确认弹窗 / 横幅乱码 / 滚动位置 / 复制假成功 / 双层滚动条 / **首页就绪卡片显示不符**）
 
 > 前 8 节是 **VPN 与容器**问题，第 9 节是**纯前端**问题。
 > VPN 正常但界面不对，直接跳第 9 节。
+> （例外：§9.11 首页就绪卡片虽然显示在前端，判据在服务端 —— 卡片与实际不符时按那一节逐张核对。）
 
 ---
 
@@ -1016,6 +1017,66 @@ ip route show table 220
 - **`table 220` 没有 default route** → 出向包被丢。
 - **MSS 未 clamp** → 小包通、大包不通（表现：能 ping 通但网页打不开）。见 §1.6 第 2 条。
 
+### 2.5 `swanctl --list-conns` 是空的 —— conn 从未注册进 charon
+
+**症状**：客户端**完全连不上**（连 IKE 协商都起不来），密码没错、证书没错、配置都对。
+面板首页「IKE_SA」卡片显示「未加载」（红色）而不是「0 在线」。
+
+**判据**（一条命令）：
+
+```bash
+docker compose exec ikev2-panel swanctl --list-conns
+# 正常：至少有一行 conn 头（顶层 conn 名，如 ikev2-rw: IKEv2, ...）
+# 异常：**输出为空** —— charon 里一个 connection 都没有
+```
+
+`--list-conns` 只列**已加载**的 conn。配置写在 `/etc/swanctl/swanctl.conf` 里
+不代表 charon 认了 —— 认了才会出现在这个列表。
+
+**根因（v2.92 及更早，自签模式必中）**：
+
+conn 引用 `send_cert=always` 的服务端证书，**证书不在位时 conn 整个注册不进去**。
+而自签证书是 Go 进程启动后才生成的，于是形成一条死循环：
+
+| 步骤 | 做什么 | 结果 |
+|------|--------|------|
+| 1 | entrypoint §7 调 `swanctl --load-all` | 证书还没装 → `loading certs ... failed: No such file or directory`，`loaded 0 of 1 connections` |
+| 2 | Go 进程启动时调 `scm.ReloadAll` | 证书还是没装（还没走到生成那步）→ 同样失败 |
+| 3 | entrypoint §7.6「证书装好后补一次 load-all」 | **只在 LE 模式跑**（`SWAN_X509` 只在 §7.5 的 LE 分支赋值）→ 自签模式整段跳过 |
+| 4 | Go 进程生成自签证书后只调 `load-creds` | `load-creds` 只装证书，**不装 conn** |
+
+⇒ 自签模式下 conn 永远不在 charon 里。全新部署（一个用户都没有）就一直空着，
+客户端连不上；等到「新增/启用用户」触发写 `conf.d` + reload 时才会顺带把 conn 装上
+—— 所以现象往往是「刚配好时连不上，碰巧加了个用户就好了」，很像偶发。
+
+**确认是不是这个**：
+
+```bash
+docker compose logs ikev2-panel | grep -E "load-all|load-creds"
+# 中招的典型输出：
+#   [entrypoint] WARN: swanctl --load-all failed (will retry after Go installs certs)
+#   swanctl --load-all failed: ... loading certs certificate
+#     '/etc/swanctl/x509/server.cert.pem' failed: No such file or directory
+#   vici load-creds (initial) ok          ← 只有这句说明 conn 没注册
+```
+
+**解法**：
+
+- **v2.93 起已修**：Go 进程装完自签证书后补一次**完整**的 `ReloadAll`
+  （`--load-all` = conns + creds + authorities + pools），日志会出现
+  `swanctl --load-all after cert install ok (conns registered)`。
+- **仍在 v2.92 及更早**：升级到 v2.93；或临时手工补一次加载
+  （治标，容器重建后会复现）：
+  ```bash
+  docker compose exec ikev2-panel swanctl --load-all --noprompt
+  docker compose exec ikev2-panel swanctl --list-conns   # 这次应该有输出了
+  ```
+- 若 `load-all` 报的是**别的**证书缺失（如 `x509/server.cert.pem`），说明
+  `/data/server/server.cert.pem` 也没生成 → 查 §8「数据 / 证书看不到」。
+
+> 面板首页「IKE_SA」卡片 v2.93 起会区分「未加载」（conn 为空，红色）
+> 和「0 在线」（conn 在，只是没人在用）—— 这两个状态对用户是完全不同的故障。
+
 ---
 
 ## 3. Let's Encrypt 续签失败
@@ -1674,7 +1735,78 @@ docker build -t ikev2-panel-v2:local \
 > 注意：`cert.PanelVersion`（写进 `.mobileconfig` 的 `PayloadDescription`）是
 > 另一处独立的常量，与本条无关，它不随镜像变化。
 
-### 9.11 排查手法
+### 9.11 首页 8 张「就绪链路」卡片显示与实际不符
+
+**症状**：首页顶部一排卡片里某张显示「未配置」「不适用」「未生效」，
+但实际明明配了 / 明明在跑；或者反过来，红色告警但一切正常。
+
+**先搞懂这排卡片的判据**。它们是**服务就绪链路**，一律按**运行态**（当前实际生效）
+判定，**不是**「用户配过没有」（配置态）。这是 v2.93 起的统一口径 ——
+早先拿配置态当判据，出现过「池明明活着却显示未配置」「证书明明在位却显示未配置」
+这类假象。
+
+| 卡片 | 判据 | 显示 | 状态色 |
+|------|------|------|--------|
+| 管理口令 | `INITIAL_ADMIN_PASSWORD.txt` 是否存在 | 默认 / 已改 | 红 / 绿 |
+| IP 池 | 面板配的段 vs `swanctl` 运行态在用的段 | CIDR / 未生效 / 未配置 | 绿 / 黄 / 灰 |
+| 服务端证书 | 运行中实际模式 + 证书文件是否在位 | LE / 缺失 / 自签 / 未配置 | 绿 / 红 / 黄 / 灰 |
+| LE 续签 | 仅 LE 模式；续签失败 / 剩余天数 | 不适用 / 失败 / N 天 / 正常 | 灰 / 红 / 黄 / 绿 |
+| 阿里云凭证 | `alidns` 凭证是否已填 | 已配置 / 未配置 | 绿 / 灰 |
+| DNS 同步 | DDNS 是否已配置且就绪 | 运行中 / 未就绪 / 失败 / 未配置 / 已关闭 | 绿 / 黄 / 红 / 灰 |
+| IKE_SA | SA 列表是否可读 + charon 里有没有已加载的 conn | N 在线 / 0 在线 / 未加载 / 超时 | 绿 / 灰 / 红 / 红 |
+| 面板设置 | 8 个设置项里填了几个 | `N/8` | 绿(8) / 黄 |
+
+四态语义：**绿 = 就绪** / **黄 = 降级可用** / **红 = 故障** / **灰 = 未启用**。
+
+**逐张核对命令**：
+
+```bash
+# 管理口令：文件存在 = 仍是初始密码
+docker compose exec ikev2-panel ls -l /data/panel-state/INITIAL_ADMIN_PASSWORD.txt
+
+# IP 池：运行态在用的段
+docker compose exec ikev2-panel swanctl --list-pools
+docker compose exec ikev2-panel grep -A3 'ikev2-pool' /etc/swanctl/swanctl.conf
+
+# 服务端证书：文件在不在 + 证书 CN
+docker compose exec ikev2-panel ls -l /data/server/server.cert.pem /data/le/fullchain.pem
+docker compose exec ikev2-panel openssl x509 -in /data/server/server.cert.pem -noout -subject -enddate
+
+# IKE_SA：conn 有没有加载（空 = 没注册，见 §2.5）
+docker compose exec ikev2-panel swanctl --list-conns
+docker compose exec ikev2-panel swanctl --list-sas
+```
+
+**几个容易误判的点**：
+
+- **「IP 池」显示「未生效」但看着配置是对的** → 面板配的段和 `swanctl` 里在用的段
+  不一致（改完没 reload / 被别的程序改过）。看上面 `--list-pools` 的实际值。
+- **「服务端证书」显示「自签」但你以为配了 LE** → 面板配置改了但**没重启容器**。
+  证书模式是**启动期**读进进程的（`CertMode`），运行中改配置不会热切换。
+  页面「证书」卡片会提示需 `docker compose restart`。
+- **「LE 续签」显示「不适用」** → 运行中实际是自签模式，正常。
+  注意判据看的是**运行态**不是配置态：配了 LE 但没重启，这里仍会显示「不适用」。
+- **「管理口令」显示「默认」但你确实改过** → v2.92 及更早的 bug：改密成功后
+  没有删除 `INITIAL_ADMIN_PASSWORD.txt`。v2.93 起改密成功会自动删除该文件。
+  旧版本上可手工删（该文件只是「仍是初始密码」的标记，删了不影响登录）：
+  ```bash
+  docker compose exec ikev2-panel rm -f /data/panel-state/INITIAL_ADMIN_PASSWORD.txt
+  ```
+- **「IKE_SA」显示「未加载」（红）** → conn 没注册进 charon，客户端一定连不上。
+  这是**真故障**，走 §2.5。
+- **「IKE_SA」显示「超时」（红）** → charon 响应慢（`list-sas` 超过 10s），
+  看 charon 日志；这跟「0 在线」（正常空闲）不是一回事。
+
+**自测**：改完模板或判据后跑
+
+```bash
+go test ./internal/web/ -run TestLane_ -v
+```
+
+`internal/web/lane_cards_test.go` 覆盖 8 张卡片的判据分支（含「配置了但没生效」
+「查询失败不误报故障」等边界），改判据必须同步改测试。
+
+### 9.12 排查手法
 
 前端问题容易误判成后端问题。定顺序：
 

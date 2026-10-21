@@ -18,7 +18,178 @@ hotfix。升级前请重点看目标版本的「⚠️ 行为变更」。
 
 ---
 
-## v2.92（2026-10-21）— 修复 L2 模式下 web 打不开（TLS 握手被网关 RST）
+## v2.93（2026-10-21）— 首页 8 张「就绪链路」卡片说实话 + 自签模式 conn 漏加载
+
+**用户反馈：「为什么我改了密码 这里还显示默认 我觉得这一排的所有功能 和显示
+是不是应该测试一下？」（附首页 lane 卡片栏截图）** 属实 —— 而且顺着这条
+反馈查下去，8 张卡片里有 **3 张显示与实际状态不符**，还牵出一个更严重的问题：
+**自签模式下 `swanctl --list-conns` 是空的（connection 压根没注册进 charon），
+客户端建立不了隧道，而面板上显示的是「0 在线」，看着像一切正常。**
+
+### 一、管理口令卡永远显示「默认」
+
+**现象**：管理员在面板里改完密码，回到首页第一张卡仍是红字「默认」，顶部
+横幅也在 —— 用户以为密码没改成。
+
+**根因**：`loadIsDefaultPassword()` 只判断 `panel-state/INITIAL_ADMIN_PASSWORD.txt`
+**文件是否存在**；而 `handleAccountChangePassword` 改密成功后**从不删这个文件**。
+代码注释自认这笔欠账（「v2.85-PR2 留下的，本 PR 不做,留 v3.0 admin 改密页」）——
+但 v2.86-pr21 早已把改密页做出来了，欠账没还。
+
+**实机铁证**（63，v2.92 镜像）：
+
+```
+-rw------- 1 root root 12 Oct 21 05:06 /data/panel-state/INITIAL_ADMIN_PASSWORD.txt
+login_with_initial_pw=401        ← 初始密码已失效 = 密码确实改过
+audit_log: admin.password.change|username=admin,remote=192.168.50.130
+```
+
+**修复**：改密成功后删掉该文件（`clearInitialPasswordFile()`）。
+删除失败**不中断改密**（密码已落库，回滚不了），只记 warn。
+顺带解决一个小问题：这个文件里躺着初始明文密码，改完密码后它就是纯垃圾
+（还多一份凭据副本），删掉是对的。
+
+### 二、IP 池卡显示「未配置」，可池明明在跑
+
+**根因**：判据是 `and .SubnetConfigured .SubnetCurrentIPv4`，而
+`SubnetConfigured` 的语义是「**subnet.conf 文件是否存在**」= 用户在面板里
+**显式配过** IP 段。走 env / compose 默认池的用户（绝大多数）从没在面板设过 →
+`SubnetConfigured=false` → 模板 `and` 短路 → 显示「未配置」（灰）。
+
+**但池是活的**（63 实机）：
+
+```
+/etc/swanctl/swanctl.conf: pools { ikev2-pool { addrs = 10.10.0.0/24, fd00:1::/64; … } }
+swanctl --list-pools: ikev2-pool  10.10.0.1  0 / 0 / 254   ← 254 个地址在用
+```
+
+**同一页两处说法打架**：卡片区说「未配置」，而卡片区的 header-note
+（`{{else if .SubnetCurrentIPv4}}` 兜底）却正确显示着 `10.10.0.0/24 ·
+fd00:1::/64`。
+
+**修复**：判据改成**运行态口径** —— 运行态读到池就是 ok（显示实际 CIDR）。
+另外新增「漂移检测」：面板配的段与运行态在用的段不一致（保存时
+`swanctl --load-all` 失败、panelstate 不回滚留下）→ 报 warn「未生效」，
+不报绿（绿 = "配置已落地"）。
+
+### 三、服务端证书卡显示「未配置」，可自签证书一直在用
+
+**根因**：判据用 `CertConfigured`，语义同样是「cert.conf 文件是否存在」。
+自签模式（默认）下 `cert.conf` 根本不存在，但自签证书**一直都在用**：
+
+```
+/data/ca/ca.cert.pem              存在
+/data/server/server.cert.pem       存在
+/data/panel-tls/cert.pem           存在（CN=vpn.example.com，有效期到 2036）
+ss -ltnp: LISTEN *:8443            面板 HTTPS 正常
+```
+
+**修复**：新增两个字段区分「配置」与「实际生效」：
+
+| 字段 | 语义 |
+|------|------|
+| `CertMode` | **配置**里写的模式（cert.conf 优先，其次 env）—— 表单 / radio 用它 |
+| `CertLiveMode` | **运行中实际生效**的模式 —— 卡片 / metric 用它 |
+| `CertInPlace` | 该模式的证书文件是否真的在位 |
+
+`CertLiveMode` 按 `main.go` 的启动分支反查文件判定：LE 模式看
+`{DataDir}/le/fullchain.pem`（读不到 main 直接 `os.Exit(1)`），自签模式看
+`{DataDir}/server/server.cert.pem`。于是「面板里存了 LE 但还没重启容器」这段
+窗口期，卡片会如实显示「自签」而不是撒谎显示「LE」。
+
+**附带修正**：证书卡上那句「配置来源：panelstate（需 docker compose restart
+生效）」以前**只要有 cert.conf 就一直显示**（重启过了还在提示要重启）。
+现在只在「配置与运行态确实不一致」时才提示（`CertRestartRequired`），
+LE 模式还额外比对域名（main.go 强制 `ServerCN = Domain`，域名改了同样要重启）。
+
+### 四、自签模式下 connection 从未注册进 charon（客户端连不上）
+
+**这是本轮最严重的一条**，顺带由「IKE_SA 卡显示 0 在线」暴露出来。
+
+**63 实机启动日志**：
+
+```
+[entrypoint] WARN: swanctl --load-all failed (will retry after Go installs certs)
+swanctl --load-all failed: exit status 22 (
+  loading certs certificate '/etc/swanctl/x509/server.cert.pem' failed: No such file or directory
+  loaded 0 of 1 connections, 1 failed to load, 0 unloaded
+  …
+  loaded pool 'ikev2-pool' / successfully loaded 1 pools, 0 unloaded)
+vici load-creds (initial) ok
+```
+
+**链条**：
+
+1. `entrypoint.sh` §7 的第一次 `swanctl --load-all` 发生在**证书装好之前**
+   （自签证书是 Go 进程启动后才生成的）→ conn 引用 `send_cert=always` 的
+   服务端证书，证书不在 → **conn 加载失败**；
+2. Go 进程启动时的 `scm.ReloadAll()` 同样失败 —— 那时证书还没装；
+3. `entrypoint.sh` §7.6 的「证书装好后补一次 load-all」**只在 LE 模式跑**
+   （`SWAN_X509` 只在 §7.5 的 LE 分支里赋值）→ 自签模式整段跳过；
+4. Go 进程最后只调了 `load-creds` —— 它**只装证书，不装 conn**。
+
+⇒ 自签模式下 conn 永远注册不进 charon，`swanctl --list-conns` 一直为空。
+之后只有在「新增/启用用户」触发写 `conf.d` + reload 时才会顺带把 conn 装上；
+**全新部署（一个用户都没有）就一直空着 → 客户端连不上。**
+（63 上从容器启动 05:06 到 13:20 探测为止，conn 一直是空的。）
+
+**修复**：Go 进程装完自签证书后补一次**完整的** `ReloadAll`
+（`--load-all` = conns + creds + authorities + pools），把 conn 真正注册进去；
+失败不致命，退一步至少 `load-creds` 把证书装上。
+
+**顺带**：IKE_SA 卡现在能区分两种「0」——
+
+| 状态 | 卡片 | 含义 |
+|------|------|------|
+| swanctl 超时 | 🔴 超时 | 查不到，不能当成「没人连」 |
+| charon 里一个 conn 都没加载 | 🔴 **未加载** | 客户端建立不了隧道（故障） |
+| 0 条活跃 SA | ⚪ 0 在线 | 真的只是当前没人连 |
+
+查 conn 用 `swanctl --list-conns`（charon 的 VICI 没有 list-conns 命令，
+CLI 是唯一入口；它只列**已加载**的 conn，没加载时输出为空）。
+**只在 SA 数为 0 时才查**（有 SA 说明 conn 必然已加载），且**查不到 ≠ 没加载**
+—— 查询失败时保持原样，不误报故障。
+
+### v2.93 改动清单
+
+| 文件 | 改动 |
+|------|------|
+| `internal/web/handlers_home.go` | 新增 `CertInPlace` / `CertLiveMode` / `CertRestartRequired` / `SubnetPoolDrift` / `ConnsUnloaded`；新增 `loadCertLiveStatus` / `certRestartRequired` / `subnetPoolDrift` / `loadConnHealth`；拆出 `initialPasswordPath` / `clearInitialPasswordFile` |
+| `internal/web/handlers_account.go` | 改密成功后删 `INITIAL_ADMIN_PASSWORD.txt` |
+| `internal/swanctl/conns.go`（新） | `ListLoadedConns` —— 查 charon 已加载的 connection |
+| `cmd/ikev2-panel/main.go` | 自签模式装完证书后补一次完整 `ReloadAll`（注册 conn） |
+| `web/templates/home_content.html` | 8 张卡片判据改成「运行态」口径；证书 metric / side-stat / 证书卡同步 |
+| `internal/web/lane_cards_test.go`（新） | 15 条 lane 卡片回归测试 |
+| `internal/swanctl/conns_test.go`（新） | 4 条 `--list-conns` 解析测试 |
+| `docs/TROUBLESHOOTING.md` | 新增 §2.5（conn 未注册进 charon 的排查）、§9.11（首页就绪卡片与实际不符的逐张核对） |
+
+**排查指引**：
+
+- [TROUBLESHOOTING §2.5](TROUBLESHOOTING.md#25-swanctl---list-conns-是空的--conn-从未注册进-charon) ——
+  `swanctl --list-conns` 输出为空 = conn 没注册进 charon（v2.92 及更早的自签模式必中），
+  含四步根因链、典型日志与解法
+- [TROUBLESHOOTING §9.11](TROUBLESHOOTING.md#911-首页-8-张就绪链路卡片显示与实际不符) ——
+  8 张卡片的判据语义（运行态 vs 配置态）、逐张核对命令、易误判点
+
+### ⚠️ 行为变更
+
+- 首页「服务端证书」「LE 续签」两张卡显示的是**运行中实际生效**的证书，
+  不再是「配置里写的」。在面板里存了 LE 但还没 `docker compose restart` 的
+  窗口期，卡片显示「自签」，证书卡会明确提示「需 restart 后生效」。
+- 首页「IP 池」卡显示**运行态实际生效**的 IP 段。走 env / compose 默认池的
+  部署（`subnet.conf` 不存在）现在显示真实 CIDR + 绿色，而不是「未配置」。
+- IKE_SA 卡在 charon 没有已加载的 connection 时显示红色「未加载」。
+- 改密成功后 `INITIAL_ADMIN_PASSWORD.txt` 会被删除 → 顶部默认密码横幅消失。
+
+### 验证
+
+- `go build ./...` / `go vet ./...` / `go test ./...` 全绿
+- 新增 19 条回归测试（15 条 lane 卡片 + 4 条 list-conns 解析），
+  逐条覆盖本次修的 4 个问题，含 63 实机的三种部署形态
+- 63 实机复验见 v2.93 发布说明
+
+---
+
 
 **用户反馈：「用 ipvlan 的 compose 启动，配置 IP 是 192.168.50.66，端口 8443，
 为什么 web 打不开」。** 属实 —— v2.91 交付的固定 IP 功能在实机上暴露了一个
