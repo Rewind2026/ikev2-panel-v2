@@ -334,8 +334,26 @@ entrypoint 读的是**容器里**那一份。第三方面板的编排有自己�
 
 **解法**（二选一）：
 
-1. **在面板的「环境变量」里补齐三项**。面板会生成 `.env` 给 compose 插值用，
-   `networks:` 段和 `environment:` 段就都拿到同一份值：
+1. **改 compose 顶部的 `x-l2-*` 三行**（推荐，v2.90 起的标准做法）：
+
+   打开 `docker-compose.macvlan.yml` / `docker-compose.ipvlan.yml`，最顶部有
+   醒目注释块，下面三行是唯一需要改的地方：
+
+   ```yaml
+   x-l2-parent:  &l2_parent  "eth0"
+   x-l2-subnet:  &l2_subnet  "192.168.50.0/24"
+   x-l2-gateway: &l2_gateway "192.168.50.1"
+   ```
+
+   `environment:` 段和 `networks:` 段引用的是**同一个 anchor**，
+   所以不存在「只改了一边」的可能。改完直接 `up`，不需要 `.env`。
+
+   > ⚠️ 若面板的「环境变量」里已经存在 `IKEV2_L2_*` 三项，那些值会**优先于**
+   > 你在 compose 里写的字面量（`shell env > .env > compose 字面量`，是 Docker
+   > Compose 的标准行为）。此时要么改面板的环境变量，要么把 compose 里的
+   > 字面量去掉、只靠面板传。
+
+2. **在面板的「环境变量」里补齐三项**（`.env` 路线，依然完全支持）：
 
    ```bash
    IKEV2_L2_PARENT=eth0
@@ -343,43 +361,34 @@ entrypoint 读的是**容器里**那一份。第三方面板的编排有自己�
    IKEV2_L2_GATEWAY=192.168.50.1       # 换成你宿主机的真实网关
    ```
 
-2. **直接改 compose 的 `environment:` 段写死**（不依赖面板的 env 机制）：
-
-   ```yaml
-         IKEV2_L2_PARENT: "eth0"
-         IKEV2_L2_SUBNET: "192.168.50.0/24"
-         IKEV2_L2_GATEWAY: "192.168.50.1"
-   ```
-
 **先确认真实值**，别沿用示例里的地址：
 
 ```bash
-ip -br link                       # 父接口名（不能是 lo）
-ip -4 route show default          # 宿主机网关
-ip -4 addr show <父接口>          # 真实子网 + 前缀
+ip -o -4 route show default     # 第一列 dev 后面那个 = 父接口名；第三列 = 网关
+ip -o -4 addr show <父接口>     # inet 那一列的 CIDR = 子网
 ```
 
-> ✅ v2.89 起，两份 L2 compose 的 `environment:` 段也改用 `:?`（必填）。
-> 缺变量会在 `docker compose up` 阶段**直接失败**并指名变量，**且报错自带查法**：
+> **v2.90 的做法：anchor 而非必填插值。**
+>
+> v2.89 曾把两份 L2 compose 的 `environment:` 段改成 `${...:?}`（缺失即报错），
+> 缺变量会在 `up` 阶段直接失败：
 >
 > ```
-> error while interpolating services.ikev2-panel.environment.IKEV2_L2_SUBNET:
-> required variable IKEV2_L2_SUBNET is missing a value: 必填=宿主所在 IPv4 子网 CIDR(只支持 v4)。
-> 查法: ip -4 addr show <上面的dev名> → inet 那行的地址,但要把主机位归零(192.168.50.63/24 → 192.168.50.0/24)
+> error while interpolating services.ikev2-panel.environment.IKEV2_L2_PARENT:
+> required variable IKEV2_L2_PARENT is missing a value: 必填：宿主父接口名，如 eth0
 > ```
 >
-> 不用再等容器起来从刷屏日志里反推。host 模式那份保持 `:-`（host 根本不用
-> 这三个变量，写成必填会让所有 host 部署起不来）。
-
-> �� 报错文本是对面板用户**唯一能触达**的排查通道。1Panel / 宝塔 / dpanel
-> 的 compose 编排执行的是纯 `docker compose up`，不会调 `scripts/up.sh`，
-> 所以指望不上任何脚本替用户自动填 —— 能指望的只有这行报错本身。
-> 这就是 `:?` 消息里要写「查法」而不只是「必填：xxx」的原因。
-
-> ⚠️ 别自己把 `networks:` 段的 `parent` / `subnet` / `gateway` 改成 `:-<默认值>`
-> 来「让它先起得来」。那会重新制造上面那个静默故障（compose 插值通过 →
-> 容器创建成功 → 容器里三个变量是空串 → entrypoint `exit 12` 无限重启），
-> 而根因藏在两段插值语法的差异里，日志上完全看不出来。缺变量就补变量。
+> 这确实把故障暴露点从「运行期刷屏」提前到了「部署期报错」，但代价是
+> **逼用户额外准备一个 `.env`** —— 而「拉到项目 → 编辑 compose → up」才是
+> compose 的主用法，那条路上很多人根本不会碰 `.env`。
+>
+> v2.90 改用 YAML anchor：值在文件顶部定义一次，两条插值路径引用同一个值，
+> 「两段不一致」这个故障模式被**结构性消除**，用户只改顶部三行即可，零 `.env`。
+> `.env` 路线不受影响（anchor 里套的就是 `${VAR:-默认}`）。
+>
+> 由 `tests/network_mode_test.sh` 的 **NM-57** 强制：两份 L2 compose 的
+> `environment:` 段与 `networks:` 段必须引用同一个 anchor，且 anchor 定义
+> 必须保留 `${VAR:-默认}`（否则 `.env` 用户失去覆盖能力）。
 
 #### 1.3.3 规格表文件缺失
 

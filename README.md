@@ -123,20 +123,40 @@ L2 必填变量缺失 / 填了 v6 子网这类配置错误。
 > ./tests/network_mode_test.sh     # NM-29~NM-36 强制校验三份一致
 > ```
 
-**L2 模式在 `.env` 里需要额外提供**（全部必填）：
+**L2 模式：改 compose 顶部三行，不需要 `.env`**
 
-```bash
-IKEV2_NETWORK_MODE=macvlan
-IKEV2_L2_PARENT=eth0                  # 宿主父接口
-IKEV2_L2_SUBNET=203.0.113.0/24        # 宿主所在 IPv4 子网（只支持 IPv4）
-IKEV2_L2_GATEWAY=203.0.113.1          # 该子网的宿主网关，必须落在上面的子网里
+打开 `docker-compose.macvlan.yml` / `docker-compose.ipvlan.yml`，最上面有一个
+醒目的注释块，下面三行是唯一需要改的地方：
+
+```yaml
+x-l2-parent:  &l2_parent  ""      # 宿主父接口名
+x-l2-subnet:  &l2_subnet  ""      # 宿主所在 IPv4 子网（只支持 IPv4）
+x-l2-gateway: &l2_gateway ""      # 该子网的宿主网关，必须落在上面的子网里
 ```
 
+查真实值（在**宿主**上执行）：
+
+```bash
+ip -o -4 route show default     # 第一列 dev 后面那个 = 父接口名；第三列 = 网关
+ip -o -4 addr show <父接口>     # inet 那一列的 CIDR = 子网
+```
+
+改完直接 `up`。这三个值在文件里定义一次，`environment:` 段和 `networks:` 段
+引用的是同一个 anchor —— 不可能只改一边，也不需要在两个地方各写一遍。
+
+> 优先级：**shell 环境变量 > `.env` 文件 > compose 里的字面量**。
+> 愿意用 `.env` 的照旧可用，三个变量名不变，anchor 里套的就是 `${VAR:-默认}`。
+> 优先级是 Docker Compose 的标准行为，不是本项目特有的。
+
+> ⚠️ **`SUBNET` / `GATEWAY` 留空是故意的**：这两项每台机器都不同，没有通用默认值。
+> 写死一个「看起来能跑」的值比留空更危险 —— 容器会正常起来但网段是错的，
+> 排查成本远高于多看一眼注释。留空时 entrypoint 会明确告诉你缺哪一项。
+
 > ⚠️ **用第三方面板部署（1Panel / 宝塔 / dpanel 等）时特别注意**：
-> 面板的编排有**自己的目录和自己的 `.env` 管理**，**不读项目目录下的 `.env`**。
-> 要么在面板的「环境变量」里补齐上面三项，要么直接改 compose 的 `environment:`
-> 段写死 —— 否则变量传不进容器，容器会反复重启，日志刷「缺少必填变量」。
-> 完整排查步骤见 [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#1321-用第三方面板部署1panel--宝塔--dpanel-等时变量传不进容器)。
+> 面板的编排有**自己的目录**，直接编辑它那份 compose 即可（改顶部三行）。
+> 但要注意面板可能会用**自己的 `.env` 覆盖同名变量** —— 若面板里已存在
+> `IKEV2_L2_*` 三项，值会优先于你在 compose 里写的字面量。
+> 排查步骤见 [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#1321-用第三方面板部署1panel--宝塔--dpanel-等时变量传不进容器)。
 
 **L2 模式前置条件**：
 

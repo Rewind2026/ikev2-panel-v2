@@ -747,7 +747,11 @@ func xmlEscape(s string) string {
 // v2.89：L2 模式必填变量 —— 两份 L2 compose 的 environment 段改用 `:?`（必填），
 // 与 networks 段对称，缺变量在 `docker compose up` 阶段即报错指名变量。
 // 详见 docs/CHANGELOG.md（v2.89）。
-const PanelVersion = "v2.89"
+//
+// v2.90：改用 YAML anchor —— 值在 compose 顶部 x-l2-* 定义一次，
+// environment 段与 networks 段引用同一个 anchor，用户只改顶部三行、零 .env，
+// 且两条插值路径结构性不可能不一致。详见 docs/CHANGELOG.md（v2.90）。
+const PanelVersion = "v2.90"
 
 // generateUUID RFC 4122 v4 随机 UUID。
 // mobileconfig 的 PayloadUUID/ProfileUUID 必须全局唯一，否则 iOS 覆盖会乱。

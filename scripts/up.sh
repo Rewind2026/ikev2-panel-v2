@@ -69,6 +69,28 @@ for _k in IKEV2_L2_PARENT IKEV2_L2_SUBNET IKEV2_L2_GATEWAY; do
   fi
 done
 
+# v2.90 起，L2 那两份 compose 的推荐配置路径是「改文件顶部的 x-l2-* 三行」
+# （零 .env）。env_get 只认 .env，所以这里补一个从 compose 顶部读的回落 ——
+# 否则用户明明在 compose 里填好了，net_mode_validate 却报「缺少必填变量」。
+#
+# 只在本变量仍为空时才读，且**不 export**：compose 会自己插值，
+# 这里 export 反而可能用一个被误解的值去覆盖 compose 本来能正确读到的。
+compose_get() {
+  _cf="./docker-compose.${1}.yml"
+  [ -f "$_cf" ] || return 0
+  # 形如： x-l2-parent:  &l2_parent  "eth0"
+  # 注意顶层 key 用连字符（x-l2-parent），anchor 名用下划线（&l2_parent），
+  # 所以 key 要把 $2 里的下划线换成连字符。
+  # 取引号里的字面量；没有引号（用户写成裸值）时退化为取 &anchor 之后的原文。
+  sed -nE "s/^x-${2//_/-}:[[:space:]]*&${2}[[:space:]]+\"([^\"]*)\".*/\1/p" "$_cf" | head -n1
+}
+compose_get_unquoted() {
+  _cf="./docker-compose.${1}.yml"
+  [ -f "$_cf" ] || return 0
+  sed -nE "s/^x-${2//_/-}:[[:space:]]*&${2}[[:space:]]+([^\"[:space:]].*)$/\1/p" "$_cf" \
+    | head -n1 | sed -e 's/[[:space:]]*$//'
+}
+
 # 模式专属开关只给 net_mode_validate 用，**不 export**：
 # env_get 的解析规则和 compose 的 .env 解析规则不完全等价
 # （行尾注释 `KEY=v # x` compose 会剥离、我们不会），export 出去反而可能
@@ -82,6 +104,37 @@ done
 
 # 归一化同样交给单一真源（大小写不敏感 + 去首尾空白 + 空值→host）
 NETWORK_MODE="$(net_mode_normalize "${IKEV2_NETWORK_MODE:-}")"
+
+# L2 模式下，变量可能只写在 compose 顶部的 x-l2-* anchor 里（v2.90 起的
+# 推荐路径，零 .env）。这时 shell 和 .env 里都是空的，net_mode_validate 会
+# 误报「缺少必填变量」—— 所以在校验之前从对应 compose 顶部补读一次。
+#
+# 顺序刻意是 shell env → .env → compose 顶部字面量，与 Compose 自己的
+# 插值优先级一致，不会出现「up.sh 认为是一个值、compose 用另一个值」。
+if [ "$NETWORK_MODE" = "$NET_MODE_MACVLAN" ] || [ "$NETWORK_MODE" = "$NET_MODE_IPVLAN" ]; then
+  _anchor_key() {
+    case "$1" in
+      IKEV2_L2_PARENT)  echo l2_parent ;;
+      IKEV2_L2_SUBNET)  echo l2_subnet ;;
+      IKEV2_L2_GATEWAY) echo l2_gateway ;;
+    esac
+  }
+  for _k in IKEV2_L2_PARENT IKEV2_L2_SUBNET IKEV2_L2_GATEWAY; do
+    eval "_cur=\${$_k:-}"
+    [ -n "$_cur" ] && continue
+    _ak="$(_anchor_key "$_k")"
+    _v="$(compose_get "$NETWORK_MODE" "$_ak")"
+    [ -n "$_v" ] || _v="$(compose_get_unquoted "$NETWORK_MODE" "$_ak")"
+    # anchor 里若仍写着 ${VAR:-}（未落成字面量），compose_get 取到的是
+    # 那段插值表达式本身，不是真实值 —— 这种情况交给 net_mode_validate
+    # 报「缺少必填变量」才是对的。
+    case "$_v" in
+      '${'*) continue ;;
+    esac
+    [ -n "$_v" ] && declare "$_k=$_v"
+  done
+  unset _anchor_key
+fi
 
 if [ -t 1 ]; then
   BLUE='\033[0;34m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; NC='\033[0m'
@@ -122,9 +175,21 @@ for arg in "${ORIG_ARGS[@]}"; do
 
   三个文件都是**完整**的,不叠加,所以任何 Docker Compose 版本都能用(无版本下限)。
 
-macvlan / ipvlan 需要在 .env 里额外提供:
-  IKEV2_L2_PARENT / IKEV2_L2_SUBNET / IKEV2_L2_GATEWAY
-  (IKEV2_L2_SUBNET 只支持 IPv4,v6 走 RA/SLAAC)
+macvlan / ipvlan 需要提供三项（两种方式任选）：
+  1) 直接改 compose 文件顶部的 x-l2-* 三行（推荐，零 .env）：
+       x-l2-parent:  &l2_parent  "eth0"
+       x-l2-subnet:  &l2_subnet  "192.168.1.0/24"
+       x-l2-gateway: &l2_gateway "192.168.1.1"
+     environment 段与 networks 段引用同一个 anchor，不会只改一边。
+  2) 或在 .env 里提供（优先级 shell env > .env > compose 字面量）：
+       IKEV2_L2_PARENT=eth0
+       IKEV2_L2_SUBNET=192.168.1.0/24
+       IKEV2_L2_GATEWAY=192.168.1.1
+     (IKEV2_L2_SUBNET 只支持 IPv4,v6 走 RA/SLAAC)
+
+  查真实值:
+    ip -o -4 route show default | head -1    # dev 后面=父接口,第三列=网关
+    ip -o -4 addr show <父接口>               # inet 列的 CIDR=子网
 EOF
       exit 0
       ;;

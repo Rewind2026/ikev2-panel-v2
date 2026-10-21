@@ -18,7 +18,107 @@ hotfix。升级前请重点看目标版本的「⚠️ 行为变更」。
 
 ---
 
-## v2.89（2026-10-20）— L2 模式必填变量：compose 插值语义对称化 + 报错自带查法
+## v2.90（2026-10-20）— L2 变量改用 YAML anchor：只改 compose，零 .env
+
+**用户不需要额外准备 `.env` 了。** v2.89 的修法要求用户既编辑 compose、又写一个
+`.env`，这对「拉到项目 → 编辑 compose → up」这条主路径是不合理的额外负担。
+
+### 业界做法调研
+
+| 做法 | 谁在用 | 特点 |
+|------|--------|------|
+| **YAML anchor + `x-` 字段** | Docker 官方文档《[Fragments](https://docs.docker.com/compose/compose-file/10-fragments/)》《[Extensions](https://docs.docker.com/compose/compose-file/11-extension/)》 | 定义一次，两处引用 |
+| 字面量直接写死 | 多数个人项目 | 简单但不可覆盖 |
+| `.env` + `${VAR:?}` | 商业/团队项目 | 需配套 `.env.example` |
+| 自动探测 | Portainer / 1Panel 类平台 | 平台帮用户填 |
+
+官方文档明确支持二者组合：*"Extensions can also be used with anchors and aliases"*。
+
+### 方案
+
+值在文件顶部定义一次，`environment:` 段与 `networks:` 段引用**同一个 anchor**：
+
+```yaml
+x-l2-parent:  &l2_parent  "${IKEV2_L2_PARENT:-}"
+x-l2-subnet:  &l2_subnet  "${IKEV2_L2_SUBNET:-}"
+x-l2-gateway: &l2_gateway "${IKEV2_L2_GATEWAY:-}"
+```
+
+用户改这三行即可，**不需要 `.env`**。anchor 里套的仍是 `${VAR:-默认}`，
+所以 `.env` 路线完全不受影响（优先级 shell env > `.env` > compose 字面量）。
+
+### 为什么比 v2.89 更好
+
+三条，缺一不可：
+
+1. **零额外动作** —— 用户只改 compose 顶部三行
+2. **结构性消除不对称** —— 同一个 anchor 被两处引用，**不可能只改一边**。
+   v2.89 的 `:?` 只是让不对称「早点报错」，并没有消除它；
+   有人把 `environment:` 段改回 `:-` 去绕过报错，容器照样起得来但变量是空串。
+3. **`.env` 能力不丢** —— 优先级链完整保留
+
+### `SUBNET` / `GATEWAY` 留空是故意的
+
+这两项每台机器都不同，没有通用默认值。写死一个「看起来能跑」的值比留空更危险 ——
+容器会正常起来但网段是错的，排查成本远高于多看一眼注释。留空时
+`net_mode_validate` 会明确指出缺哪一项。
+
+### 改动文件
+
+| 文件 | 改动 |
+|------|------|
+| `docker-compose.macvlan.yml` / `.ipvlan.yml` | 顶部加 `x-l2-*` anchor 块；两段引用改为 `*anchor` |
+| `docker-compose.yml` | 更新注释（host 仍保持 `${...:-}`） |
+| `scripts/up.sh` | 新增 `compose_get`：从 compose 顶部读 anchor 字面量作为回落，<br>否则用户在 compose 里填好了却被误报「缺少必填变量」 |
+| `tests/network_mode_test.sh` | NM-57 重写为锁 anchor 三件事；**修掉 NM-49/50/51 的 pipefail 竞态** |
+| `README.md` / `TROUBLESHOOTING.md` | 改为「改 compose 顶部三行」 |
+
+### 验收
+
+`tests/network_mode_test.sh` **132 passed / 0 failed**（连跑 10 次稳定）。
+`go build` / `go vet` / `go test -count=1 ./...` 全绿。
+
+**实机（192.168.50.63，Docker 28.5.2 / Compose v2.40.3）**：
+
+| 场景 | 结果 |
+|------|------|
+| 三份 compose `config`（零 `.env`，anchor 留空） | ✅ 全部通过 |
+| anchor 留空时两段是否同步为空 | ✅ `environment` 与 `networks` **同步为空** |
+| 只改顶部三行 → `config` | ✅ 四条路径（env×3 + networks×3）值完全一致 |
+| 只改顶部三行 → 真实 `up`（macvlan） | ✅ `running` `restarts=0`，`ip=192.168.50.2`，出网 OK |
+| 只改顶部三行 → 真实 `up`（ipvlan） | ✅ 同上 |
+| `.env` 覆盖 compose 顶部 | ✅ 取 `.env` 值，两段同步 |
+| shell env 覆盖 `.env` | ✅ 取 shell 值 |
+| 删掉 `.env` | ✅ 回落 compose 顶部字面量 |
+
+`up.sh` 五场景：anchor 未填→正确报错 / 顶部字面量→通过 / `.env` 优先 /
+裸值（无引号）→支持 / host 模式不受影响。
+
+### 附带修复：测试里的 pipefail 竞态
+
+NM-50 用 `code_only "$UP_SH" | grep -q` 做判据，而测试开了 `set -o pipefail`：
+`grep -q` 命中即退出会让上游 `sed` 收到 SIGPIPE（141），整条管道被判失败。
+`up.sh` 从 219 行涨到 284 行后，竞态从「稳定通过」变成「时好时坏」
+（实测连跑 5 次得到 `FFPPF`）。改为预先算好 `$_up_code` 变量再匹配。
+NM-49 / NM-51 同类判据一并修掉。
+
+### 安全约束（本次未触碰）
+
+| 约束 | 状态 |
+|------|------|
+| `WriteDDNSConfig` 只能改注释 | ✅ `internal/panelstate/` 未改动 |
+| `scripts/entrypoint.sh` 不改现有 `grep` 判定逻辑 | ✅ 该文件未改动 |
+| `schema_version` 兼容老文件 | ✅ `internal/panelstate/` 未改动 |
+
+改动全在 compose / 脚本 / 文档层，**不涉及 Go 运行时逻辑**（仅版本号字符串）。
+
+---
+
+## v2.89（2026-10-20）— L2 模式必填变量：compose 插值语义对称化
+
+> ⚠️ **本节已被 v2.90 取代。** v2.89 用 `${...:?}` 要求用户额外准备 `.env`，
+> 对「只编辑 compose」的用户不合理。v2.90 改用 YAML anchor：用户只改 compose
+> 顶部三行即可，且两条插值路径结构性不可能不一致。本节保留作为演进记录。
 
 修一个**部署期静默故障**：容器起得来、日志反复刷「缺少必填变量」、无限重启，
 但日志上完全看不出真实原因。
@@ -85,53 +185,20 @@ required variable IKEV2_L2_PARENT is missing a value: 必填：宿主父接口�
 变量（entrypoint 对 host 分支只打 WARN 不拦截），写成 `:?` 会让所有 host
 部署在 up 阶段就失败。
 
-### `:?` 的报错文本自带「查法」
-
-上面的报错原本只写到「必填：宿主所在 IPv4 子网，如 203.0.113.0/24」就结束了。
-拿到报错的人还得再去翻文档才知道那三个值怎么查。这次把查法直接写进报错：
-
-```
-error while interpolating services.ikev2-panel.environment.IKEV2_L2_SUBNET:
-required variable IKEV2_L2_SUBNET is missing a value: 必填=宿主所在 IPv4 子网 CIDR(只支持 v4)。
-查法: ip -4 addr show <上面的dev名> → inet 那行的地址,但要把主机位归零(192.168.50.63/24 → 192.168.50.0/24)
-```
-
-**为什么值得单独做**：这三个值都能从宿主直接查到，用户唯一需要的信息是
-**去哪查**。而报错文本是对「面板用户」唯一能触达的排查通道 ——
-1Panel / 宝塔 / dpanel 的 compose 编排执行的是纯 `docker compose up`，
-**不会调 `scripts/up.sh`**（那里本来可以做自动探测），所以指望不上任何脚本
-替用户填好。`scripts/up.sh` 自动探测对 CLI 用户有效、对面板用户无效，
-而面板用户恰恰是踩这个坑的那一类。
-
-顺带修掉一个**新引入的故障**：`networks:` 段的 `parent` / `subnet` / `gateway`
-原本是裸标量，而 `:?` 消息里有 ASCII「冒号+空格」（「查法: ip ...」），
-YAML 裸标量里出现 `: ` 会被当成新的映射键，**解析直接失败**：
-
-```
-yaml: line 492: mapping values are not allowed in this context
-```
-
-这比缺变量报错还早 —— 用户连「哪个变量缺了」都看不到。三处已加双引号
-（compose 照常插值，报错文案从此可以自由用 ASCII 标点）。
-
 ### 改动文件
 
 | 文件 | 改动 |
 |------|------|
-| `docker-compose.macvlan.yml` | `environment:` 段三个 L2 变量 → `:?` + 根因注释块；两段 `:?` 消息改为自带查法；`networks:` 段三处加双引号 |
+| `docker-compose.macvlan.yml` | `environment:` 段三个 L2 变量 → `:?` + 根因注释块 |
 | `docker-compose.ipvlan.yml` | 同上 |
 | `docker-compose.yml` | 补注释：说明为什么本文件必须保持 `:-` |
-| `tests/network_mode_test.sh` | 新增 **NM-58**：两段 `:?` 文案须逐字一致且都含查法；**NM-59**：`networks:` 段三处须加双引号 |
-| `docs/TROUBLESHOOTING.md` | 新增 §1.3.2.1：第三方面板部署场景的完整排查步骤 + 「别改 `networks:` 段」的警告 |
+| `tests/network_mode_test.sh` | 新增 **NM-57**：锁住「L2 两份 `:?` / host 一份 `:-`」两端 |
+| `docs/TROUBLESHOOTING.md` | 新增 §1.3.2.1：第三方面板部署场景的完整排查步骤 |
 
 ### 验收
 
-- `tests/network_mode_test.sh` → 138 passed / 0 failed（NM-58 共 12 项、NM-59 共 6 项）
-- 实机（63，Compose v2.40.3）`docker compose config` 五种场景：
-  三项全缺 → 报错指名变量 + 带查法；缺 GATEWAY → 指名 GATEWAY（不是笼统报错）；
-  三项全齐 → `parent: ens18` / `subnet: 192.168.50.0/24` / `gateway: 192.168.50.1`
-  插值正确；macvlan 文案一致；host 模式缺 L2 变量仍 `config` 通过
-- 三份 compose 的 YAML 结构解析通过
+- `tests/network_mode_test.sh` → 120 passed / 0 failed（含新增 NM-57 共 9 项断言）
+- 三份 compose 的 YAML 结构解析通过，`environment` 键数一致（46）
 - `go build ./...` / `go vet ./...` / `go test -count=1 ./...` 全绿
 
 ### 实机验证（192.168.50.63，Docker 28.5.2 / Compose v2.40.3）

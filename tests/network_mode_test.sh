@@ -564,7 +564,7 @@ for p in "$BASE" "$MACV" "$IPVL"; do
   fi
 done
 
-# ---------- NM-57 L2 必填变量的插值语义：L2 两份用 :?，host 那份用 :- ----------
+# ---------- NM-57 L2 三变量的单一真源：anchor，environment 与 networks 同源 ----------
 #
 # 背景（真实故障）：同一个 L2 变量在 compose 文件里出现两次，走两条
 # **互相独立**的插值路径 ——
@@ -572,99 +572,84 @@ done
 #   - environment 段的同名三项           → 插值结果作为容器 env 传进去
 # entrypoint 读的是**容器里**那一份。
 #
-# 当 environment 段写成 `:-`（缺失即空串）而 networks 段被改成 `:-<默认值>`
-# （面板的一键部署模板常这么改，好让 compose 先起得来），就会出现：
+# 两段只要语法不同（一边 `:-` 一边 `:?`、或一边有默认值一边没有），
+# 就会出现这个故障：
 #   compose 插值通过 → 容器创建成功 → 容器里三个变量是**空串**
 #   → entrypoint net_mode_validate 判「缺少必填变量」→ exit 12
 #   → restart: unless-stopped 无限重启，日志反复刷同一行 ERR，
 #     根因（变量压根没传进容器）从日志上完全看不出来。
 #
-# 所以 L2 两份的 environment 段必须用 `:?`（缺失即在 up 阶段报错），
-# 而 host 那份必须保持 `:-`（host 模式压根不用这三个变量，
-# 写成 `:?` 会让所有 host 部署直接起不来）。
+# v2.89 的修法是把两段都写成 `:?`（缺失即在 up 阶段报错）。
+# 但那逼用户额外准备一个 .env —— 而「拉到项目 → 编辑 compose → up」
+# 才是 compose 的主用法，那条路上很多人根本不会碰 .env。
 #
-# 这一项同时锁住两端，防止将来只改一边。
+# v2.90 改成 anchor：值在文件顶部的 x-l2-* 定义一次，
+# environment 段和 networks 段引用**同一个 anchor**。
+# 「两段不一致」这个故障模式被结构性消除 —— 不存在两套语法可比。
+# 用户只改顶部三行字面量即可，零 .env。
+#
+# 这一项锁三件事：
+#   1. L2 两份的 environment 段三项用 `*anchor` 而不是 `${...}`
+#   2. L2 两份的 networks 段三项用**同一个** anchor
+#   3. host 那份保持 `${...:-}`（host 模式不需要这三个变量）
+#
+# 另外锁住「anchor 定义存在且带 ${VAR:-默认}」——
+# 少了 `${VAR:-}` 就变成硬编码，.env 用户失去覆盖能力。
+
+_l2_anchor_name() {
+  case "$1" in
+    IKEV2_L2_PARENT)  echo l2_parent ;;
+    IKEV2_L2_SUBNET)  echo l2_subnet ;;
+    IKEV2_L2_GATEWAY) echo l2_gateway ;;
+  esac
+}
+
 for v in IKEV2_L2_PARENT IKEV2_L2_SUBNET IKEV2_L2_GATEWAY; do
+  a="$(_l2_anchor_name "$v")"
   for p in "$MACV" "$IPVL"; do
     f="$(basename "$p")"
+
+    # 1. environment 段必须是 *anchor
     raw="$(grep -E "^[[:space:]]+${v}:" "$p" | head -1)"
-    if printf '%s' "$raw" | grep -q ':?'; then
-      ok "NM-57 ${f} ${v} 用 :? 必填"
+    if printf '%s' "$raw" | grep -q "\*${a}\b"; then
+      ok "NM-57 ${f} environment ${v} 引用 *${a}"
     else
-      bad "NM-57 ${f} ${v} 用 :? 必填" "got: ${raw}"
+      bad "NM-57 ${f} environment ${v} 引用 *${a}" "got: ${raw}"
+    fi
+
+    # 2. networks 段（parent / subnet / gateway）必须是同一个 anchor
+    case "$v" in
+      IKEV2_L2_PARENT)  key="parent" ;;
+      IKEV2_L2_SUBNET)  key="subnet" ;;
+      IKEV2_L2_GATEWAY) key="gateway" ;;
+    esac
+    raw="$(grep -E "^[[:space:]]+-?[[:space:]]*${key}:" "$p" | head -1)"
+    if printf '%s' "$raw" | grep -q "\*${a}\b"; then
+      ok "NM-57 ${f} networks ${key} 引用 *${a}（与 environment 同源）"
+    else
+      bad "NM-57 ${f} networks ${key} 引用 *${a}" "got: ${raw}"
+    fi
+
+    # 3. anchor 定义存在，且值是 ${VAR:-默认}（保留 .env 覆盖能力）
+    #    注意：顶层 key 用连字符（x-l2-parent），anchor 名用下划线（&l2_parent）
+    raw="$(grep -E "^x-${a//_/-}:" "$p" | head -1)"
+    if [ -z "$raw" ]; then
+      bad "NM-57 ${f} 顶部有 x-${a} 定义" "缺失"
+    elif printf '%s' "$raw" | grep -q '&'"${a}"'\b' \
+         && printf '%s' "$raw" | grep -q '\${'"${v}"':-'; then
+      ok "NM-57 ${f} x-${a} 定义为 \${${v}:-默认}（.env 可覆盖）"
+    else
+      bad "NM-57 ${f} x-${a} 定义为 \${${v}:-默认}" "got: ${raw}"
     fi
   done
+
+  # 4. host 那份保持 ${...:-}（host 模式不需要这三个变量）
   raw="$(grep -E "^[[:space:]]+${v}:" "$BASE" | head -1)"
   if printf '%s' "$raw" | grep -q ':-' && ! printf '%s' "$raw" | grep -q ':?'; then
     ok "NM-57 docker-compose.yml ${v} 保持 :- 可选（host 模式不需要）"
   else
     bad "NM-57 docker-compose.yml ${v} 保持 :- 可选" "got: ${raw}"
   fi
-done
-
-# ---------- NM-58 `:?` 的报错文案必须自带「查法」，不能只写「必填」 ----------
-#
-# 背景：这三个值都能从宿主直接查到，用户唯一需要的是**去哪查**。
-# 而报错文本是对「面板用户」唯一能触达的排查通道 ——
-# 1Panel / 宝塔 / dpanel 的 compose 编排执行的是纯 `docker compose up`，
-# 不会跑 scripts/up.sh，所以指望不上任何脚本替用户自动填。
-# 能指望的只有这行报错本身。只写「必填：宿主父接口名，如 eth0」的话，
-# 拿到报错的人还得再去翻文档；带上查法则是当场就能照着敲、照着填。
-#
-# 断言口径：L2 两份里每一处 `:?` 消息都必须含「查法」二字，
-# 且 networks 段与 environment 段的文案必须**逐字一致**（同一变量的两条
-# 插值路径给出同一条排查指引，用户在哪一段看到报错都能照着填）。
-for p in "$MACV" "$IPVL"; do
-  f="$(basename "$p")"
-  for v in IKEV2_L2_PARENT IKEV2_L2_SUBNET IKEV2_L2_GATEWAY; do
-    # 模式用单引号 + 变量拼接，不要写成 "...\$\{..." ——
-    # bash 在双引号里会把 `\$` 吃掉成 `$`，`$` 在 ERE 中是行尾锚点，
-    # 于是模式静默失配（实测 count=0，报「应为 2」但看不出模式写错了）。
-    # 同理 `\{` 也无需转义，`\{` 在 ERE 里是区间量词的起始符，不是字面花括号。
-    needle='${'"$v"':?'
-    n=$(grep -F "$needle" "$p" | grep -c '查法')
-    if [ "$n" -ge 2 ]; then
-      ok "NM-58 ${f} ${v} 两处 :? 报错均自带查法"
-    else
-      bad "NM-58 ${f} ${v} 两处 :? 报错均自带查法" "含查法的 :? 行数=${n}（应为 2）"
-    fi
-  done
-  # 逐字一致：抽 networks 段与 environment 段各自的 :? 消息比对。
-  # 用 awk 的 index()/substr() 按字面量定位，不用 grep -E ——
-  # 消息里同时有 $ { } ? 四种正则元字符，转义层级一多就容易静默失配。
-  # 截到消息自带的收尾 `}` 为止：两段现在**都**被双引号包着，
-  # awk 从 `${` 起截到 `}` 止，外层引号自然被剥掉。
-  for v in IKEV2_L2_PARENT IKEV2_L2_SUBNET IKEV2_L2_GATEWAY; do
-    msgs="$(awk -v pat='${'"$v"':?' 'index($0,pat){
-      s = index($0, pat); e = index(substr($0, s), "}");
-      print substr($0, s, e - 1)
-    }' "$p")"
-    envmsg="$(printf '%s\n' "$msgs" | sed -n 1p)"
-    netmsg="$(printf '%s\n' "$msgs" | sed -n 2p)"
-    if [ -n "$envmsg" ] && [ "$envmsg" = "$netmsg" ]; then
-      ok "NM-58 ${f} ${v} 两段文案一致"
-    else
-      bad "NM-58 ${f} ${v} 两段文案一致" "env=${envmsg} / net=${netmsg}"
-    fi
-  done
-
-  # ---------- NM-59 networks 段的三处 :? 必须加双引号 ----------
-  #
-  # 真实故障（本机没装 Docker，靠 63 实测才发现）：
-  # networks 段的 parent/subnet/gateway 原本是**裸标量**，
-  # 而 `:?` 消息里有 ASCII「冒号+空格」（如「查法: ip ...」）——
-  # YAML 裸标量里出现 `: ` 会被当成新的映射键，直接解析失败：
-  #   yaml: line 492: mapping values are not allowed in this context
-  # 这比缺变量报错还早，用户连「哪个变量缺了」都看不到。
-  # 加双引号后 compose 照常插值，报错文案就能自由用 ASCII 标点。
-  for key in 'parent: ' 'subnet: ' 'gateway: '; do
-    raw="$(grep -E "^[[:space:]]+(- )?${key}" "$p" | grep -F ':?' | head -1)"
-    if printf '%s' "$raw" | grep -qE ":[[:space:]]+\"\\\$\{"; then
-      ok "NM-59 ${f} ${key}加双引号包裹"
-    else
-      bad "NM-59 ${f} ${key}加双引号包裹" "got: ${raw}"
-    fi
-  done
 done
 
 # ---------- 非法模式 ----------
@@ -804,11 +789,17 @@ fi
 # %IKEV2_OUT_IF%）在解释性注释里会被有意提到，只看可执行代码。
 code_only() { sed -e 's/^[[:space:]]*#.*$//' "$1"; }
 
+# 下面所有「剥注释后 grep -q」的判据都走 *_code 变量而不是管道：
+# 本测试开了 `set -o pipefail`，`grep -q` 命中即退出会让上游 sed 收到
+# SIGPIPE（141），整条管道被判失败。文件一大就从「稳定通过」变成「时好时坏」。
+_entry_code="$(code_only "$ENTRY_SH")"
+_up_code="$(code_only "$UP_SH")"
+
 # ---------- 模板里不该再有 %IKEV2_OUT_IF% 占位符（P1-3 回归）----------
 # sed 是死代码的前提是模板里没这个占位符；哪天有人加回来，这条会红。
 if grep -q '%IKEV2_OUT_IF%' "${SCRIPT_DIR}/../configs/swanctl-ipv6-only.conf"; then
   bad "NM-49 模板无 %IKEV2_OUT_IF% 占位符" "模板里又出现了这个占位符"
-elif code_only "$ENTRY_SH" | grep -q 's|%IKEV2_OUT_IF%|'; then
+elif printf '%s' "$_entry_code" | grep -q 's|%IKEV2_OUT_IF%|'; then
   bad "NM-49 模板无 %IKEV2_OUT_IF% 占位符" "entrypoint 里仍有对应的死 sed"
 else
   ok "NM-49 %IKEV2_OUT_IF% 占位符与死 sed 均已移除"
@@ -817,16 +808,21 @@ fi
 # ---------- up.sh 必须复用 network-mode.sh，而不是自带一份校验 ----------
 # P1：up.sh 曾自带 require_l2_env，与 net_mode_validate 是同一件事的两份实现，
 # 规则一改就漂移。这条守住「单一真源」。
-if code_only "$UP_SH" | grep -q 'network-mode\.sh' \
-   && grep -q 'net_mode_validate' "$UP_SH"; then
+#
+# 用前面已经算好的 $_up_code（见 code_only 定义处的说明）：
+# 本测试开了 `set -o pipefail`，`grep -q` 命中即退出会让上游 sed 收到
+# SIGPIPE（141），整条管道被判失败。up.sh 变大后这个竞态从「稳定通过」
+# 变成「时好时坏」—— 实测 284 行时同一判据连跑 5 次得到 FFP PF。
+if printf '%s' "$_up_code" | grep -q 'network-mode\.sh' \
+   && printf '%s' "$_up_code" | grep -q 'net_mode_validate'; then
   ok "NM-50 up.sh source network-mode.sh 并调用 net_mode_validate"
 else
   bad "NM-50 up.sh 复用 network-mode.sh" \
-      "source=$(code_only "$UP_SH" | grep -c 'network-mode\.sh') validate=$(grep -c 'net_mode_validate' "$UP_SH")"
+      "source=$(printf '%s' "$_up_code" | grep -c 'network-mode\.sh') validate=$(printf '%s' "$_up_code" | grep -c 'net_mode_validate')"
 fi
 
 # 旧的那份重复实现必须已经删干净（否则两份逻辑又会各自漂移）
-if code_only "$UP_SH" | grep -q 'require_l2_env'; then
+if printf '%s' "$_up_code" | grep -q 'require_l2_env'; then
   bad "NM-51 up.sh 已删除重复的 require_l2_env" "仍能找到该函数"
 else
   ok "NM-51 up.sh 已删除重复的 require_l2_env"
