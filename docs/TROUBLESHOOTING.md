@@ -340,18 +340,22 @@ entrypoint 读的是**容器里**那一份。第三方面板的编排有自己�
    醒目注释块，下面三行是唯一需要改的地方：
 
    ```yaml
-   x-l2-parent:  &l2_parent  "eth0"
-   x-l2-subnet:  &l2_subnet  "192.168.50.0/24"
-   x-l2-gateway: &l2_gateway "192.168.50.1"
+   x-l2-parent:  &l2_parent  "${IKEV2_L2_PARENT:-eth0}"
+   x-l2-subnet:  &l2_subnet  "${IKEV2_L2_SUBNET:-192.168.50.0/24}"
+   x-l2-gateway: &l2_gateway "${IKEV2_L2_GATEWAY:-192.168.50.1}"
    ```
 
    `environment:` 段和 `networks:` 段引用的是**同一个 anchor**，
    所以不存在「只改了一边」的可能。改完直接 `up`，不需要 `.env`。
 
+   > ⚠️ **把值填在 `${...:-}` 的括号里，不要把外壳删掉。**
+   > 外壳在，`.env` 用户才能用 `.env` 覆盖（写成裸字面量 `"eth0"` 会让
+   > `.env` 永久失效）；不写 `.env` 的话外壳留着也不影响 —— 括号里就是最终生效值。
+
    > ⚠️ 若面板的「环境变量」里已经存在 `IKEV2_L2_*` 三项，那些值会**优先于**
-   > 你在 compose 里写的字面量（`shell env > .env > compose 字面量`，是 Docker
+   > 你在 compose 里写的默认值（`shell env > .env > compose 顶部默认值`，是 Docker
    > Compose 的标准行为）。此时要么改面板的环境变量，要么把 compose 里的
-   > 字面量去掉、只靠面板传。
+   > 默认值去掉、只靠面板传。
 
 2. **在面板的「环境变量」里补齐三项**（`.env` 路线，依然完全支持）：
 
@@ -586,6 +590,7 @@ docker network inspect <项目名>_ikev2-l2 | grep -i macvlan -A3
 | **容器压根没创建**（`docker compose up` 就报 `device or resource busy`） | 宿主虚拟化层限制，**不是配置问题** → [1.7.6](#176-device-or-resource-busy宿主虚拟化层限制) |
 | IP 拿到了但 ping 不通网关 | 交换机 / 云安全组不允许多个源 MAC（macvlan）→ 改用 `ipvlan`；或网络是 `/32` 主机路由，点对点配置 |
 | 容器 ping 不到**宿主** | **这是设计如此**，macvlan/ipvlan 在内核层隔离父子，不是 bug。需要互通就建 shim |
+| 配了固定 IP 后**宿主入站全断** | 固定 IP 撞上宿主自己的地址 → [1.7.7](#177-固定容器-ipv4-配错ikev2_l2_ipv4v291-起) |
 
 #### 1.7.3 容器拿不到 v6 地址
 
@@ -706,6 +711,74 @@ docker network rm ikev2-l2-probe     # 探测完记得删
 
 ⚠️ shim（[1.7.5](#175-宿主与容器需要互通建-shim)）在宿主限制的 parent 上通常也不通 ——
 shim 本身也是建在 parent 上的 macvlan 子接口，同样被内核拒绝。
+
+#### 1.7.7 固定容器 IPv4 配错（`IKEV2_L2_IPV4`，v2.91 起）
+
+v2.91 起 L2 模式支持固定容器地址，在 compose 顶部第四行配：
+
+```yaml
+x-l2-ipv4:    &l2_ipv4    "${IKEV2_L2_IPV4:-192.168.50.77}"
+```
+
+**留空 = Docker IPAM 自动分配**（compose 会把空值键丢掉，展开成 `ikev2-l2: {}`）。
+
+##### ⚠️ 最严重：填了宿主自己正在用的地址 → 宿主入站连接全断
+
+**症状**：容器正常创建、正常启动、日志无任何报错，然后**宿主的 SSH 直接被
+reset**（`Connection reset by peer`），面板也连不上；网关 ping 得通，
+但所有入站连接断掉。
+
+**根因**：docker daemon 只拒「不在子网内」和「网络自己已占用」的地址，
+**不知道宿主某个接口上已经有这个 IP**。容器起来后抢走宿主该 IP 的 ARP，
+宿主所有入站流量被容器吸走。
+
+**实测（192.168.50.63，Docker 28.5.2）**：固定 IP 填 `192.168.50.63`
+（宿主自己的地址）→ 容器 `Up`、无报错 → 宿主 SSH 立刻被 reset，两次复现。
+
+**处置**：
+
+```bash
+# 1. 删掉容器和它抢的网络，宿主网络即刻恢复
+docker rm -f ikev2-panel
+docker network rm <项目名>_ikev2-l2
+
+# 2. 换一个宿主未占用的地址，或干脆留空让 Docker 自动分配
+```
+
+**预防**：
+
+- `scripts/up.sh` 从 v2.91 起会在 `up` **之前**比对宿主所有接口的 IPv4，
+  冲突则拒绝启动（容器不会创建，宿主网络完好）。
+- 用 `docker compose up`（不经 `up.sh`）的话，自己先查一遍：
+
+  ```bash
+  ip -o -4 addr show | grep -F "192.168.50.77"   # 有输出 = 这个地址已被占用，别用
+  ```
+
+##### 其他三种配错
+
+| 现象 | 原因 | 处置 |
+|------|------|------|
+| `no configured subnet or ip-range contain the IP address` | 固定 IP 不在 `IKEV2_L2_SUBNET` 内 | 换成落在子网内的地址 |
+| `Address already in use` | 固定 IP = 网关（`.1`）或网络地址（`.0`）/ 广播（`.255`） | 换一个 |
+| `ERR: IKEV2_L2_IPV4='...' 不是合法 IPv4 地址` / `不在 IKEV2_L2_SUBNET='...' 内` / `不能与网关地址相同` | `scripts/up.sh` 部署前拦截 | 按提示改 |
+
+**核对固定地址有没有真的生效**（不用猜）：
+
+```bash
+# 容器实际拿到的地址
+docker inspect ikev2-panel --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}'
+
+# 容器网卡上的地址
+docker exec ikev2-panel ip -4 addr show eth0
+
+# 启动日志里的回显（留空时显示 auto-assigned by Docker IPAM）
+docker logs ikev2-panel 2>&1 | grep 'static ipv4'
+```
+
+⚠️ **固定地址写在 `service` 段的 `networks.<name>.ipv4_address`**，
+不是顶层 `networks` 段的 `ipam` 里 —— 塞进 ipam 会被 Docker **静默忽略**
+（无报错、地址不生效）。
 
 ---
 

@@ -294,6 +294,10 @@ services:
       IKEV2_L2_SUBNET: "${IKEV2_L2_SUBNET:-}"
       # 该子网的宿主网关（必须是宿主自己的网关，容器经它出网）。
       IKEV2_L2_GATEWAY: "${IKEV2_L2_GATEWAY:-}"
+      # 可选：容器固定 IPv4。host 模式用不到（共享宿主 netns，地址就是宿主的），
+      # 这里保留是为了三份文件的 environment 键集合完全一致 ——
+      # 换 compose 文件时不会因为少一个键而少透传一个变量。
+      IKEV2_L2_IPV4: "${IKEV2_L2_IPV4:-}"
       # macvlan 专属：bridge(默认) | private | vepa。passthru 与 IPAM 互斥，已禁用。
       IKEV2_MACVLAN_MODE: "${IKEV2_MACVLAN_MODE:-}"
       # ipvlan 专属：l2(默认，强推荐) | l3 | l3s。非 l2 会丢弃广播/组播。

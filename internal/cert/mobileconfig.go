@@ -751,7 +751,11 @@ func xmlEscape(s string) string {
 // v2.90：改用 YAML anchor —— 值在 compose 顶部 x-l2-* 定义一次，
 // environment 段与 networks 段引用同一个 anchor，用户只改顶部三行、零 .env，
 // 且两条插值路径结构性不可能不一致。详见 docs/CHANGELOG.md（v2.90）。
-const PanelVersion = "v2.90"
+//
+// v2.91：L2 模式支持固定容器 IPv4（compose 顶部 x-l2-ipv4 第四行，
+// 落在 service 段的 networks.<name>.ipv4_address；留空 = Docker 自动分配）。
+// 详见 docs/CHANGELOG.md（v2.91）。
+const PanelVersion = "v2.91"
 
 // generateUUID RFC 4122 v4 随机 UUID。
 // mobileconfig 的 PayloadUUID/ProfileUUID 必须全局唯一，否则 iOS 覆盖会乱。

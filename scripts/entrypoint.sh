@@ -639,6 +639,13 @@ case "$IKEV2_NETWORK_MODE" in
   macvlan|ipvlan)
     echo "${LOG_PREFIX} [network-mode] ${IKEV2_NETWORK_MODE} ($(net_mode_driver_desc "$IKEV2_NETWORK_MODE"))"
     echo "${LOG_PREFIX} [network-mode] parent=${IKEV2_L2_PARENT} subnet=${IKEV2_L2_SUBNET} gateway=${IKEV2_L2_GATEWAY}"
+    # 固定 IPv4（可选）。留空 = Docker IPAM 自动分配，这里回显实际拿到的地址，
+    # 让「我配的固定地址到底生效没有」一眼可见，不用 docker inspect。
+    if [ -n "${IKEV2_L2_IPV4:-}" ]; then
+      echo "${LOG_PREFIX} [network-mode] static ipv4=${IKEV2_L2_IPV4}"
+    else
+      echo "${LOG_PREFIX} [network-mode] static ipv4=(auto-assigned by Docker IPAM)"
+    fi
     echo "${LOG_PREFIX} [network-mode] container iface=${OUT_IF} (IKEV2_OUT_IF 语义为容器网卡名，不是宿主网卡名)"
     echo "${LOG_PREFIX} [network-mode] IPv6 via RA/SLAAC; injected sysctls: $(net_mode_sysctls | tr '\n' ' ')"
     # 交叉核对：容器私有 netns 下看不到宿主常见的 docker0 桥。

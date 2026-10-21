@@ -563,6 +563,8 @@ func deployOnlyParamList() []deployOnlyParam {
 			"L2 模式 IPv4 子网,填 IPv6 会导致公网不可达"},
 		{"IKEV2_L2_GATEWAY", get("IKEV2_L2_GATEWAY", ""), "(空)",
 			"L2 模式宿主网关"},
+		{"IKEV2_L2_IPV4", get("IKEV2_L2_IPV4", ""), "(自动分配)",
+			"L2 模式容器固定 IPv4,留空由 Docker 自动分配"},
 		{"IKEV2_MACVLAN_MODE", get("IKEV2_MACVLAN_MODE", ""), "(默认 bridge)",
 			"macvlan 模式:bridge / private / vepa"},
 		{"IKEV2_IPVLAN_MODE", get("IKEV2_IPVLAN_MODE", ""), "(默认 l2)",

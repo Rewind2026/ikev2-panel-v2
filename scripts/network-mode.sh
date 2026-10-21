@@ -154,7 +154,7 @@ net_mode_validate() {
   case "$_m" in
     "$NET_MODE_HOST")
       # host 模式忽略 L2 专属变量（老 .env 残留不应导致启动失败，只提示）
-      for _v in IKEV2_L2_PARENT IKEV2_L2_SUBNET IKEV2_L2_GATEWAY \
+      for _v in IKEV2_L2_PARENT IKEV2_L2_SUBNET IKEV2_L2_GATEWAY IKEV2_L2_IPV4 \
                IKEV2_MACVLAN_MODE IKEV2_IPVLAN_MODE IKEV2_IPVLAN_FLAG; do
         eval "_val=\${$_v:-}"
         if [ -n "$_val" ]; then
@@ -200,6 +200,26 @@ net_mode_validate() {
         echo "ERR: IKEV2_L2_GATEWAY='${IKEV2_L2_GATEWAY}' 不在 IKEV2_L2_SUBNET='${IKEV2_L2_SUBNET}' 内" >&2
         return 1
       }
+
+      # 固定容器 IPv4（可选）。留空 = Docker IPAM 自动分配，不校验。
+      #
+      # 校验放在这里而不是只靠 daemon 报错，是为了给出**指名变量**的提示 ——
+      # daemon 只会说 "no configured subnet or ip-range contain the IP address"，
+      # 不会告诉你是哪个变量填错了、应该填成什么样。
+      if [ -n "${IKEV2_L2_IPV4:-}" ]; then
+        _nm_valid_ipv4 "${IKEV2_L2_IPV4}" || {
+          echo "ERR: IKEV2_L2_IPV4='${IKEV2_L2_IPV4}' 不是合法 IPv4 地址" >&2
+          return 1
+        }
+        _nm_gw_in_subnet "${IKEV2_L2_IPV4}" "${IKEV2_L2_SUBNET}" || {
+          echo "ERR: IKEV2_L2_IPV4='${IKEV2_L2_IPV4}' 不在 IKEV2_L2_SUBNET='${IKEV2_L2_SUBNET}' 内" >&2
+          return 1
+        }
+        [ "${IKEV2_L2_IPV4}" != "${IKEV2_L2_GATEWAY}" ] || {
+          echo "ERR: IKEV2_L2_IPV4='${IKEV2_L2_IPV4}' 不能与网关地址相同" >&2
+          return 1
+        }
+      fi
 
       if [ "$_m" = "$NET_MODE_MACVLAN" ]; then
         case "${IKEV2_MACVLAN_MODE:-bridge}" in

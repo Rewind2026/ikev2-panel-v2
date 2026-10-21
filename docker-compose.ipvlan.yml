@@ -18,9 +18,39 @@
 # 优先级：shell 环境变量 > .env 文件 > 下面这个字面量。
 #   愿意用 .env 的人可以照旧用，三个变量名不变。
 #   （anchor 里套的就是 ${VAR:-默认}，实测 Compose v2.40.3 行为正确）
+#
+# ⚠️ 要填值时**把值填在 ${...:-} 的括号里**，别把外壳删掉：
+#     x-l2-parent:  &l2_parent  "${IKEV2_L2_PARENT:-ens18}"   ← 对
+#     x-l2-parent:  &l2_parent  "ens18"                      ← 错，.env 会永久失效
+#   外壳在，.env 里同名变量才能覆盖它（标准优先级：shell > .env > 本文件）。
+#   不写 .env 的话，外壳留着不影响 —— 括号里就是最终生效值。
 x-l2-parent:  &l2_parent  "${IKEV2_L2_PARENT:-}"
 x-l2-subnet:  &l2_subnet  "${IKEV2_L2_SUBNET:-}"
 x-l2-gateway: &l2_gateway "${IKEV2_L2_GATEWAY:-}"
+
+# ---- 可选：固定容器 IPv4（留空 = 由 Docker 自动分配）----
+#
+# 留空时 Docker IPAM 从上面那个 subnet 里自动挑一个地址（实测拿到 .2）。
+# 需要固定地址时（比如防火墙规则里写死、或者多个实例要区分），
+# 在下面填一个**落在 subnet 内、且不等于 gateway** 的地址：
+#
+#   x-l2-ipv4: &l2_ipv4 "192.168.50.77"
+#
+# 为什么单独一行而不是塞进 ipam：
+#   容器自身的静态地址属于 **service 段的 endpoint 配置**（networks.<name>.ipv4_address），
+#   不属于网络本身的 ipam（后者配的是 subnet/gateway）。放错位置 Docker 会静默忽略。
+#
+# ⚠️ 填了但不在 subnet 内 → docker daemon 直接拒绝创建容器：
+#     "no configured subnet or ip-range contain the IP address x.x.x.x"
+#   报错来自 daemon，比在 entrypoint 里拦早一步。
+#
+# ⚠️⚠️ 填了宿主自己正在用的地址 → daemon **不会**拦，容器照样起来，
+#   但它会把宿主的 ARP 抢走，宿主所有入站连接直接断掉
+#   （实测 192.168.50.63 上填 .63 → SSH "Connection reset by peer"）。
+#   scripts/up.sh 会在启动前比对宿主网卡地址并拒绝启动。
+#   用 docker compose up（不经 up.sh）的话，请自己确认这个地址没被占用：
+#     ip -o -4 addr show | grep -F "<你要填的地址>"
+x-l2-ipv4:    &l2_ipv4    "${IKEV2_L2_IPV4:-}"
 
 # docker-compose.ipvlan.yml —— 【ipvlan 网络模式】
 # 运行期配置的唯一权威。设计说明见 docs/architecture.md §11。
@@ -101,8 +131,16 @@ services:
     #
     # 容器 IP 从宿主所在网段分配，所以 500/4500/8443 与宿主服务完全不冲突。
     # networks 段的 driver_opts / ipam / options(sysctls) 在文件末尾。
+    #
+    # 这里用**长语法**（`ikev2-l2: {ipv4_address: ...}`）而不是短语法（`- ikev2-l2`），
+    # 因为固定 IPv4 地址属于 endpoint 级配置，短语法表达不了。
+    # 长语法在 ipv4_address 为空时展开成 `ikev2-l2: {}`，
+    # 与短语法行为完全一致（实测别名同为 [<容器名>, <服务名>]）。
     networks:
-      - ikev2-l2
+      ikev2-l2:
+        # 固定容器 IPv4。留空 = Docker IPAM 自动分配。
+        # 值来自文件顶部的 x-l2-ipv4 anchor（改那里，不要改这里）。
+        ipv4_address: *l2_ipv4
 
     cap_drop:
       - ALL
@@ -352,6 +390,17 @@ services:
       IKEV2_L2_SUBNET: *l2_subnet
       # 该子网的宿主网关（必须是宿主自己的网关，容器经它出网）。
       IKEV2_L2_GATEWAY: *l2_gateway
+      # 可选：容器固定 IPv4。留空 = Docker IPAM 自动分配。
+      #
+      # 这个变量**不参与** entrypoint 的必填校验（L2 三项必填不含它），
+      # 它只做两件事：
+      #   1. 透进容器，让 entrypoint 能在启动日志里回显「我的地址是 X」
+      #      并在地址不落在 subnet 内时给出比 daemon 更清楚的提示；
+      #   2. 让面板「部署级参数」区能显示它（用户改完 compose 能在 UI 上确认）。
+      #
+      # 真正的固定地址在 service 段的 networks.ikev2-l2.ipv4_address，
+      # 值同样来自顶部 x-l2-ipv4 anchor —— 单一真源，不会两处不一致。
+      IKEV2_L2_IPV4: *l2_ipv4
       # ipvlan 专属：l2(默认，强推荐) | l3 | l3s。非 l2 会丢弃广播/组播
       # （只打 WARN，不拒绝），IKEv2 多用户并发场景不友好。
       IKEV2_IPVLAN_MODE: "${IKEV2_IPVLAN_MODE:-}"

@@ -60,9 +60,9 @@ env_get() {
 
 [ -n "${IKEV2_NETWORK_MODE:-}" ] || IKEV2_NETWORK_MODE="$(env_get IKEV2_NETWORK_MODE)"
 
-# 三个 L2 变量沿用原样：读到就 export，让 docker compose 的 ${...} 插值
+# L2 变量沿用原样：读到就 export，让 docker compose 的 ${...} 插值
 # 拿到与本脚本一致的取值。
-for _k in IKEV2_L2_PARENT IKEV2_L2_SUBNET IKEV2_L2_GATEWAY; do
+for _k in IKEV2_L2_PARENT IKEV2_L2_SUBNET IKEV2_L2_GATEWAY IKEV2_L2_IPV4; do
   if [ -z "${!_k:-}" ]; then
     declare "$_k=$(env_get "$_k")"
     export "$_k"
@@ -75,20 +75,42 @@ done
 #
 # 只在本变量仍为空时才读，且**不 export**：compose 会自己插值，
 # 这里 export 反而可能用一个被误解的值去覆盖 compose 本来能正确读到的。
+#
+# compose 顶部有三种写法，都要认（否则用户按 README 写完，up.sh 却说「缺变量」）：
+#   1) x-l2-parent:  &l2_parent  "${IKEV2_L2_PARENT:-ens18}"   ← 推荐
+#      取 :- 后面的默认值
+#   2) x-l2-parent:  &l2_parent  "ens18"                      ← 裸字面量
+#      取引号里的内容
+#   3) x-l2-parent:  &l2_parent  ens18                         ← 裸值无引号
+#      取 &anchor 之后的原文
+#
+# 注意顶层 key 用连字符（x-l2-parent），anchor 名用下划线（&l2_parent），
+# 所以 key 要把 $2 里的下划线换成连字符。
 compose_get() {
   _cf="./docker-compose.${1}.yml"
   [ -f "$_cf" ] || return 0
-  # 形如： x-l2-parent:  &l2_parent  "eth0"
-  # 注意顶层 key 用连字符（x-l2-parent），anchor 名用下划线（&l2_parent），
-  # 所以 key 要把 $2 里的下划线换成连字符。
-  # 取引号里的字面量；没有引号（用户写成裸值）时退化为取 &anchor 之后的原文。
-  sed -nE "s/^x-${2//_/-}:[[:space:]]*&${2}[[:space:]]+\"([^\"]*)\".*/\1/p" "$_cf" | head -n1
-}
-compose_get_unquoted() {
-  _cf="./docker-compose.${1}.yml"
-  [ -f "$_cf" ] || return 0
-  sed -nE "s/^x-${2//_/-}:[[:space:]]*&${2}[[:space:]]+([^\"[:space:]].*)$/\1/p" "$_cf" \
-    | head -n1 | sed -e 's/[[:space:]]*$//'
+  _key="${2//_/-}"
+  # 形态 1：${VAR:-默认值} → 取默认值
+  _v="$(sed -nE "s/^x-${_key}:[[:space:]]*&${2}[[:space:]]+\"\\\$\{[A-Za-z_][A-Za-z0-9_]*:-([^}]*)\}\".*/\1/p" "$_cf" | head -n1)"
+  if [ -n "$_v" ]; then
+    printf '%s' "$_v"
+    return 0
+  fi
+  # 形态 1 的变体：${VAR:-}（默认值留空）→ 返回空
+  if grep -qE "^x-${_key}:[[:space:]]*&${2}[[:space:]]+\"\\\$\{[A-Za-z_][A-Za-z0-9_]*:-\}\"" "$_cf"; then
+    return 0
+  fi
+  # 形态 2：引号里的字面量
+  _v="$(sed -nE "s/^x-${_key}:[[:space:]]*&${2}[[:space:]]+\"([^\"]*)\".*/\1/p" "$_cf" | head -n1)"
+  if [ -n "$_v" ]; then
+    printf '%s' "$_v"
+    return 0
+  fi
+  # 形态 3：裸值（无引号）
+  _v="$(sed -nE "s/^x-${_key}:[[:space:]]*&${2}[[:space:]]+([^\"[:space:]].*)$/\1/p" "$_cf" \
+    | head -n1 | sed -e 's/[[:space:]]*$//')"
+  [ -n "$_v" ] && printf '%s' "$_v"
+  return 0
 }
 
 # 模式专属开关只给 net_mode_validate 用，**不 export**：
@@ -117,17 +139,17 @@ if [ "$NETWORK_MODE" = "$NET_MODE_MACVLAN" ] || [ "$NETWORK_MODE" = "$NET_MODE_I
       IKEV2_L2_PARENT)  echo l2_parent ;;
       IKEV2_L2_SUBNET)  echo l2_subnet ;;
       IKEV2_L2_GATEWAY) echo l2_gateway ;;
+      IKEV2_L2_IPV4)    echo l2_ipv4 ;;
     esac
   }
-  for _k in IKEV2_L2_PARENT IKEV2_L2_SUBNET IKEV2_L2_GATEWAY; do
+  for _k in IKEV2_L2_PARENT IKEV2_L2_SUBNET IKEV2_L2_GATEWAY IKEV2_L2_IPV4; do
     eval "_cur=\${$_k:-}"
     [ -n "$_cur" ] && continue
     _ak="$(_anchor_key "$_k")"
     _v="$(compose_get "$NETWORK_MODE" "$_ak")"
-    [ -n "$_v" ] || _v="$(compose_get_unquoted "$NETWORK_MODE" "$_ak")"
-    # anchor 里若仍写着 ${VAR:-}（未落成字面量），compose_get 取到的是
-    # 那段插值表达式本身，不是真实值 —— 这种情况交给 net_mode_validate
-    # 报「缺少必填变量」才是对的。
+    # compose_get 已处理 ${VAR:-默认} / "字面量" / 裸值 三种形态。
+    # 若取到的仍是插值表达式本身（如 ${VAR:?msg}），说明这个值没解析出来 ——
+    # 交给 net_mode_validate 报「缺少必填变量」才是对的。
     case "$_v" in
       '${'*) continue ;;
     esac
@@ -181,11 +203,18 @@ macvlan / ipvlan 需要提供三项（两种方式任选）：
        x-l2-subnet:  &l2_subnet  "192.168.1.0/24"
        x-l2-gateway: &l2_gateway "192.168.1.1"
      environment 段与 networks 段引用同一个 anchor，不会只改一边。
+     ⚠️ 保留 \${IKEV2_L2_XXX:-} 外壳（把值填在 :- 后面），
+        这样 .env 用户仍能覆盖；直接写裸值会让 .env 永久失效。
   2) 或在 .env 里提供（优先级 shell env > .env > compose 字面量）：
        IKEV2_L2_PARENT=eth0
        IKEV2_L2_SUBNET=192.168.1.0/24
        IKEV2_L2_GATEWAY=192.168.1.1
      (IKEV2_L2_SUBNET 只支持 IPv4,v6 走 RA/SLAAC)
+
+  可选：固定容器 IPv4（留空 = Docker 自动分配）
+       x-l2-ipv4:    &l2_ipv4    "192.168.1.10"
+     必须落在 subnet 内、且不等于网关、且宿主上没有被占用
+     （撞上宿主已用地址会让宿主入站连接全断，up.sh 会在启动前拦）。
 
   查真实值:
     ip -o -4 route show default | head -1    # dev 后面=父接口,第三列=网关
@@ -224,6 +253,11 @@ case "$NETWORK_MODE" in
       || die "docker-compose.${NETWORK_MODE}.yml 不存在（请先 git pull 更新项目文件）"
     COMPOSE_FILES="-f docker-compose.${NETWORK_MODE}.yml"
     warn "网络模式: ${NETWORK_MODE}（parent=${IKEV2_L2_PARENT} subnet=${IKEV2_L2_SUBNET} gateway=${IKEV2_L2_GATEWAY}）"
+    if [ -n "${IKEV2_L2_IPV4:-}" ]; then
+      warn "容器固定 IPv4: ${IKEV2_L2_IPV4}"
+    else
+      warn "容器固定 IPv4: (未设置，由 Docker 自动分配)"
+    fi
     warn "切换网络模式必须重建容器，本次会自动 recreate"
     ;;
   *)
@@ -233,6 +267,39 @@ case "$NETWORK_MODE" in
     die "IKEV2_NETWORK_MODE=${NETWORK_MODE} 尚未被 scripts/up.sh 支持（compose 文件缺失），请检查 scripts/network-mode.sh 与本脚本是否同步"
     ;;
 esac
+
+# ---------- 固定 IPv4 与宿主现有地址的冲突检查（部署前）----------
+#
+# 为什么必须在**部署前**拦：docker daemon 只会拒「不在子网内」和
+# 「网络自己已占用」的地址，**不会**知道宿主某个接口上已经有这个 IP。
+#
+# 实测（192.168.50.63，Docker 28.5.2，2026-10-21）：
+#   固定 IP 填成宿主自己的 192.168.50.63 →
+#     容器正常创建、正常启动，宿主 ARP 表被抢，
+#     宿主的 SSH 连接直接 "Connection reset by peer"，
+#     网关 ping 通但所有入站连接断掉 —— 宿主网络被打挂。
+#
+# 也就是说，**填错固定 IP 的代价可能不止是容器起不来，而是宿主失联**。
+# daemon 拦不住，就只能由 up.sh 在 up 之前拦。
+#
+# 检查方式：列出宿主所有接口的 IPv4 地址，逐个比对。
+_l2_ipv4_conflict_check() {
+  [ -n "${IKEV2_L2_IPV4:-}" ] || return 0
+  command -v ip >/dev/null 2>&1 || return 0
+  _hits="$(ip -o -4 addr show 2>/dev/null \
+    | awk '{for (i=1;i<=NF;i++) if ($i=="inet") {split($(i+1),a,"/"); print a[1]}}' \
+    | grep -Fx "${IKEV2_L2_IPV4}" || true)"
+  [ -z "$_hits" ] && return 0
+  echo "ERR: IKEV2_L2_IPV4=${IKEV2_L2_IPV4} 与宿主已有地址冲突：" >&2
+  echo "     宿主网卡上已经有这个 IP，容器启动后会抢走它（ARP 冲突），" >&2
+  echo "     导致宿主入站连接全部断开（实测 SSH 直接被 reset）。" >&2
+  echo "     请换一个宿主未占用的地址，或把 x-l2-ipv4 留空让 Docker 自动分配。" >&2
+  return 1
+}
+if [ "$NETWORK_MODE" = "$NET_MODE_MACVLAN" ] || [ "$NETWORK_MODE" = "$NET_MODE_IPVLAN" ]; then
+  _l2_ipv4_conflict_check \
+    || die "固定 IPv4 与宿主地址冲突，拒绝启动（详见上方 ERR 行）"
+fi
 
 # ---------- 准备 ./logs bind mount 目标(v2.86-PR13.4)----------
 # docker-compose 把容器内 /var/log bind 到宿主 ./logs。

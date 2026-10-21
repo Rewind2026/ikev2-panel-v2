@@ -30,7 +30,7 @@ bad()  { FAIL=$((FAIL+1)); FAILED_IDS+=("$1"); printf '  %s %s — %s\n' "$(_red
 # 未列出的 IKEV2_* 全部 unset，保证每个用例互不污染。
 validate_rc() {
   (
-    unset IKEV2_L2_PARENT IKEV2_L2_SUBNET IKEV2_L2_GATEWAY
+    unset IKEV2_L2_PARENT IKEV2_L2_SUBNET IKEV2_L2_GATEWAY IKEV2_L2_IPV4
     unset IKEV2_MACVLAN_MODE IKEV2_IPVLAN_MODE IKEV2_IPVLAN_FLAG
     unset IKEV2_L2_IPV6_SYSCTL IKEV2_SERVER_ADDR_V6
     while [ "$#" -gt 0 ]; do
@@ -601,10 +601,11 @@ _l2_anchor_name() {
     IKEV2_L2_PARENT)  echo l2_parent ;;
     IKEV2_L2_SUBNET)  echo l2_subnet ;;
     IKEV2_L2_GATEWAY) echo l2_gateway ;;
+    IKEV2_L2_IPV4)    echo l2_ipv4 ;;
   esac
 }
 
-for v in IKEV2_L2_PARENT IKEV2_L2_SUBNET IKEV2_L2_GATEWAY; do
+for v in IKEV2_L2_PARENT IKEV2_L2_SUBNET IKEV2_L2_GATEWAY IKEV2_L2_IPV4; do
   a="$(_l2_anchor_name "$v")"
   for p in "$MACV" "$IPVL"; do
     f="$(basename "$p")"
@@ -617,11 +618,12 @@ for v in IKEV2_L2_PARENT IKEV2_L2_SUBNET IKEV2_L2_GATEWAY; do
       bad "NM-57 ${f} environment ${v} 引用 *${a}" "got: ${raw}"
     fi
 
-    # 2. networks 段（parent / subnet / gateway）必须是同一个 anchor
+    # 2. networks 段（parent / subnet / gateway / ipv4_address）必须是同一个 anchor
     case "$v" in
       IKEV2_L2_PARENT)  key="parent" ;;
       IKEV2_L2_SUBNET)  key="subnet" ;;
       IKEV2_L2_GATEWAY) key="gateway" ;;
+      IKEV2_L2_IPV4)    key="ipv4_address" ;;
     esac
     raw="$(grep -E "^[[:space:]]+-?[[:space:]]*${key}:" "$p" | head -1)"
     if printf '%s' "$raw" | grep -q "\*${a}\b"; then
@@ -651,6 +653,92 @@ for v in IKEV2_L2_PARENT IKEV2_L2_SUBNET IKEV2_L2_GATEWAY; do
     bad "NM-57 docker-compose.yml ${v} 保持 :- 可选" "got: ${raw}"
   fi
 done
+
+# ---------- NM-58 L2 的 service 段 networks 必须用长语法 ----------
+#
+# 固定容器 IPv4 属于 **endpoint 级**配置，只能写在 service 段的
+#   networks:
+#     ikev2-l2:
+#       ipv4_address: x.x.x.x
+# 短语法（`- ikev2-l2`）根本表达不了 ipv4_address —— 强行塞进顶层
+# networks 段的 ipam 里则会被 Docker **静默忽略**（ipam 配的是
+# subnet/gateway，不是容器自己的地址），用户填了地址却发现没生效，
+# 且没有任何报错。
+#
+# 这一项锁两件事：
+#   1. service 段 networks 必须是长语法（形如 `ikev2-l2:` 后跟缩进块）
+#   2. 长语法块里必须有 ipv4_address，且引用 *l2_ipv4
+for p in "$MACV" "$IPVL"; do
+  f="$(basename "$p")"
+  if grep -qE '^[[:space:]]+-[[:space:]]+ikev2-l2[[:space:]]*$' "$p"; then
+    bad "NM-58 ${f} service 段 networks 用长语法" "仍是短语法（- ikev2-l2），无法表达 ipv4_address"
+  else
+    ok "NM-58 ${f} service 段 networks 用长语法"
+  fi
+  raw="$(grep -E "^[[:space:]]+ipv4_address:" "$p" | head -1)"
+  if printf '%s' "$raw" | grep -q '\*l2_ipv4\b'; then
+    ok "NM-58 ${f} service 段 ipv4_address 引用 *l2_ipv4"
+  else
+    bad "NM-58 ${f} service 段 ipv4_address 引用 *l2_ipv4" "got: ${raw}"
+  fi
+done
+
+# ---------- NM-59 固定容器 IPv4（IKEV2_L2_IPV4）的校验语义 ----------
+#
+# 固定 IPv4 是**可选**的：留空 = Docker IPAM 自动分配，不能因此判失败。
+# 填了才校验，且校验点跟 daemon 一致（daemon 也会拒不在子网内的地址）：
+#   - 必须是合法 IPv4
+#   - 必须落在 IKEV2_L2_SUBNET 内
+#   - 不能与网关相同
+_L2BASE="IKEV2_L2_PARENT=eth0 IKEV2_L2_SUBNET=192.168.50.0/24 IKEV2_L2_GATEWAY=192.168.50.1"
+
+# 留空 → 通过
+validate_rc "MODE=ipvlan" $_L2BASE
+if [ "$RC" -eq 0 ]; then
+  ok "NM-59 留空 IKEV2_L2_IPV4 → 通过（自动分配）"
+else
+  bad "NM-59 留空 IKEV2_L2_IPV4 → 通过" "rc=$RC out=$OUT"
+fi
+
+# 合法地址 → 通过
+validate_rc "MODE=ipvlan" $_L2BASE "IKEV2_L2_IPV4=192.168.50.77"
+if [ "$RC" -eq 0 ]; then
+  ok "NM-59 合法固定 IP → 通过"
+else
+  bad "NM-59 合法固定 IP → 通过" "rc=$RC out=$OUT"
+fi
+
+# 不在子网内 → 拒绝，且报错要指名变量
+validate_rc "MODE=ipvlan" $_L2BASE "IKEV2_L2_IPV4=10.99.99.5"
+if [ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -q "IKEV2_L2_IPV4"; then
+  ok "NM-59 固定 IP 不在子网内 → 拒绝且指名变量"
+else
+  bad "NM-59 固定 IP 不在子网内 → 拒绝且指名变量" "rc=$RC out=$OUT"
+fi
+
+# 与网关相同 → 拒绝
+validate_rc "MODE=ipvlan" $_L2BASE "IKEV2_L2_IPV4=192.168.50.1"
+if [ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -q "IKEV2_L2_IPV4"; then
+  ok "NM-59 固定 IP 与网关相同 → 拒绝"
+else
+  bad "NM-59 固定 IP 与网关相同 → 拒绝" "rc=$RC out=$OUT"
+fi
+
+# 非法 IPv4 → 拒绝
+validate_rc "MODE=ipvlan" $_L2BASE "IKEV2_L2_IPV4=999.1.1.1"
+if [ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -q "IKEV2_L2_IPV4"; then
+  ok "NM-59 固定 IP 非法 → 拒绝"
+else
+  bad "NM-59 固定 IP 非法 → 拒绝" "rc=$RC out=$OUT"
+fi
+
+# host 模式下只 WARN，不拒绝
+validate_rc "MODE=host" "IKEV2_L2_IPV4=192.168.50.77"
+if [ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -q "WARN.*IKEV2_L2_IPV4"; then
+  ok "NM-59 host 模式忽略固定 IP 并 WARN"
+else
+  bad "NM-59 host 模式忽略固定 IP 并 WARN" "rc=$RC out=$OUT"
+fi
 
 # ---------- 非法模式 ----------
 validate_rc "MODE=foobar"
@@ -827,6 +915,67 @@ if printf '%s' "$_up_code" | grep -q 'require_l2_env'; then
 else
   ok "NM-51 up.sh 已删除重复的 require_l2_env"
 fi
+
+# ---------- NM-60 up.sh 的 compose_get 必须认得 compose 顶部的三种写法 ----------
+#
+# 真实故障（v2.90 实机发现）：up.sh 的 compose_get 只会取
+#   x-l2-parent:  &l2_parent  "eth0"
+# 这种**裸字面量**。但 compose 文件里实际是
+#   x-l2-parent:  &l2_parent  "${IKEV2_L2_PARENT:-ens18}"
+# 于是 compose_get 取到的是插值表达式本身，up.sh 认为「变量还是空的」，
+# 直接报「缺少必填变量 IKEV2_L2_PARENT」—— 而用户明明在 compose 里填好了。
+# 结果：用户照 README 改完 compose，跑 up.sh 却被拒。
+#
+# 这一项把 compose_get 从 up.sh 里抠出来单独跑，三种写法都要取对。
+CG_DIR="$(mktemp -d)"
+cat > "$CG_DIR/docker-compose.ipvlan.yml" <<'CGEOF'
+x-l2-parent:  &l2_parent  "${IKEV2_L2_PARENT:-ens18}"
+x-l2-subnet:  &l2_subnet  "192.168.50.0/24"
+x-l2-gateway: &l2_gateway 192.168.50.1
+x-l2-ipv4:    &l2_ipv4    "${IKEV2_L2_IPV4:-192.168.50.77}"
+CGEOF
+cat > "$CG_DIR/docker-compose.macvlan.yml" <<'CGEOF'
+x-l2-parent:  &l2_parent  "${IKEV2_L2_PARENT:-}"
+CGEOF
+
+# 把 compose_get 从 up.sh 抠出来（到下一个顶层 } 为止）
+_CG_SRC="$(awk '/^compose_get\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$UP_SH")"
+if [ -z "$_CG_SRC" ]; then
+  bad "NM-60 up.sh 存在 compose_get 函数" "抠不出来"
+else
+  ok "NM-60 up.sh 存在 compose_get 函数"
+  # 在临时目录里跑，compose_get 读的是相对路径 ./docker-compose.<mode>.yml
+  _cg() { # $1=mode $2=anchor名
+    ( cd "$CG_DIR" && eval "$_CG_SRC"; compose_get "$1" "$2" )
+  }
+  if [ "$(_cg ipvlan l2_parent)" = "ens18" ]; then
+    ok "NM-60 compose_get 取到 \${VAR:-默认} 里的默认值"
+  else
+    bad "NM-60 compose_get 取 \${VAR:-默认} 的默认值" "got='$(_cg ipvlan l2_parent)' want=ens18"
+  fi
+  if [ "$(_cg ipvlan l2_subnet)" = "192.168.50.0/24" ]; then
+    ok "NM-60 compose_get 取到裸字面量"
+  else
+    bad "NM-60 compose_get 取裸字面量" "got='$(_cg ipvlan l2_subnet)' want=192.168.50.0/24"
+  fi
+  if [ "$(_cg ipvlan l2_gateway)" = "192.168.50.1" ]; then
+    ok "NM-60 compose_get 取到无引号裸值"
+  else
+    bad "NM-60 compose_get 取无引号裸值" "got='$(_cg ipvlan l2_gateway)' want=192.168.50.1"
+  fi
+  if [ "$(_cg ipvlan l2_ipv4)" = "192.168.50.77" ]; then
+    ok "NM-60 compose_get 取到固定 IPv4 的默认值"
+  else
+    bad "NM-60 compose_get 取固定 IPv4 的默认值" "got='$(_cg ipvlan l2_ipv4)' want=192.168.50.77"
+  fi
+  # 默认值留空的形态 → 必须返回空（而不是把 ${VAR:-} 当成值）
+  if [ -z "$(_cg macvlan l2_parent)" ]; then
+    ok "NM-60 compose_get 对 \${VAR:-}（默认留空）返回空"
+  else
+    bad "NM-60 compose_get 对 \${VAR:-} 返回空" "got='$(_cg macvlan l2_parent)' want=(空)"
+  fi
+fi
+rm -rf "$CG_DIR"
 
 # ---------- IPv4 段校验：每段必须 0-255 且无前导 0 ----------
 # 修 _nm_valid_ipv4_cidr 之前的漏洞：只查字符集与段数，
