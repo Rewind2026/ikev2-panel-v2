@@ -110,6 +110,24 @@ L2 模式容器是独立 netns，没有这条规则，只能靠 `table 220` 自�
 | 抓包回包源 MAC | 网关 `04:42:1a:5f:60:70` | 容器 `bc:24:11:8c:32:36` |
 | **重启容器后** | — | 修复**自动恢复**（entrypoint 每次启动都会加） |
 
+### v2.92 正式镜像复验
+
+以上是用手工覆盖脚本的临时容器验证的。CI 出镜像后，又用**正式发布的
+`ghcr.io/rewind2026/ikev2-panel-v2:v2.92`** 镜像重建部署复验一遍：
+
+| 检查项 | 结果 |
+|--------|------|
+| 镜像内 entrypoint 是否含修复 | **是**（`grep -c "table 220 direct route added"` → 1） |
+| 启动日志 | `table 220 default route added via 192.168.50.1 dev eth0` + `table 220 direct route added: 192.168.50.0/24 dev eth0 scope link` |
+| 网络模式 / 固定 IP | `ipvlan (ipvlan_mode=l2 ipvlan_flag=bridge)`，`static ipv4=192.168.50.66`，`inet 192.168.50.66/24` |
+| 同网段路由 | `192.168.50.176 dev eth0 table 220`（**直连**） |
+| 公网路由 | `8.8.8.8 via 192.168.50.1 dev eth0 table 220`（**不变**） |
+| 容器内 curl（loopback / ownip） | **200 / 200** |
+| 外部 TLS 握手 | **成功**，`O=IKEv2 Panel, CN=vpn.example.com` |
+| 抓包 RST 计数 | **0** |
+| 抓包回包源 MAC | `bc:24:11:8c:32:36`（**容器自己的**） |
+| **重启容器后** | 修复**自动恢复**，`ownip=200`，`Restarts=0` |
+
 ---
 
 ## 回归测试

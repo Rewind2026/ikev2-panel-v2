@@ -97,6 +97,29 @@ L2 模式容器是独立 netns，没有这条规则，只能靠 `table 220` 自�
 | 抓包回包源 MAC | 网关 `04:42:1a:5f:60:70` | 容器 `bc:24:11:8c:32:36` |
 | **重启容器后** | — | 修复**自动恢复**（entrypoint 每次启动都会加） |
 
+### v2.92 正式镜像复验（192.168.50.63）
+
+CI 构建完成后，用**正式发布的 `ghcr.io/rewind2026/ikev2-panel-v2:v2.92`** 镜像
+（而非手工覆盖脚本的临时容器）重建部署复验：
+
+| 检查项 | 结果 |
+|--------|------|
+| 镜像内 entrypoint 是否含修复 | `grep -c "table 220 direct route added"` → **1** |
+| 启动日志 | `table 220 default route added via 192.168.50.1 dev eth0` + `table 220 direct route added: 192.168.50.0/24 dev eth0 scope link` |
+| 网络模式 | `ipvlan (ipvlan_mode=l2 ipvlan_flag=bridge)`，`parent=ens18 subnet=192.168.50.0/24 gateway=192.168.50.1` |
+| 固定 IP | `static ipv4=192.168.50.66`，容器 `inet 192.168.50.66/24` |
+| `ip route get 192.168.50.176` | `192.168.50.176 dev eth0 table 220`（**直连，不绕网关**） |
+| `ip route get 8.8.8.8` | `8.8.8.8 via 192.168.50.1 dev eth0 table 220`（**不变**） |
+| 容器内 `curl` loopback / ownip | **200 / 200** |
+| 外部 `openssl s_client` | **成功**，拿到 `O=IKEv2 Panel, CN=vpn.example.com` 面板证书 |
+| 抓包 RST 计数 | **0** |
+| 抓包回包源 MAC | `bc:24:11:8c:32:36`（**容器自己的**，不是网关的） |
+| **重启容器后** | `table 220` 仍含直连路由，同网段路由仍为 `dev eth0 table 220`，`ownip=200`，`Restarts=0` |
+
+部署备注：63 上的 compose 用的是 `image: ghcr.io/rewind2026/ikev2-panel-v2:${PANEL_TAG:-latest}`，
+本次以 `PANEL_TAG=v2.92` + `COMPOSE_PROJECT_NAME=vpn` 重建，
+compose 文件本身**未做任何修改**（保持 `latest` 默认值，升级时只需带上 `PANEL_TAG`）。
+
 ### ⚠️ 踩过的坑：`ip route show ... dev X` 的输出里没有 dev 字段
 
 第一版修复写成：
