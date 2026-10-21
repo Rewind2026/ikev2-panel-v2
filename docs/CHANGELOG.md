@@ -18,6 +18,240 @@ hotfix。升级前请重点看目标版本的「⚠️ 行为变更」。
 
 ---
 
+## v2.96（2026-10-21）— macvlan 也自适应了：固定名 `macvlan` / `ipvlan`，两种驱动都能多项目共享
+
+**用户诉求：「现在我希望 macvlan 也要改成自适应的，并且我希望无论是 macvlan 还是
+ipvlan，自动创建的时候的名字也是 macvlan 或 ipvlan，不需要有其他的字符标识。」**
+
+### 一、先纠正一个误判：macvlan **本来就能共享**
+
+v2.95 里写过「macvlan 不可共享」，**那是错的**。当时的观察是在 63 上看到
+`failed to create the macvlan port: device or resource busy`，就下了结论。
+
+这次逐层排查发现，**真正的原因是宿主 `ens18` 本身不支持 macvlan 设备**：
+
+```bash
+ip link add link ens18 name mvtest0 type macvlan mode bridge
+# RTNETLINK answers: Device or resource busy
+```
+
+连手工建设备都失败 —— 这跟 Docker、跟"共享"都没关系，是**宿主限制**。
+换个能建 macvlan 设备的 parent 再测：
+
+| 结论 | 证据 |
+|------|------|
+| 同一条 macvlan 网络能挂多个容器 | 3 个容器（不同 project）都起来，IP `.2` / `.3` / `.4` |
+| 每个容器拿独立 MAC | `fe:b6:83:3f:26:e8` / `32:8e:7b:9f:65:5a` / … 各不相同 |
+| 同一 parent 上能有多条 macvlan 网络 | macvlan-probe + macvlan-probe2 + macvlan-p3 同时存在 |
+| 但**子网不能重叠** | `invalid pool request: Pool overlaps with other one on this address space` |
+
+对照 ipvlan：同一 parent 上**只能一条**（`network di-xxx is already using parent
+interface ens18`），但同一条网络内可以挂多个容器。
+
+> **教训**：判据要分清是「驱动限制」还是「宿主限制」。把宿主的限制当成驱动的
+> 限制，会直接导致一个本该支持的能力被写死为不支持。
+
+### 二、两种驱动统一走同一套自适应逻辑
+
+`scripts/up.sh` 的 `_l2_shared_network_ensure` 从「只服务 ipvlan」泛化成
+**两种驱动完全一致**：
+
+| 情况 | 行为 |
+|------|------|
+| ① 同名网络已存在 | **复用**，并逐项比对参数；不符 → 报错并**列出差异** |
+| ② 同名不存在，宿主机上有参数兼容的**同驱动**网络 | **自动接管**（仅限用户没显式指定名字时） |
+| ③ parent 上已有别的同驱动网络 | **仅 ipvlan** 报冲突（parent 独占）；**macvlan** 允许共存 |
+| ④ 什么都没有 | **创建**（`docker network create --driver <驱动> … --ipv6 <名字>`） |
+
+驱动差异只体现在**两个小地方**：
+
+- `driver_opts` 的键名不同：`ipvlan` 有 `ipvlan_mode` + `ipvlan_flag`，
+  `macvlan` 只有 `macvlan_mode`（bridge/private/vepa），没有独立的 flag；
+- **parent 独占预检只对 ipvlan 生效**（v2.95 那条对 macvlan 的预检已删除 ——
+  macvlan 的 parent 不独占，预检是错的）。
+
+### 三、默认网络名 = 驱动名
+
+| 模式 | 默认网络名 |
+|------|-----------|
+| `macvlan` | `macvlan` |
+| `ipvlan` | `ipvlan` |
+
+**不带任何 project 标识**（不再是 `<project>_ikev2-l2`）。可用
+`IKEV2_L2_NETWORK_NAME` 覆盖。
+
+默认名随模式而变，所以：
+
+- `network-mode.sh` 的常量拆成 `NET_SHARED_NETWORK_NAME_DEFAULT_IPVLAN` /
+  `NET_SHARED_NETWORK_NAME_DEFAULT_MACVLAN`，另加
+  `net_shared_network_default_name(mode)` 按模式取；
+- **「是否显式指定」的判定基准改成当前模式的默认名**（原先是单个全局常量，
+  泛化后会误判）；
+- compose 顶部两个 anchor 各自带自己的默认值：
+  `x-l2-netname: &l2_netname "${IKEV2_L2_NETWORK_NAME:-macvlan}"` /
+  `"…:-ipvlan"`。
+
+### 四、compose 侧
+
+`docker-compose.macvlan.yml` 的 networks 段与 ipvlan 对齐：
+
+```yaml
+networks:
+  ikev2-l2:
+    name: *l2_netname          # 默认 "macvlan"，跨 project 共享的锚点
+    external: true             # 复用宿主机上已存在的同名网络，不创建、不删除
+```
+
+`external: true` 的语义见 §v2.95（compose 只声明「我要加入这条网络」，
+不拥有它；`down` 不会删）。
+
+### 五、实测验证（192.168.50.63，飞牛 fnOS / Docker 28.5.2 / Compose v2.40.3）
+
+- **插值实测**：macvlan → `name: macvlan`、ipvlan → `name: ipvlan`、
+  指定 `IKEV2_L2_NETWORK_NAME=mynet` → `name: mynet`，两者都带 `external: true`。
+- **端到端 8 场景 22 条断言全绿**：
+  - 网络不存在 → 自动创建（名字 / 驱动 / parent / 子网 / 模式 / enable_ipv6 全对）
+  - 网络已存在 → 复用（Network Id 不变，日志「复用，不修改」）
+  - 参数不匹配 → 报错并列出差异（实际子网出现在差异清单里）
+  - 显式指定不存在的网络 → 报错，不静默接管
+  - 名字不同但参数兼容 → 自动接管，且**不会**另建重复网络
+  - ipvlan 模式同样自动创建出名为 `ipvlan` 的网络
+  - **两个 project 的容器加入同一条 macvlan 网络**：都 running，
+    IP `192.168.71.2` / `.3`，MAC 各不相同
+  - `compose down` 后共享网络仍在，另一个 project 的容器不受影响
+- **回归测试**：`tests/network_mode_test.sh` 的 NM-62 / NM-63 泛化到两种驱动，
+  全量 **180 passed / 0 failed**。
+
+### ⚠️ 行为变更
+
+| 项 | 之前 | 现在 |
+|---|---|---|
+| macvlan 网络名 | `<project>_ikev2-l2`（各 project 一条） | `macvlan`（默认，**所有 project 一条**） |
+| macvlan 谁建网络 | compose | `scripts/up.sh`（compose 侧改 `external: true`） |
+| macvlan 的 parent 独占预检 | 有（**是错的**，macvlan parent 不独占） | 已删除 |
+| 老用户的既有 macvlan 网络 | 照旧使用 | **自动接管**（parent + 子网 + 模式全等时），升级不失败 |
+| 显式指定名字的语义 | 不存在此概念 | 显式指定 = 明确要求用那一条，不自动接管 |
+
+> ⚠️ **用 `docker compose -f docker-compose.macvlan.yml up -d` 直接起会失败**
+> （`declared as external, but could not be found`）—— 因为 `external: true`
+> 意味着 compose 不建网。**请走 `./scripts/up.sh`**，它会「不存在则建、
+> 存在则验」。
+
+---
+
+## v2.95（2026-10-21）— ipvlan 共享网络：固定名 + 不存在自动建 + 多项目可加入同一条
+
+**用户诉求：「我先创建了一个 ipvlan 的网络，名字也叫 ipvlan，我希望当前的项目
+和其他的项目都可以加入到这个 ipvlan 的网络中。如果我之前没创建 ipvlan，就需要
+自动创建。」**
+
+### 一、为什么原来的「各建各的」走不通
+
+原来 ipvlan 的 compose 里网络没有 `name:`，网名由 compose 生成
+`<project>_ikev2-l2`。换个目录 / 换个 project 就是"另一条网络" —— 而 Docker
+有两条硬限制让它根本建不出来：
+
+```
+invalid pool request: Pool overlaps with other one on this address space
+network di-xxx is already using parent interface ens18
+```
+
+第一条是 **Docker IPAM 全局**（同子网不能再建一条 L2 网络）；第二条是
+**ipvlan 的 parent 独占**（同一张网卡上建不了第二条 ipvlan 网络，**换子网也不行**）。
+
+结论：**同一张网卡上本来就只能有一条 ipvlan 网络**。与其各建各的然后撞车，
+不如显式共享。
+
+### 二、ipvlan 可共享 / macvlan 不可共享（63 实测）
+
+> ⚠️ **本节的 macvlan 结论在 v2.96 被推翻** —— 「macvlan 不可共享」是**误判**，
+> 真实原因是宿主 `ens18` 不支持 macvlan 设备。v2.96 已把 macvlan 纳入同一套
+> 共享逻辑。保留本节原文是为了记录那次误判的成因。
+> 详见 [v2.96](#v2962026-10-21--macvlan-也自适应了固定名-macvlan--ipvlan两种驱动都能多项目共享)。
+
+| 驱动 | 跨 project 共享同一条网络 | 原因 |
+|------|--------------------------|------|
+| `ipvlan` | ✅ | 子设备**共享 parent 的 MAC**，同 parent 上多个子设备共存无碍 |
+| `macvlan` | ❌ | 每个 macvlan 设备独占 parent，第二个容器报 `failed to create the macvlan port: device or resource busy` |
+
+所以 macvlan 保持原样（compose 各建各的），只补了 parent 独占的**预检** ——
+提前拦下并说清楚，而不是等 daemon 抛一句英文。
+
+### 三、四条处置路径（`scripts/up.sh` 的 `_l2_shared_network_ensure`）
+
+| 情况 | 行为 |
+|------|------|
+| ① 同名网络已存在 | **复用**，并逐项比对参数；不符 → 报错并**列出差异** |
+| ② 同名不存在，宿主机上有参数兼容的 ipvlan 网络 | **自动接管**那条（仅限用户没显式指定名字时） |
+| ③ parent 上已有别的 ipvlan 网络 | 明确报冲突，给出「复用它 / 换网卡」两条路 |
+| ④ 什么都没有 | **创建**（`docker network create --driver ipvlan --opt parent=… --subnet=… --gateway=… --ipv6`） |
+
+**参数不符一律报错，绝不自动删改** —— 共享网络的 IPAM 归**第一个建它的人**所有，
+另一条网络很可能正被别的 project 用着，自动改 subnet 或删网络都会打断它。
+差异清单逐项列出（驱动 / 父接口 / 子网 / 网关 / mode / flag / IPv6 开关）。
+
+**自动接管只在「用户没显式指定名字」时发生**。显式指定
+（`IKEV2_L2_NETWORK_NAME` 或 compose 顶部的 `x-l2-netname`）= 明确要求用那一条；
+此时若那条不存在而另有兼容的，报错让用户选，不悄悄换。
+
+### 四、compose 侧改用 `name:` + `external: true`
+
+```yaml
+networks:
+  ikev2-l2:
+    name: *l2_netname          # 默认 "ipvlan"，跨 project 共享的锚点
+    external: true             # 复用宿主机上已存在的同名网络，不创建、不删除
+```
+
+`external: true` 正是共享需要的语义：compose 只声明「我要加入这条网络」，
+不拥有它。代价是 compose 不再兜底建网 —— 这部分职责移交 `up.sh`。
+`docker compose down` **不会删掉**共享网络，不会误伤别的项目。
+
+### 五、一个必须小心的地方：up.sh 与 compose 要指向同一条网络
+
+compose 的网络名来自 `${IKEV2_L2_NETWORK_NAME:-ipvlan}` 插值，所以：
+
+- `IKEV2_L2_NETWORK_NAME` 在 up.sh 里**必须 export**，否则 up.sh 与 compose
+  各算出不同的名字，两边加入**不同的网络**，而且**没有任何报错**；
+- 走 compose 顶部 anchor 回落时（用户写 `x-l2-netname: &l2_netname "mynet"`）
+  也要 export；
+- 自动接管时要把变量指向实际接管的那一条；
+- 「是否显式指定」的判定放在 anchor 回落**之后**算，否则用户在 compose 顶部
+  写死名字会被误判成「用了默认值」。
+
+**建网必须显式带 `--subnet`**：不带的话 Docker 塞默认池 `172.18.0.0/16`，
+之后任何 join 方想指定 `ipv4_address` 都会被拒
+（`user specified IP address is supported only when connecting to networks with
+user configured subnets`）。**`--ipv6`** 则让 Docker 补 v6 网段并打开
+`enable_ipv6` —— 不开的话端点建好时 `disable_ipv6` 被置 1，接口收不到 RA。
+
+### ⚠️ 行为变更
+
+| 项 | 之前 | 现在 |
+|---|---|---|
+| ipvlan 网络名 | `<project>_ikev2-l2`（各 project 一条） | `ipvlan`（默认，**所有 project 一条**） |
+| 谁建网络 | compose | `scripts/up.sh`（compose 侧改 `external: true`） |
+| 老用户的既有网络 | 照旧使用 | **自动接管**（parent + 子网 + 模式全等时），升级不失败 |
+| 同名网络参数不一致 | 不可能发生 | **报错 + 列出差异**，不自动删改 |
+| macvlan | compose 各建各的 | 不变，只多一条 parent 独占预检 |
+
+> ⚠️ **不想用共享网络的显式指定方式**：`IKEV2_L2_NETWORK_NAME=<自己的名字>`。
+> 该名字在宿主上必须还没有 —— 因为 ipvlan 的 parent 独占，同一张网卡上
+> 建不了第二条。
+
+**回归测试**：`tests/network_mode_test.sh` 新增 **NM-62**（网络名合法性 5 条）+
+**NM-63**（compose 与 up.sh 接线 9 条），全量 **172 passed / 0 failed**。
+
+**实机验证**（192.168.50.63，飞牛 fnOS / Docker 28.5.2 / Compose v2.40.3）：
+
+- 纯预检 **8 个场景 20 条断言全绿**（不存在→建、存在→复用、参数不符→报错列差异、
+  兼容网络→接管、parent 冲突→报错、显式指定不存在→报错 …）；
+- 多 project 共享端到端 **8 条断言全绿**：两个不同 project 的容器加入**同一条**
+  `vpn_ikev2-l2`，各拿 `192.168.50.81` / `.82`，互 ping 0% loss，各自拿到 v6 地址；
+  `compose down` 后网络仍在，另一个 project 的容器不受影响。
+
+---
+
 ## v2.94（2026-10-21）— 证书 / IP 段保存不再跳裸文本页，两张卡补上成功失败提示
 
 **用户反馈：「配置证书时，保存失败的提示直接跳转到新页面 这不对吧 然后客户端IP段

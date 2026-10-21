@@ -32,6 +32,7 @@ bad()  { FAIL=$((FAIL+1)); FAILED_IDS+=("$1"); printf '  %s %s — %s\n' "$(_red
 validate_rc() {
   (
     unset IKEV2_L2_PARENT IKEV2_L2_SUBNET IKEV2_L2_GATEWAY IKEV2_L2_IPV4
+    unset IKEV2_L2_NETWORK_NAME
     unset IKEV2_MACVLAN_MODE IKEV2_IPVLAN_MODE IKEV2_IPVLAN_FLAG
     unset IKEV2_L2_IPV6_SYSCTL IKEV2_SERVER_ADDR_V6
     while [ "$#" -gt 0 ]; do
@@ -432,6 +433,12 @@ done
 
 # ---------- NM-31 顶层 volumes（含 name: ikev2-panel-data）三份一致 ----------
 # 这是最重要的一项：卷名漂移 = 静默丢 panel.db / LE 证书
+#
+# ⚠️ external: 的检查只针对 **volumes 段**（v2.95 起 networks 段合法使用
+# external: true —— 共享 L2 网络由宿主侧管理，compose 不建也不删）。
+# 之前这条是全文件 grep，v2.95 加了 networks 的 external 后误报。
+# 卷上的 external 依然必须禁：external volume 要求宿主先手建这个卷，
+# 否则 docker compose up 直接失败，老用户升级即挂。
 for p in "$BASE" "$MACV" "$IPVL"; do
   f="$(basename "$p")"
   if grep -qE '^[[:space:]]*name:[[:space:]]*ikev2-panel-data[[:space:]]*$' "$p"; then
@@ -439,10 +446,12 @@ for p in "$BASE" "$MACV" "$IPVL"; do
   else
     bad "NM-31 ${f} 顶层卷名锁定 ikev2-panel-data" "not found"
   fi
-  if grep -qE '^[[:space:]]*external:' "$p"; then
-    bad "NM-31 ${f} 无 external:" "found one"
+  # 只看 volumes 段：从 volumes: 到下一个顶层 key（networks:）为止
+  _vol_ext="$(sed -n '/^volumes:/,/^networks:/p' "$p" | grep -cE '^[[:space:]]*external:' || true)"
+  if [ "${_vol_ext:-0}" -eq 0 ]; then
+    ok "NM-31 ${f} volumes 段无 external:"
   else
-    ok "NM-31 ${f} 无 external:"
+    bad "NM-31 ${f} volumes 段无 external:" "found ${_vol_ext}"
   fi
 done
 
@@ -1100,6 +1109,160 @@ if [ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -q 'SUBNET=.*不是合法 IPv4 C
   ok "NM-56 前导 0 的子网由 SUBNET 校验拒下（八进制/十进制歧义）"
 else
   bad "NM-56 前导 0 子网被 SUBNET 校验拒下" "rc=$RC out=$OUT"
+fi
+
+# ---------- NM-62 共享 L2 网络：网络名校验（v2.95 / v2.96）----------
+echo "-- 共享 L2 网络名校验（NM-62）"
+
+# 合法网络名必须放行（ipvlan 与 macvlan 两种模式都要放行 —— v2.96 起两者都共享）
+for _m in ipvlan macvlan; do
+  validate_rc "MODE=$_m" IKEV2_L2_PARENT=eth0 \
+              IKEV2_L2_SUBNET=192.168.50.0/24 IKEV2_L2_GATEWAY=192.168.50.1 \
+              IKEV2_L2_NETWORK_NAME="$_m"
+  if [ "$RC" -eq 0 ]; then
+    ok "NM-62 合法网络名 '$_m' 放行（$_m 模式）"
+  else
+    bad "NM-62 合法网络名 '$_m' 放行（$_m 模式）" "rc=$RC out=$OUT"
+  fi
+done
+
+validate_rc "MODE=ipvlan" IKEV2_L2_PARENT=eth0 \
+            IKEV2_L2_SUBNET=192.168.50.0/24 IKEV2_L2_GATEWAY=192.168.50.1 \
+            IKEV2_L2_NETWORK_NAME=my-l2.net_1
+if [ "$RC" -eq 0 ]; then
+  ok "NM-62 合法网络名 'my-l2.net_1' 放行"
+else
+  bad "NM-62 合法网络名 'my-l2.net_1' 放行" "rc=$RC out=$OUT"
+fi
+
+# 非法网络名必须被拒（daemon 会直接报 network name is invalid）
+for _m in ipvlan macvlan; do
+  validate_rc "MODE=$_m" IKEV2_L2_PARENT=eth0 \
+              IKEV2_L2_SUBNET=192.168.50.0/24 IKEV2_L2_GATEWAY=192.168.50.1 \
+              IKEV2_L2_NETWORK_NAME=-badstart
+  if [ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -q 'NETWORK_NAME'; then
+    ok "NM-62 非法网络名 '-badstart' 被拒（$_m 模式）"
+  else
+    bad "NM-62 非法网络名 '-badstart' 被拒（$_m 模式）" "rc=$RC out=$OUT"
+  fi
+done
+
+validate_rc "MODE=ipvlan" IKEV2_L2_PARENT=eth0 \
+            IKEV2_L2_SUBNET=192.168.50.0/24 IKEV2_L2_GATEWAY=192.168.50.1 \
+            "IKEV2_L2_NETWORK_NAME=has space"
+if [ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -q 'NETWORK_NAME'; then
+  ok "NM-62 非法网络名 'has space' 被拒"
+else
+  bad "NM-62 非法网络名 'has space' 被拒" "rc=$RC out=$OUT"
+fi
+
+# host 模式只 WARN 不拒（老 .env 残留不应导致启动失败）
+validate_rc "MODE=host" IKEV2_L2_NETWORK_NAME=ipvlan
+if [ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -q 'WARN.*NETWORK_NAME'; then
+  ok "NM-62 host 模式忽略网络名（只 WARN）"
+else
+  bad "NM-62 host 模式忽略网络名（只 WARN）" "rc=$RC out=$OUT"
+fi
+
+# ---------- NM-63 共享 L2 网络：compose 与 up.sh 的接线（v2.95 / v2.96）----------
+echo "-- 共享 L2 网络接线（NM-63）"
+
+# 1) 两份 compose 的 networks 段都必须有 name:（固定名，跨 project 共享的锚点）
+for _pair in "ipvlan:$IPVL" "macvlan:$MACV"; do
+  _m="${_pair%%:*}"; _f="${_pair#*:}"
+  if grep -qE '^[[:space:]]+name:[[:space:]]+\*l2_netname[[:space:]]*$' "$_f"; then
+    ok "NM-63 $_m networks 段 name 引用 *l2_netname"
+  else
+    bad "NM-63 $_m networks 段 name 引用 *l2_netname" "not found"
+  fi
+done
+
+# 2) 顶部必须有 x-l2-netname anchor，且是 ${IKEV2_L2_NETWORK_NAME:-默认}
+for _pair in "ipvlan:$IPVL" "macvlan:$MACV"; do
+  _m="${_pair%%:*}"; _f="${_pair#*:}"
+  _raw="$(grep -E '^x-l2-netname:' "$_f" | head -1)"
+  if printf '%s' "$_raw" | grep -q '&l2_netname' \
+     && printf '%s' "$_raw" | grep -q '\${IKEV2_L2_NETWORK_NAME:-'; then
+    ok "NM-63 $_m 顶部 x-l2-netname 定义为 \${IKEV2_L2_NETWORK_NAME:-默认}"
+  else
+    bad "NM-63 $_m 顶部 x-l2-netname 定义为 \${IKEV2_L2_NETWORK_NAME:-默认}" "got: ${_raw}"
+  fi
+done
+
+# 3) 两份 compose 的 networks 段都必须有 external: true（compose 不建也不删，由 up.sh 管）
+for _pair in "ipvlan:$IPVL" "macvlan:$MACV"; do
+  _m="${_pair%%:*}"; _f="${_pair#*:}"
+  if sed -n '/^networks:/,$p' "$_f" | grep -qE '^[[:space:]]+external:[[:space:]]+true[[:space:]]*$'; then
+    ok "NM-63 $_m networks 段 external: true（共享网络由宿主侧管理）"
+  else
+    bad "NM-63 $_m networks 段 external: true" "not found"
+  fi
+done
+
+# 4) up.sh 必须有「不存在则创建、存在则校验」的共享网络逻辑
+if grep -q '_l2_shared_network_ensure' "$SCRIPT_DIR/../scripts/up.sh"; then
+  ok "NM-63 up.sh 有 _l2_shared_network_ensure"
+else
+  bad "NM-63 up.sh 有 _l2_shared_network_ensure" "not found"
+fi
+
+# 5) up.sh 必须能按 parent+子网接管既有的同驱动网络（老用户升级 / 用户自建）
+if grep -q '_l2_find_compatible' "$SCRIPT_DIR/../scripts/up.sh"; then
+  ok "NM-63 up.sh 有 _l2_find_compatible（接管既有网络）"
+else
+  bad "NM-63 up.sh 有 _l2_find_compatible" "not found"
+fi
+
+# 6) up.sh 必须 export IKEV2_L2_NETWORK_NAME —— 否则 up.sh 与 compose 会加入不同的网络
+if grep -q 'export IKEV2_L2_NETWORK_NAME' "$SCRIPT_DIR/../scripts/up.sh"; then
+  ok "NM-63 up.sh export IKEV2_L2_NETWORK_NAME（与 compose 同一条网络）"
+else
+  bad "NM-63 up.sh export IKEV2_L2_NETWORK_NAME" "not found"
+fi
+
+# 7) 默认名两处必须一致：network-mode.sh 的常量 vs compose 顶部默认值
+#    （v2.96：macvlan → "macvlan"，ipvlan → "ipvlan"）
+_nm_ip="$(grep -E '^NET_SHARED_NETWORK_NAME_DEFAULT_IPVLAN=' "$NETMODE_SH" | head -1 | cut -d= -f2- | tr -d '\"')"
+_nm_mac="$(grep -E '^NET_SHARED_NETWORK_NAME_DEFAULT_MACVLAN=' "$NETMODE_SH" | head -1 | cut -d= -f2- | tr -d '\"')"
+_cmp_ip="$(sed -nE 's/^x-l2-netname:.*\$\{IKEV2_L2_NETWORK_NAME:-([^}]*)\}.*/\1/p' "$IPVL" | head -1)"
+_cmp_mac="$(sed -nE 's/^x-l2-netname:.*\$\{IKEV2_L2_NETWORK_NAME:-([^}]*)\}.*/\1/p' "$MACV" | head -1)"
+if [ -n "$_nm_ip" ] && [ "$_nm_ip" = "$_cmp_ip" ]; then
+  ok "NM-63 ipvlan 默认网络名两处一致（$_nm_ip）"
+else
+  bad "NM-63 ipvlan 默认网络名两处一致" "network-mode.sh=${_nm_ip} compose=${_cmp_ip}"
+fi
+if [ -n "$_nm_mac" ] && [ "$_nm_mac" = "$_cmp_mac" ]; then
+  ok "NM-63 macvlan 默认网络名两处一致（$_nm_mac）"
+else
+  bad "NM-63 macvlan 默认网络名两处一致" "network-mode.sh=${_nm_mac} compose=${_cmp_mac}"
+fi
+
+# 8) 默认名必须就是驱动名本身（不带任何 project 标识）
+if [ "$_nm_ip" = "ipvlan" ] && [ "$_nm_mac" = "macvlan" ]; then
+  ok "NM-63 默认网络名就是驱动名（ipvlan / macvlan）"
+else
+  bad "NM-63 默认网络名就是驱动名" "ipvlan=${_nm_ip} macvlan=${_nm_mac}"
+fi
+
+# 9) network-mode.sh 必须提供按模式取默认名的函数
+if grep -q 'net_shared_network_default_name()' "$NETMODE_SH"; then
+  ok "NM-63 network-mode.sh 有 net_shared_network_default_name（按模式取默认名）"
+else
+  bad "NM-63 network-mode.sh 有 net_shared_network_default_name" "not found"
+fi
+
+# 10) up.sh 必须对 macvlan 也调用共享网络逻辑（v2.96：两种驱动都共享）
+if grep -q '"macvlan" \\' "$SCRIPT_DIR/../scripts/up.sh"; then
+  ok "NM-63 up.sh 对 macvlan 也调用 _l2_shared_network_ensure"
+else
+  bad "NM-63 up.sh 对 macvlan 也调用 _l2_shared_network_ensure" "not found"
+fi
+
+# 11) parent 独占预检只对 ipvlan 生效（macvlan 的 parent 不独占）
+if grep -q 'if \[ "\$_driver" = "ipvlan" \]; then' "$SCRIPT_DIR/../scripts/up.sh"; then
+  ok "NM-63 parent 独占预检只对 ipvlan 生效"
+else
+  bad "NM-63 parent 独占预检只对 ipvlan 生效" "not found"
 fi
 
 echo

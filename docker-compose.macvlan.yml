@@ -28,6 +28,18 @@ x-l2-parent:  &l2_parent  "${IKEV2_L2_PARENT:-}"
 x-l2-subnet:  &l2_subnet  "${IKEV2_L2_SUBNET:-}"
 x-l2-gateway: &l2_gateway "${IKEV2_L2_GATEWAY:-}"
 
+# ---- 共享网络名（v2.96）----
+#
+# 这个网络是**跨 project 共享**的：所有用 macvlan 模式的部署都加入**同一条**
+# 网络，而不是各建各的（名字会变成 <project>_ikev2-l2）。
+#
+# 默认名 "macvlan"（就是驱动名，不带任何 project 标识）。
+# 要跟别的项目用同一条网络，就把这里改成对方的名字；
+# 要自己独占一条，就改成别的名字（此时必须是宿主上还没有的）。
+#
+# ⚠️ 网络的 IPAM（subnet / gateway）归**第一个建它的人**所有。
+x-l2-netname: &l2_netname "${IKEV2_L2_NETWORK_NAME:-macvlan}"
+
 # ---- 可选：固定容器 IPv4（留空 = 由 Docker 自动分配）----
 #
 # 留空时 Docker IPAM 从上面那个 subnet 里自动挑一个地址（实测拿到 .2）。
@@ -541,8 +553,10 @@ volumes:
     # 无需 external;docker compose 自动建。
 
 networks:
-  # ===== macvlan 网络（本文件专属）=====
+  # ===== macvlan 共享网络 =====
   ikev2-l2:
+    # 固定名字 —— 跨 project 共享的锚点。可用 IKEV2_L2_NETWORK_NAME 覆盖。
+    name: *l2_netname
     driver: macvlan
     driver_opts:
       # 宿主父接口。macvlan 虚拟网卡挂在它上面。
@@ -567,3 +581,16 @@ networks:
     #
     # 转发开关与 SLAAC 所需的 sysctl 写在 service 段的 `sysctls:` 里，
     # 不在这里 —— 原因见 service 段注释。
+    #
+    # ---- external: true 的语义（v2.96）----
+    #
+    # external = 这条网络**不由 compose 拥有**：compose 不建、不删、不检查 label，
+    # 只声明「我要加入这条网络」。这正是跨 project 共享需要的语义。
+    #
+    #   · 网络不存在 → compose 报 "declared as external, but could not be found"
+    #     → 所以必须先由 scripts/up.sh 建好（up.sh 会「不存在则建、存在则验」）
+    #   · 网络已存在 → compose 无条件复用，不检查 label、不检查参数
+    #   · docker compose down → **不会**删掉它（不属于 compose 的生命周期）
+    #
+    # 代价：compose 不再兜底建网。这部分职责移交 scripts/up.sh。
+    external: true

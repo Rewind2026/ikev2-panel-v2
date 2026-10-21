@@ -62,7 +62,18 @@ env_get() {
 
 # L2 变量沿用原样：读到就 export，让 docker compose 的 ${...} 插值
 # 拿到与本脚本一致的取值。
-for _k in IKEV2_L2_PARENT IKEV2_L2_SUBNET IKEV2_L2_GATEWAY IKEV2_L2_IPV4; do
+#
+# IKEV2_L2_NETWORK_NAME（v2.95）：共享网络名。它必须 export ——
+# compose 的 networks 段用 ${IKEV2_L2_NETWORK_NAME:-<默认名>} 插值出网络名，
+# 不 export 的话 compose 会退回默认值，而本脚本按 .env 的值去建网，
+# 两边会建出**两条不同的网络**（一个叫 .env 里的名字，一个叫默认名），
+# 表现为"建网成功但容器加入的是另一条网" —— 极难定位。
+#
+# 默认名随模式而变（macvlan → "macvlan"，ipvlan → "ipvlan"），
+# 所以这里**不能**在读到空值时就补默认值 —— 那时模式还没归一化。
+# 真正的默认值由后面的 _l2_shared_network_name() 在建网时按模式解析。
+for _k in IKEV2_L2_PARENT IKEV2_L2_SUBNET IKEV2_L2_GATEWAY IKEV2_L2_IPV4 \
+         IKEV2_L2_NETWORK_NAME; do
   if [ -z "${!_k:-}" ]; then
     declare "$_k=$(env_get "$_k")"
     export "$_k"
@@ -140,9 +151,11 @@ if [ "$NETWORK_MODE" = "$NET_MODE_MACVLAN" ] || [ "$NETWORK_MODE" = "$NET_MODE_I
       IKEV2_L2_SUBNET)  echo l2_subnet ;;
       IKEV2_L2_GATEWAY) echo l2_gateway ;;
       IKEV2_L2_IPV4)    echo l2_ipv4 ;;
+      IKEV2_L2_NETWORK_NAME) echo l2_netname ;;
     esac
   }
-  for _k in IKEV2_L2_PARENT IKEV2_L2_SUBNET IKEV2_L2_GATEWAY IKEV2_L2_IPV4; do
+  for _k in IKEV2_L2_PARENT IKEV2_L2_SUBNET IKEV2_L2_GATEWAY IKEV2_L2_IPV4 \
+           IKEV2_L2_NETWORK_NAME; do
     eval "_cur=\${$_k:-}"
     [ -n "$_cur" ] && continue
     _ak="$(_anchor_key "$_k")"
@@ -154,8 +167,37 @@ if [ "$NETWORK_MODE" = "$NET_MODE_MACVLAN" ] || [ "$NETWORK_MODE" = "$NET_MODE_I
       '${'*) continue ;;
     esac
     [ -n "$_v" ] && declare "$_k=$_v"
+    # 网络名必须 export（v2.95）：compose 的 networks 段用
+    # ${IKEV2_L2_NETWORK_NAME:-ipvlan} 插值出网络名。
+    # 不 export 的话，用户在 compose 顶部把 x-l2-netname 改成字面量
+    # （如 &l2_netname "mynet"）时，up.sh 读到 "mynet" 而 compose 仍用
+    # 默认的 "ipvlan" —— 两边加入**不同的网络**，且没有任何报错。
+    [ "$_k" = "IKEV2_L2_NETWORK_NAME" ] && export IKEV2_L2_NETWORK_NAME
   done
   unset _anchor_key
+fi
+
+# 共享网络名是否**由用户显式指定**（v2.95）
+#
+# 这个标记决定「同名网络不存在时」的处置：
+#   显式指定 → 不该被悄悄换成宿主上另一条参数兼容的网络（那是违背用户意图）
+#   用默认值 → 可以自动接管（老用户升级 / 用户自建了别的名字的场景）
+#
+# 判定依据是「值不等于默认值」：无论它来自 shell env、.env 还是 compose 顶部
+# anchor，只要用户写了非默认的名字，就是显式指定。
+#
+# 放在 anchor 回落**之后**算 —— 用户也可能在 compose 顶部写
+# x-l2-netname: &l2_netname "mynet"（字面量），那同样是显式指定。
+#
+# 默认名随模式而变（macvlan → "macvlan"，ipvlan → "ipvlan"），
+# 所以比的是**当前模式**的默认名，不是某个全局常量。
+L2_NETWORK_NAME_EXPLICIT=0
+if [ "$NETWORK_MODE" = "$NET_MODE_MACVLAN" ] || [ "$NETWORK_MODE" = "$NET_MODE_IPVLAN" ]; then
+  L2_NETWORK_DEFAULT_NAME="$(net_shared_network_default_name "$NETWORK_MODE")"
+  if [ -n "${IKEV2_L2_NETWORK_NAME:-}" ] \
+     && [ "${IKEV2_L2_NETWORK_NAME}" != "$L2_NETWORK_DEFAULT_NAME" ]; then
+    L2_NETWORK_NAME_EXPLICIT=1
+  fi
 fi
 
 if [ -t 1 ]; then
@@ -299,6 +341,265 @@ _l2_ipv4_conflict_check() {
 if [ "$NETWORK_MODE" = "$NET_MODE_MACVLAN" ] || [ "$NETWORK_MODE" = "$NET_MODE_IPVLAN" ]; then
   _l2_ipv4_conflict_check \
     || die "固定 IPv4 与宿主地址冲突，拒绝启动（详见上方 ERR 行）"
+fi
+
+# ---------- 共享 L2 网络：不存在则创建，存在则校验（v2.95 / v2.96）----------
+#
+# 为什么需要这一段：L2 模式的网络是**跨 project 共享**的
+# （compose 里 external: true），compose 自己不建网络 —— 所以建网的责任
+# 落到了本脚本上。
+#
+# 三件事：
+#   1. 网络不存在 → 用与 compose 同一份参数建出来
+#   2. 网络已存在 → 逐项比对参数，不符就报错并**列出差异**
+#   3. 不符时绝不自动删改 —— 那条网络可能是别的项目正在用的
+#
+# macvlan 与 ipvlan **都走这套**（v2.96）：实测同一条 macvlan 网络上可以挂
+# 多个容器、可以跨 project，IP 与 MAC 各不相同 —— macvlan 同样支持共享。
+#
+# 两者唯一的差别是 **parent 独占性**（实测，Docker 28.5.2）：
+#   ipvlan  — parent 独占。同一张网卡上建不了第二条 ipvlan 网络（换子网也不行）。
+#   macvlan — parent **不**独占。同一张网卡上可以有多条 macvlan 网络
+#             （子网不重叠即可）。
+# 所以 ipvlan 需要额外的 parent 冲突预检，macvlan 不需要。
+
+# 从 docker network inspect 读一个字段（取不到输出空串）
+#
+# 一律用 `with ... {{.}}{{end}}` 包裹：Go template 的 index 在 key 不存在时
+# 返回 nil，裸写会输出 "<no value>"，把网络名拼进 URL 之类的字符串时很难看。
+_l2_net_field() {
+  docker network inspect "$1" --format "$2" 2>/dev/null | head -n1
+}
+
+# 共享网络名：用户指定的优先，否则用**当前模式的默认名**
+# （macvlan → "macvlan"，ipvlan → "ipvlan"，都不带 project 前缀）。
+_l2_shared_network_name() {
+  _d="$(net_shared_network_default_name "$NETWORK_MODE")"
+  printf '%s' "${IKEV2_L2_NETWORK_NAME:-$_d}"
+}
+
+# 列出宿主机上所有指定 driver 的网络名（每个一行）
+_l2_list_networks_by_driver() {
+  docker network ls --filter "driver=$1" --format '{{.Name}}' 2>/dev/null
+}
+
+# driver 对应的 driver_opts 键名（ipvlan 有两个，macvlan 只有一个）
+#
+#   ipvlan  → ipvlan_mode（l2/l3/l3s） + ipvlan_flag（bridge/private/vepa）
+#   macvlan → macvlan_mode（bridge/private/vepa），没有独立的 flag
+_l2_mode_opt_key() {
+  case "$1" in
+    ipvlan)  echo ipvlan_mode ;;
+    macvlan) echo macvlan_mode ;;
+    *)       echo "" ;;
+  esac
+}
+_l2_flag_opt_key() {
+  case "$1" in
+    ipvlan)  echo ipvlan_flag ;;
+    *)       echo "" ;;
+  esac
+}
+
+# 在宿主机上找一条「parent 与子网都对得上」的既有同驱动网络。
+#
+# 为什么需要这个（向后兼容 + 用户诉求）：
+#   1. 老用户升级前已经有 `<project>_ikev2-l2` 这条网络了。新版默认名是
+#      驱动名（"ipvlan" / "macvlan"），若不去找就会去新建 →
+#      ipvlan 会撞 "already using parent interface"，老用户升级即失败。
+#      所以要**自动接管**那条已有网络。
+#   2. 用户的诉求是「我先建了一条网络，当前项目和其他项目都加入它」。
+#      名字可能不是默认名（他可能叫别的），所以按 parent + 子网去认。
+#
+# 判据含 mode / flag —— l2 与 l3 的广播组播行为不同，flag（bridge/private/vepa）
+# 决定容器之间能否互访。参数不同就不能当成"同一条网络"接管。
+#
+# 找到就返回网络名，找不到返回空串。
+_l2_find_compatible() {
+  _driver="$1"
+  _want_parent="$2"; _want_subnet="$3"; _want_gateway="$4"
+  _want_mode="$5"; _want_flag="$6"
+  _mk="$(_l2_mode_opt_key "$_driver")"
+  _fk="$(_l2_flag_opt_key "$_driver")"
+  for _n in $(_l2_list_networks_by_driver "$_driver"); do
+    [ -n "$_n" ] || continue
+    _p="$(_l2_net_field "$_n" '{{with index .Options "parent"}}{{.}}{{end}}')"
+    _s="$(_l2_net_field "$_n" '{{with (index .IPAM.Config 0).Subnet}}{{.}}{{end}}')"
+    _g="$(_l2_net_field "$_n" '{{with (index .IPAM.Config 0).Gateway}}{{.}}{{end}}')"
+    _m="$(_l2_net_field "$_n" "{{with index .Options \"$_mk\"}}{{.}}{{end}}")"
+    _fl=""
+    [ -n "$_fk" ] && _fl="$(_l2_net_field "$_n" "{{with index .Options \"$_fk\"}}{{.}}{{end}}")"
+    if [ "$_p" = "$_want_parent" ] && [ "$_s" = "$_want_subnet" ] \
+       && [ "$_g" = "$_want_gateway" ] && [ "$_m" = "$_want_mode" ] \
+       && [ "$_fl" = "$_want_flag" ]; then
+      printf '%s' "$_n"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# 判断宿主上是否已存在同名的 L2 网络，并核对关键参数。
+#
+# 返回码：
+#   0 = 可用（不存在，或存在且参数一致）
+#   1 = 参数不一致（已打印差异）
+_l2_shared_network_verify() {
+  _name="$1"
+  _driver="$2"          # ipvlan / macvlan
+  _parent="$3"
+  _subnet="$4"
+  _gateway="$5"
+  _mode="$6"            # ipvlan_mode 或 macvlan_mode
+  _flag="$7"            # ipvlan_flag（macvlan 不用，传空）
+
+  if ! docker network inspect "$_name" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  _a_driver="$(_l2_net_field "$_name" '{{.Driver}}')"
+  _a_parent="$(_l2_net_field "$_name" '{{index .Options "parent"}}')"
+  _a_mode="$(_l2_net_field "$_name" "{{index .Options \"$(_l2_mode_opt_key "$_driver")\"}}")"
+  _a_flag=""
+  if [ -n "$(_l2_flag_opt_key "$_driver")" ]; then
+    _a_flag="$(_l2_net_field "$_name" "{{index .Options \"$(_l2_flag_opt_key "$_driver")\"}}")"
+  fi
+  # IPAM 的第一个 config 段就是 IPv4 段
+  _a_subnet="$(_l2_net_field "$_name" '{{(index .IPAM.Config 0).Subnet}}')"
+  _a_gateway="$(_l2_net_field "$_name" '{{(index .IPAM.Config 0).Gateway}}')"
+  _a_v6="$(_l2_net_field "$_name" '{{.EnableIPv6}}')"
+
+  _diff=""
+  [ "$_a_driver" = "$_driver" ]   || _diff="$_diff"$'\n'"     驱动:             期望=$_driver          实际=$_a_driver"
+  [ "$_a_parent" = "$_parent" ]   || _diff="$_diff"$'\n'"     父接口:           期望=$_parent          实际=$_a_parent"
+  [ "$_a_subnet" = "$_subnet" ]   || _diff="$_diff"$'\n'"     子网:             期望=$_subnet          实际=$_a_subnet"
+  [ "$_a_gateway" = "$_gateway" ] || _diff="$_diff"$'\n'"     网关:             期望=$_gateway        实际=$_a_gateway"
+  [ "$_a_mode" = "$_mode" ]       || _diff="$_diff"$'\n'"     $(_l2_mode_opt_key "$_driver"): 期望=$_mode  实际=$_a_mode"
+  [ -z "$_flag" ] || { [ "$_a_flag" = "$_flag" ] || _diff="$_diff"$'\n'"     $(_l2_flag_opt_key "$_driver"): 期望=$_flag  实际=$_a_flag"; }
+  [ "$_a_v6" = "true" ]           || _diff="$_diff"$'\n'"     IPv6:             期望=enable_ipv6=true  实际=EnableIPv6=$_a_v6"
+
+  if [ -n "$_diff" ]; then
+    echo "ERR: 已存在的网络 '$_name' 与当前配置不匹配：" >&2
+    printf '%s\n' "$_diff" | sed 's/^/       /' >&2
+    echo "     这条网络可能是别的项目正在用的（共享网络的 IPAM 归建网者所有）。" >&2
+    echo "     处置二选一：" >&2
+    echo "       1) 把当前配置的参数改成与它一致（推荐，不影响别人）" >&2
+    echo "       2) 换一条自己的网络：设置 IKEV2_L2_NETWORK_NAME=<别的名字>" >&2
+    return 1
+  fi
+  return 0
+}
+
+# 预检 + 必要时创建共享网络
+_l2_shared_network_ensure() {
+  _driver="$1"; _parent="$2"; _subnet="$3"; _gateway="$4"; _mode="$5"; _flag="$6"
+  _name="$(_l2_shared_network_name)"
+
+  # 情况 1：同名网络已存在 → 直接复用（但要先校参数）
+  if docker network inspect "$_name" >/dev/null 2>&1; then
+    ok "共享网络 '$_name' 已存在（复用，不修改）"
+    _l2_shared_network_verify "$_name" "$_driver" "$_parent" "$_subnet" "$_gateway" "$_mode" "$_flag" \
+      || die "共享网络 '$_name' 参数不匹配，拒绝启动（详见上方 ERR 行）"
+    return 0
+  fi
+
+  # 情况 2：同名不存在 → 找宿主机上「parent + 子网都对得上」的既有同驱动网络。
+  #   这一步同时覆盖两种真实诉求：
+  #     · 老用户升级：老网络叫 <project>_ikev2-l2，parent/子网一致 → 自动接管
+  #     · 用户自建：用户先建了一条叫别的名字的网络 → 自动加入它
+  #
+  # ⚠️ 只有**用默认名**（用户没显式指定）时才自动接管。
+  #    用户显式写了网络名 = 明确要求用那一条，不该被悄悄换成另一条。
+  #    显式指定但那条不存在、而另有一条参数兼容的 → 报清楚让用户选。
+  if _found="$(_l2_find_compatible "$_driver" "$_parent" "$_subnet" "$_gateway" "$_mode" "$_flag")" \
+     && [ -n "$_found" ]; then
+    if [ "$L2_NETWORK_NAME_EXPLICIT" = "0" ]; then
+      ok "宿主机上已有兼容的 $_driver 网络 '$_found'（parent/子网/模式一致）→ 直接复用"
+      warn "  提示：可用 IKEV2_L2_NETWORK_NAME=$_found 显式指定，避免以后误判"
+      # compose 必须加入**同一条**网络。compose 的网络名来自 networks 段的
+      # ${IKEV2_L2_NETWORK_NAME:-<驱动名>}，所以这里把变量指向实际复用的那条。
+      export IKEV2_L2_NETWORK_NAME="$_found"
+      return 0
+    fi
+    echo >&2
+    echo "ERR: 你指定的共享网络 '$_name' 不存在" >&2
+    echo "     但宿主机上已有一条参数兼容的 $_driver 网络 '$_found'（parent/子网/模式一致）。" >&2
+    echo "     处置二选一：" >&2
+    echo "       1) 用它：设置 IKEV2_L2_NETWORK_NAME=$_found" >&2
+    echo "       2) 坚持用 '$_name'：先删掉 '$_found'（docker network rm $_found）" >&2
+    die "指定的共享网络不存在"
+  fi
+
+  # 情况 3：parent 上已有别的同驱动网络（子网不同）→ 明确报冲突。
+  #   ⚠️ 这个检查**只对 ipvlan 成立** —— 实测 macvlan 的 parent **不**独占，
+  #      同一张网卡上可以有多条 macvlan 网络（子网不重叠即可）。
+  #      ipvlan 的 parent 是独占的，同一个网卡上建不了第二条 ipvlan 网络，
+  #      与其让 daemon 报一句英文，不如这里说清楚。
+  if [ "$_driver" = "ipvlan" ]; then
+    for _n in $(_l2_list_networks_by_driver ipvlan); do
+      [ -n "$_n" ] || continue
+      _p="$(_l2_net_field "$_n" '{{with index .Options "parent"}}{{.}}{{end}}')"
+      [ "$_p" = "$_parent" ] || continue
+      _s="$(_l2_net_field "$_n" '{{with (index .IPAM.Config 0).Subnet}}{{.}}{{end}}')"
+      _g="$(_l2_net_field "$_n" '{{with (index .IPAM.Config 0).Gateway}}{{.}}{{end}}')"
+      echo >&2
+      echo "ERR: parent 接口 $_parent 上已有一条 ipvlan 网络 '$_n'（subnet=$_s gateway=$_g）" >&2
+      echo "     ipvlan 的 parent 是**独占**的，同一张网卡上建不了第二条 ipvlan 网络。" >&2
+      echo "     处置二选一：" >&2
+      echo "       1) 复用它：把配置改成它的 subnet/gateway，" >&2
+      echo "          或设置 IKEV2_L2_NETWORK_NAME=$_n" >&2
+      echo "       2) 换一张网卡做 parent" >&2
+      die "ipvlan 网络与宿主既有网络冲突"
+    done
+  fi
+
+  log "共享网络 '$_name' 不存在 → 创建（driver=$_driver parent=$_parent subnet=$_subnet）"
+  # --subnet / --gateway 必须显式给：不给的话 Docker 会塞默认池 172.18.0.0/16，
+  # 之后任何 join 方指定 ipv4_address 都会被拒
+  # （"user specified IP address is supported only when connecting to networks
+  #   with user configured subnets"）。
+  #
+  # --ipv6 让 Docker 自动补一个 v6 网段并打开 enable_ipv6 ——
+  # 容器端点建好时 disable_ipv6 才会是 0，接口才收得到 RA（拿 GUA）。
+  _cmd=(docker network create
+        --driver "$_driver"
+        --opt "parent=$_parent"
+        --opt "$(_l2_mode_opt_key "$_driver")=$_mode")
+  [ -n "$_flag" ] && _cmd+=(--opt "$(_l2_flag_opt_key "$_driver")=$_flag")
+  _cmd+=(--subnet "$_subnet" --gateway "$_gateway" --ipv6 "$_name")
+
+  if ! "${_cmd[@]}"; then
+    echo >&2
+    echo "ERR: 创建共享网络 '$_name' 失败。常见原因：" >&2
+    if [ "$_driver" = "ipvlan" ]; then
+      echo "     · parent 接口 $_parent 上已有一条 ipvlan 网络（ipvlan 的 parent 独占）" >&2
+      echo "       → 复用那条：把 IKEV2_L2_NETWORK_NAME 设成它的名字" >&2
+    fi
+    echo "     · 同子网已存在别的 L2 网络（Docker IPAM 全局，不允许重叠）" >&2
+    echo "       → 复用它：把 IKEV2_L2_NETWORK_NAME 设成它的名字，或把子网改成不重叠的" >&2
+    echo "     · 父接口名写错（用 ip -o -4 route show default 查真实值）" >&2
+    die "共享网络创建失败"
+  fi
+  ok "共享网络 '$_name' 已创建"
+
+  # 建完再校一次 —— 建网参数若被 daemon 调整过（比如 v6 段），这里能发现
+  _l2_shared_network_verify "$_name" "$_driver" "$_parent" "$_subnet" "$_gateway" "$_mode" "$_flag" \
+    || die "新建的共享网络 '$_name' 参数不符合预期（详见上方 ERR 行）"
+}
+
+if [ "$NETWORK_MODE" = "$NET_MODE_IPVLAN" ]; then
+  _l2_shared_network_ensure \
+    "ipvlan" \
+    "${IKEV2_L2_PARENT}" "${IKEV2_L2_SUBNET}" "${IKEV2_L2_GATEWAY}" \
+    "${IKEV2_IPVLAN_MODE:-l2}" "${IKEV2_IPVLAN_FLAG:-bridge}"
+elif [ "$NETWORK_MODE" = "$NET_MODE_MACVLAN" ]; then
+  # macvlan 同样支持跨 project 共享同一条网络（v2.96）——
+  # 实测同一条 macvlan 网络上可挂多个容器，各拿独立 MAC 与 IP。
+  # macvlan 没有独立的 flag 参数，mode 就是 macvlan_mode（bridge/private/vepa）。
+  _l2_shared_network_ensure \
+    "macvlan" \
+    "${IKEV2_L2_PARENT}" "${IKEV2_L2_SUBNET}" "${IKEV2_L2_GATEWAY}" \
+    "${IKEV2_MACVLAN_MODE:-bridge}" ""
 fi
 
 # ---------- 准备 ./logs bind mount 目标(v2.86-PR13.4)----------

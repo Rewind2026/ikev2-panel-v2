@@ -46,6 +46,83 @@ net_mode_ddos_chain() {
   esac
 }
 
+# ---------- 共享 L2 网络（v2.95）----------
+#
+# 背景：L2 网络原本由 compose 自己创建，名字是 `<project>_ikev2-l2` ——
+# 换个 project / 换个目录就会变成"另一个网络"，而 Docker 的 IPAM 是全局的：
+# 同子网再建一个直接 "Pool overlaps"，同 parent 再建一个 ipvlan 更狠 ——
+# "network di-xxx is already using parent interface ens18"（ipvlan 的 parent 独占）。
+#
+# 所以 L2 网络必须有一个**固定的、跨 project 共享的名字**。
+#
+# 共享能力按 driver 分（实测 Docker 28.5.2 / Compose v2.40.3，192.168.50.63）：
+#
+#   ipvlan  — ✅ 可共享。子设备共享 parent 的 MAC，多个子设备共存无碍。
+#             实测：同一 ipvlan 网络上同时挂 2 个容器（不同 project），
+#             各自拿到 192.168.50.92 / .93，互 ping 0% loss。
+#             ⚠️ 但 **parent 独占**：同一张网卡上建不了第二条 ipvlan 网络
+#             （换子网也不行）。
+#
+#   macvlan — ✅ 也可共享。同一 parent 上可以有多条 macvlan 网络，
+#             同一条 macvlan 网络上也能挂多个容器（各拿独立 MAC）。
+#             实测：3 个容器（不同 project）挂同一条 macvlan 网络，
+#             拿到 .2 / .3 / .4，MAC 各不相同。
+#             ⚠️ 但**子网不能重叠**（Docker IPAM 全局）：
+#             "invalid pool request: Pool overlaps with other one on this address space"。
+#
+# ⚠️ 曾有一版结论写成「macvlan 不可共享」，那是**误判** ——
+#    当时在 63 上看到 "failed to create the macvlan port: device or resource busy"，
+#    实际原因是**宿主 ens18 本身不支持 macvlan 设备**（手工
+#    `ip link add link ens18 type macvlan` 同样报 Device or resource busy），
+#    与"共享"无关。换成能建 macvlan 设备的 parent 后，同一条网络挂
+#    3 个容器完全正常。**判据要看清楚是"驱动限制"还是"宿主限制"。**
+#
+# 默认网络名 = 驱动名（不带任何 project 标识）：
+#   ipvlan  → "ipvlan"
+#   macvlan → "macvlan"
+NET_SHARED_NETWORK_NAME_DEFAULT_IPVLAN="ipvlan"
+NET_SHARED_NETWORK_NAME_DEFAULT_MACVLAN="macvlan"
+
+# 按模式取默认网络名。
+#
+# 为什么不用一个全局常量：默认名要跟驱动一致（用户要求「自动创建的时候的
+# 名字也是 macvlan 或 ipvlan」），而模式在运行时才确定。
+net_shared_network_default_name() {
+  case "${1:-}" in
+    "$NET_MODE_MACVLAN") echo "$NET_SHARED_NETWORK_NAME_DEFAULT_MACVLAN" ;;
+    "$NET_MODE_IPVLAN")  echo "$NET_SHARED_NETWORK_NAME_DEFAULT_IPVLAN" ;;
+    *)                  echo "" ;;
+  esac
+}
+
+# 共享网络的 IPAM 归**建网者**所有。
+#
+# 为什么这条这么重要：手工 `docker network create` 时若不带 --subnet，
+# Docker 会塞一个默认池 172.18.0.0/16 进去。之后任何 join 方想指定
+# ipv4_address 都会被拒：
+#   "user specified IP address is supported only when connecting to
+#    networks with user configured subnets"
+# 也就是说，**建网时必须显式带 --subnet + --gateway**，否则共享网络没法分配固定地址。
+#
+# （建网/查网在宿主侧做，见 scripts/up.sh 的 _l2_shared_network_ensure。）
+
+# 共享网络名合法性：Docker 网络名不允许空格 / 大写 / 特殊字符。
+# 只拦真正会导致 daemon 报错的字符，不做过度限制。
+net_shared_network_name_valid() {
+  _n="${1:-}"
+  [ -n "$_n" ] || return 1
+  # 首字符必须是字母或数字
+  case "$_n" in
+    [0-9a-zA-Z]*) ;;
+    *) return 1 ;;
+  esac
+  # 其余只允许字母数字与 . _ -
+  case "$_n" in
+    *[!0-9a-zA-Z._-]*) return 1 ;;
+  esac
+  return 0
+}
+
 # ---------- 模式归一化 ----------
 # 大小写不敏感 + 去首尾空白；空值归一化为 host
 net_mode_normalize() {
@@ -161,6 +238,9 @@ net_mode_validate() {
           echo "WARN: host 模式下忽略 $_v=$_val" >&2
         fi
       done
+      if [ -n "${IKEV2_L2_NETWORK_NAME:-}" ]; then
+        echo "WARN: host 模式下忽略 IKEV2_L2_NETWORK_NAME=${IKEV2_L2_NETWORK_NAME}" >&2
+      fi
       return 0
       ;;
 
@@ -255,6 +335,15 @@ net_mode_validate() {
             return 1
             ;;
         esac
+      fi
+
+      # 共享网络名（v2.95）。macvlan / ipvlan 都支持跨 project 共享。
+      if [ -n "${IKEV2_L2_NETWORK_NAME:-}" ]; then
+        net_shared_network_name_valid "${IKEV2_L2_NETWORK_NAME}" || {
+          echo "ERR: IKEV2_L2_NETWORK_NAME='${IKEV2_L2_NETWORK_NAME}' 不是合法 Docker 网络名" >&2
+          echo "     规则：首字符是字母或数字，其余只允许字母/数字/点/下划线/连字符" >&2
+          return 1
+        }
       fi
 
       return 0

@@ -52,6 +52,24 @@ x-l2-gateway: &l2_gateway "${IKEV2_L2_GATEWAY:-}"
 #     ip -o -4 addr show | grep -F "<你要填的地址>"
 x-l2-ipv4:    &l2_ipv4    "${IKEV2_L2_IPV4:-}"
 
+# ---- 共享网络名（v2.95）----
+#
+# 这个网络是**跨 project 共享**的：所有用 ipvlan 模式的部署都加入**同一条**
+# 网络，而不是各建各的（名字会变成 <project>_ikev2-l2）。
+#
+# 为什么不各建各的 —— Docker 的 IPAM 是全局的，ipvlan 的 parent 更是独占的：
+#   同子网再建一条  → "invalid pool request: Pool overlaps with other one on this address space"
+#   同 parent 再建一条 → "network di-xxx is already using parent interface ens18"
+# 换句话说，ipvlan 模式在宿主机上**本来就只能有一条**这种网络。
+#
+# 默认名 "ipvlan"。要跟别的项目用同一条网络，就把这里改成对方的名字；
+# 要自己独占一条，就改成别的名字（此时必须是宿主上还没有的）。
+#
+# ⚠️ 网络的 IPAM（subnet / gateway）归**第一个建它的人**所有。
+#    共享网络一旦存在，这里的 subnet / gateway 就只用于"校验是否匹配"，
+#    不再是"建网参数" —— 见文件末尾 networks 段的 external 说明。
+x-l2-netname: &l2_netname "${IKEV2_L2_NETWORK_NAME:-ipvlan}"
+
 # docker-compose.ipvlan.yml —— 【ipvlan 网络模式】
 # 运行期配置的唯一权威。设计说明见 docs/architecture.md §11。
 #
@@ -542,8 +560,38 @@ volumes:
     # 无需 external;docker compose 自动建。
 
 networks:
-  # ===== ipvlan 网络（本文件专属）=====
+  # ===== ipvlan 共享网络 =====
+  #
+  # v2.95：这个网络是**跨 project 共享**的，不再由 compose 各建各的。
+  #
+  # 之前（无 name:）compose 建的网名是 `<project>_ikev2-l2` —— 换个目录 /
+  # 换个 project 就是"另一条网络"，而 Docker 的 IPAM 是全局的、ipvlan 的
+  # parent 更是独占的，于是：
+  #   "invalid pool request: Pool overlaps with other one on this address space"
+  #   "network di-xxx is already using parent interface ens18"
+  # 也就是说，ipvlan 模式在宿主机上**本来就只能有一条**这种网络。
+  # 与其撞车，不如显式共享。
+  #
+  # ⚠️ external: true 的含义是「这条网络由**外部**管理，compose 不碰它」：
+  #   - 网络不存在 → compose 直接报 "declared as external, but could not be found"
+  #     → 所以必须先由 ./scripts/up.sh 建好（它会「不存在则创建」）
+  #   - 网络已存在 → compose 无条件复用，**不检查 label、不检查参数**，
+  #     且 `docker compose down` **不会删掉它**
+  #     → 所以不会误伤别的项目正在用的网络
+  #
+  # 下面的 driver_opts / ipam / enable_ipv6 在 external 模式下 compose 会忽略，
+  # 但**保留**是为了两件事：
+  #   1. 它们是 up.sh 建网时的参数来源（up.sh 从同一份文件读，避免两处漂移）
+  #   2. 想不用 up.sh、直接 `docker compose -f docker-compose.ipvlan.yml up -d`
+  #      的用户，把 external 注释掉就能回到"compose 自己建"的老行为
+  #
+  # 共享网络的 IPAM 归**第一个建它的人**所有。建网时必须显式带 subnet，
+  # 否则 Docker 会塞默认池 172.18.0.0/16，之后任何 join 方想指定
+  # ipv4_address 都会被拒（"user specified IP address is supported only when
+  # connecting to networks with user configured subnets"）。
   ikev2-l2:
+    # 固定名字 —— 跨 project 共享的锚点。可用 IKEV2_L2_NETWORK_NAME 覆盖。
+    name: *l2_netname
     driver: ipvlan
     driver_opts:
       # 宿主父接口。ipvlan 虚拟网卡挂在它上面。
@@ -567,6 +615,10 @@ networks:
     #   不开 enable_ipv6 → dis6=1 gua=0
     #   开   enable_ipv6 → dis6=0 gua=1（GUA 由 RA 下发）
     enable_ipv6: true
+    #
+    # external: true —— 复用宿主机上已存在的同名网络，不创建、不删除。
+    # 网络的建/查/校由 scripts/up.sh 负责（见那里的一组 _l2_shared_network_* 函数）。
+    external: true
     #
     # 转发开关与 SLAAC 所需的 sysctl 写在 service 段的 `sysctls:` 里，
     # 不在这里 —— 原因见 service 段注释。

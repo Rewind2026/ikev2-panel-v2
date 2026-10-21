@@ -98,8 +98,8 @@ IKEV2_DOMAIN=vpn.example.com
 | 模式 | compose 文件 | netns | 地址来源 | 什么时候用 |
 |------|-------------|-------|---------|-----------|
 | `host` | `docker-compose.yml` | 与宿主共享 | 宿主网卡 | **默认**。零改动兼容，宿主已有公网 v6 就直接用 |
-| `macvlan` | `docker-compose.macvlan.yml` | 独立 | IPAM 分配 v4 + 上游 RA 下发 v6 | 宿主上 500/4500/8443 已被别的服务占用，但容器需要在同一二层里占一个独立 IP |
-| `ipvlan` | `docker-compose.ipvlan.yml` | 独立 | 同上，但与宿主共享 MAC | 同 macvlan，但上游（云厂商 / 交换机）不允许出现第二个源 MAC |
+| `macvlan` | `docker-compose.macvlan.yml` | 独立 | IPAM 分配 v4 + 上游 RA 下发 v6 | 宿主上 500/4500/8443 已被别的服务占用，但容器需要在同一二层里占一个独立 IP。**支持多项目共享同一条网络** |
+| `ipvlan` | `docker-compose.ipvlan.yml` | 独立 | 同上，但与宿主共享 MAC | 同 macvlan，但上游（云厂商 / 交换机）不允许出现第二个源 MAC。**支持多项目共享同一条网络** |
 
 **三个模式 = 三个独立完整的 compose 文件**，各管各的，不叠加：
 
@@ -174,6 +174,56 @@ x-l2-ipv4:    &l2_ipv4    "${IKEV2_L2_IPV4:-192.168.1.10}"
 > 但要注意面板可能会用**自己的 `.env` 覆盖同名变量** —— 若面板里已存在
 > `IKEV2_L2_*` 三项，值会优先于你在 compose 里写的字面量。
 > 排查步骤见 [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#1321-用第三方面板部署1panel--宝塔--dpanel-等时变量传不进容器)。
+
+**共享网络（多项目可加入同一条）**
+
+L2 模式的网络默认就叫**驱动名** —— macvlan 模式叫 `macvlan`，ipvlan 模式叫
+`ipvlan`（不是 `<项目名>_ikev2-l2`），**所有 project 加入的是同一条网络**。
+
+为什么要这样 —— Docker 的 IPAM 是全局的，「各 project 各建各的」根本走不通：
+
+| 限制 | 报错 |
+|------|------|
+| Docker IPAM 全局 | `invalid pool request: Pool overlaps with other one on this address space` |
+| ipvlan parent 独占 | `network di-xxx is already using parent interface ens18`（换子网也不行） |
+
+也就是说，**同一张网卡上本来就只能有一条 ipvlan 网络**。与其撞车，不如显式共享。
+
+`./scripts/up.sh` 的处置逻辑（macvlan / ipvlan **完全一致**）：
+
+| 情况 | 行为 |
+|------|------|
+| 网络不存在 | **自动创建**（`docker network create --driver <驱动> --subnet=… --gateway=… --ipv6 <名字>`） |
+| 同名网络已存在、参数一致 | **直接复用**，不修改任何东西 |
+| 同名网络已存在、参数不一致 | **报错并逐项列出差异**（子网 / 网关 / 父接口 / 模式…），不自动删改 |
+| 同名不存在，但宿主机上已有参数兼容的同驱动网络 | **自动接管**那条（你自建的名字不一样也能认出来） |
+| ipvlan 模式下 parent 上已有别的 ipvlan 网络 | 明确报冲突，给出「复用它 / 换网卡」两条路 |
+
+要加入**别人已经建好的**那条网络，把名字写对即可 —— 三种写法等价：
+
+```bash
+# 1. 环境变量
+IKEV2_L2_NETWORK_NAME=ipvlan ./scripts/up.sh
+
+# 2. .env 文件
+#    IKEV2_L2_NETWORK_NAME=ipvlan
+
+# 3. compose 顶部（第四个 anchor）
+x-l2-netname: &l2_netname "${IKEV2_L2_NETWORK_NAME:-ipvlan}"
+```
+
+> 显式指定名字 = 明确要求用那一条。若那条不存在而另有参数兼容的，
+> `up.sh` **不会**悄悄换成另一条，而是报错让你选。
+
+> ⚠️ **共享网络的 IPAM 归第一个建它的人所有**。后来者配置里的 subnet / gateway
+> 只用于「校验是否匹配」，不再决定实际网段。`docker compose down` **不会**删掉
+> 这条网络（`external: true`），所以不会误伤别的项目。
+
+> ⚠️ **两种驱动的差别只在 parent 独占性**：
+> ipvlan 的 parent 独占（一张网卡上只能一条 ipvlan 网络），
+> macvlan 不独占（一张网卡上可以有多条 macvlan 网络，只要子网不重叠）。
+> 但**共享本身两者都支持** —— 实测同一条 macvlan 网络上可以挂多个容器、
+> 跨 project，各拿独立 IP 与独立 MAC。
 
 **L2 模式前置条件**：
 
@@ -378,6 +428,7 @@ docker compose logs -f          # 容器 stdout
 | `IKEV2_SERVER_CN` / `IKEV2_CERT_MODE` / `IKEV2_DOMAIN` | **重启容器**（entrypoint 启动时替换 swanctl.conf 占位符） |
 | `IKEV2_IPV6_ONLY` / `IKEV2_OUT_IF` / `IKEV2_VPN_SUBNET` | **重启容器** |
 | `IKEV2_NETWORK_MODE` / `IKEV2_L2_*` | **重建容器** —— 选哪个 compose 文件由 `-f` 决定。这个变量在每份文件里硬编码为自身模式，改它没用 |
+| `IKEV2_L2_NETWORK_NAME` | **重建容器** —— 决定加入哪条共享网络。改名时先确认目标网络在宿主上已存在且参数一致 |
 | `IKEV2_LISTEN_ADDR` / `IKEV2_LOG_LEVEL` / `IKEV2_DISPLAY_TIMEZONE` | **重启容器** |
 | `IKEV2_SESSION_TTL` / `IKEV2_DEFAULT_USER_PASSWORD_LEN` | **重启容器** |
 | 面板里改的证书配置、客户端虚拟网段 | **重启容器**（`cert.conf` / `subnet.conf` 由 entrypoint 启动时读；网段另有"保存并立即生效"按钮，不重启也能改） |

@@ -1259,7 +1259,14 @@ net_mode_driver_desc()     # 人类可读的驱动描述（日志用）
 net_mode_sysctls()         # L2 容器 netns 的 sysctl 真源（compose 的 sysctls 块同值）
 net_mode_sysctl_checks()   # 运行时回读清单：<sysctl 路径>|<期望值>
 net_mode_validate()        # 全部配置校验，返回非 0 表示失败
+
+net_shared_network_name_valid()  # 共享网络名合法性（纯 POSIX sh，见 §11.1.2）
 ```
+
+共享网络名的默认值常量是 `NET_SHARED_NETWORK_NAME_DEFAULT_IPVLAN="ipvlan"` /
+`NET_SHARED_NETWORK_NAME_DEFAULT_MACVLAN="macvlan"`
+（定义在本文件里，宿主侧 `scripts/up.sh` source 后使用；
+按模式取值走 `net_shared_network_default_name`）。
 
 > **v2.86-PR20**：原表里的 `net_mode_out_if_is_host()` 已删除 —— 它零生产调用，
 > 且语义与 `net_mode_has_docker_user()` 完全相同。`IKEV2_OUT_IF` 的模式差异
@@ -1306,6 +1313,102 @@ driver option 实测不生效、service 段 sysctls 里 `IFNAME`/`eth0` 都会�
 
 三条都在 L2 compose 文件里**静态注入**，entrypoint 启动后按
 `net_mode_sysctl_checks()` 逐条回读复核（§12.8.1），任一条不符即 FATAL `exit 10`。
+
+### 11.1.2 共享 L2 网络（v2.95 / v2.96）
+
+**L2 模式的网络在宿主机上本来就只能有一条这种网络**，所以「各 project 各建各的」
+这条路走不通 —— 撞的是 Docker 的两条硬限制：
+
+| 限制 | 报错 | 触发条件 |
+|------|------|---------|
+| Docker IPAM 全局 | `invalid pool request: Pool overlaps with other one on this address space` | 同子网再建一条 L2 网络 |
+| ipvlan parent 独占 | `network di-xxx is already using parent interface ens18` | 同一张网卡上再建一条 ipvlan 网络（**换子网也不行**） |
+
+v2.95 的做法是**把这条唯一性显式化**：ipvlan 网络改用**固定名**（默认 `ipvlan`），
+所有 project 加入**同一条**，由第一个部署的人建、后面的人复用。
+v2.96 把这套**推广到 macvlan**（默认名 `macvlan`）。
+
+**默认网络名 = 驱动名**，不带任何 project 标识：
+
+| 模式 | 默认网络名 | 覆盖变量 |
+|------|-----------|---------|
+| `macvlan` | `macvlan` | `IKEV2_L2_NETWORK_NAME` |
+| `ipvlan` | `ipvlan` | `IKEV2_L2_NETWORK_NAME` |
+
+**两种驱动都能跨 project 共享同一条网络**（63 实测，Docker 28.5.2）：
+
+| 驱动 | 跨 project 共享同一条网络 | 同一 parent 上多条网络 | parent 独占 |
+|------|--------------------------|---------------------|-----------|
+| `ipvlan` | ✅ 可以 | ❌ 不行 | **是** |
+| `macvlan` | ✅ 可以 | ✅ 行（子网不重叠即可） | 否 |
+
+- **ipvlan**：子设备**共享 parent 的 MAC**，同 parent 上多个子设备共存无碍。
+  实测同一 ipvlan 网络上挂 2 个容器（不同 project），各拿 `192.168.50.92` / `.93`，
+  互 ping 0% loss。
+- **macvlan**：每个容器拿**独立 MAC**，同一 parent 上也可以并存多条 macvlan 网络。
+  实测同一条 macvlan 网络上挂 3 个容器（不同 project），各拿 `.2` / `.3` / `.4`，
+  MAC 各不相同。
+
+> ⚠️ **曾有一版结论写成「macvlan 不可共享」，那是误判。**
+> 当时在 63 上看到 `failed to create the macvlan port: device or resource busy`，
+> 实际原因是**宿主 `ens18` 本身不支持 macvlan 设备**（手工
+> `ip link add link ens18 type macvlan` 同样报 `Device or resource busy`），
+> 与共享无关。换个能建 macvlan 设备的 parent 后，同一条网络挂 3 个容器完全正常。
+> **判据要看清楚是「驱动限制」还是「宿主限制」。**
+
+**四条处置路径**（`scripts/up.sh` 的 `_l2_shared_network_ensure`，两种驱动一致）：
+
+| 情况 | 判定 | 动作 |
+|------|------|------|
+| ① 同名网络已存在 | `docker network inspect <name>` 成功 | **复用**，并逐项比对参数；不符 → 报错列差异 |
+| ② 同名不存在，但宿主机上有参数兼容的**同驱动**网络 | parent + 子网 + 网关 + mode(+flag) 全等 | **自动接管**那条（仅限用户没显式指定名字时） |
+| ③ parent 上已有别的同驱动网络 | 存在同 parent 的网络且不是② | **仅 ipvlan**：明确报冲突（parent 独占）；**macvlan**：允许共存 |
+| ④ 什么都没有 | —— | **创建**：`docker network create --driver <驱动> --opt parent=… --subnet=… --gateway=… --ipv6 <name>` |
+
+**② 只在用户没显式指定名字时才自动接管**。显式指定（`IKEV2_L2_NETWORK_NAME`
+或 compose 顶部的 `x-l2-netname` 写成非默认值）= 用户明确要求用那一条，
+此时若那条不存在而另有兼容的，报错让用户选，不悄悄换。
+
+**参数不符 = 报错并列出差异，绝不自动删改**。共享网络的 IPAM 归**第一个建它
+的人**所有，另一条网络很可能正在被别的 project 使用；自动改 subnet 或删网络
+都会打断那个 project。差异清单逐项列出（驱动 / 父接口 / 子网 / 网关 /
+mode / flag / IPv6 开关），并给出两个处置选项。
+
+**`external: true` 的语义**（compose networks 段，两份 L2 compose 都有）：
+
+| 行为 | 说明 |
+|------|------|
+| 网络不存在 | compose 直接报 `declared as external, but could not be found` → 所以**必须先由 `up.sh` 建好** |
+| 网络已存在 | compose 无条件复用，**不检查 label、不检查参数** |
+| `docker compose down` | **不会删掉**它（external 网络不属于 compose 的生命周期） |
+
+`external: true` 正是「跨 project 共享」需要的语义：compose 只声明「我要加入
+这条网络」，不拥有它。代价是 compose 不再兜底建网 —— 这部分职责移交
+`scripts/up.sh`（它做「不存在则建、存在则验、兼容则接管、冲突则报错」）。
+
+**建网时必须显式带 `--subnet`**：不带的话 Docker 会塞默认池 `172.18.0.0/16`，
+之后任何 join 方想指定 `ipv4_address` 都会被拒
+（`user specified IP address is supported only when connecting to networks with
+user configured subnets`）。`--ipv6` 则让 Docker 补一个 v6 网段并打开
+`enable_ipv6` —— 不开的话端点建好时 `disable_ipv6` 会被置 1，接口收不到 RA。
+
+**up.sh 与 compose 必须指向同一条网络**。compose 的网络名来自 networks 段的
+`${IKEV2_L2_NETWORK_NAME:-<驱动名>}` 插值，所以：
+
+1. `IKEV2_L2_NETWORK_NAME` 在 up.sh 里**必须 export**（否则 up.sh 与 compose
+   各自算出不同的名字，两边加入**不同的网络**，且没有任何报错）；
+2. 走 compose 顶部 anchor 回落时（用户在文件里写 `x-l2-netname: &l2_netname "mynet"`）
+   也要 export，否则 up.sh 读到 `mynet`、compose 仍用默认的驱动名；
+3. 自动接管（情况②）时要把 `IKEV2_L2_NETWORK_NAME` 指向实际接管的那一条。
+
+**判定「显式指定」的时机**：在 anchor 回落**之后**算 —— 否则用户在 compose 顶部
+写死名字时会被误判成「用了默认值」，从而触发不该触发的自动接管。
+比较的基准是**当前模式的默认名**（`net_shared_network_default_name`），
+不是某个全局常量 —— 因为默认名随驱动而变。
+
+**网络名合法性**：Docker 网络名不允许空格 / 特殊字符，
+`scripts/network-mode.sh` 的 `net_shared_network_name_valid()` 用纯 POSIX sh
+校验（该文件会被容器内 entrypoint source，不能用 bash 语法）。
 
 ### 11.2 Capabilities
 

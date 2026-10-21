@@ -895,6 +895,132 @@ docker exec ikev2-panel ip route replace 192.168.50.0/24 dev eth0 scope link tab
 
 **升级到 v2.92 后** 这个问题自动消失，不需要任何手工操作。
 
+#### 1.7.9 共享 L2 网络相关的报错（v2.95 / v2.96）
+
+v2.95 起 ipvlan 模式用**固定名**的网络（默认 `ipvlan`），v2.96 起 macvlan 模式
+同样（默认 `macvlan`），所有 project 加入**同一条**。以下报错都源于此。
+
+##### `network <name> was found but has incorrect label com.docker.compose.network set to ""`
+
+**症状**：`docker compose up` 直接失败，容器没起来。
+
+**根因**：compose networks 段是 `external: true` —— 这条网络**不由 compose 管理**，
+所以 compose 不写 label。如果这条网络是**旧的 compose 建的**（带 label），
+compose 校验 label 时就会报这个。
+
+**处置**：删掉旧网络让它按新的方式重建（注意确认没有别的 project 在用）：
+
+```bash
+docker network rm <旧网络名>
+./scripts/up.sh
+```
+
+> ⚠️ 这条报错**只在网络带 compose label 时**出现。共享网络里若已有人用
+> `docker network create` 手工建过（无 label），compose 不会报，直接复用。
+
+##### `declared as external, but could not be found`
+
+**症状**：`docker compose up` 报网络不存在。
+
+**根因**：`external: true` 意味着 compose **不负责建网**。建网是
+`scripts/up.sh` 的职责。
+
+**处置**：
+
+```bash
+# 正确做法：走 up.sh（它会「不存在则建、存在则验」）
+./scripts/up.sh
+
+# 或手工建一条（参数必须和 compose 里的一致，且必须带 --subnet）
+docker network create ipvlan \
+  --driver ipvlan --opt parent=ens18 --opt ipvlan_mode=l2 --opt ipvlan_flag=bridge \
+  --subnet 192.168.50.0/24 --gateway 192.168.50.1 --ipv6 ipvlan
+```
+
+> ⚠️ **不写 `--subnet` 会踩坑**：Docker 会塞默认池 `172.18.0.0/16`，
+> 之后任何 join 方想指定 `ipv4_address` 都会被拒
+> （`user specified IP address is supported only when connecting to networks with
+> user configured subnets`）。
+
+##### `ERR: 已存在的网络 'xxx' 与当前配置不匹配`
+
+**症状**：`up.sh` 报参数不匹配并逐项列出差异。
+
+**这是设计行为，不是 bug**。共享网络的 IPAM 归**第一个建它的人**所有，
+这条网络很可能正被别的 project 用着 —— 自动改 subnet 或删网络都会打断它。
+
+| 差异项 | 处置 |
+|--------|------|
+| 子网 / 网关不同 | 把自己的 `IKEV2_L2_SUBNET` / `IKEV2_L2_GATEWAY` 改成与它一致（推荐，不影响别人） |
+| 父接口不同 | 同上，改 `IKEV2_L2_PARENT` |
+| 驱动不同（ipvlan vs macvlan） | 换 `IKEV2_L2_NETWORK_NAME` 指向自己那条，或删掉冲突的那条 |
+
+> 改 `IKEV2_L2_NETWORK_NAME` 时注意：那条名字在宿主上必须**还没有** ——
+> ipvlan 的 parent 独占，同一张网卡上建不了第二条。
+
+##### `ipvlan 网络与宿主既有网络冲突`
+
+**症状**：`up.sh` 报 parent 上已有别的 ipvlan 网络。
+
+**根因**：ipvlan 的 parent 是**独占**的 —— 同一张网卡上建不了第二条 ipvlan
+网络，**换子网也不行**（daemon 报
+`network di-xxx is already using parent interface ens18`）。
+
+**处置**（二选一）：
+
+```bash
+# 1. 复用已有那条：把名字指过去
+IKEV2_L2_NETWORK_NAME=<已有网络名> ./scripts/up.sh
+
+# 2. 换一张网卡做 parent
+```
+
+##### `macvlan 网络与宿主既有网络冲突`
+
+**症状**：`up.sh` 报 macvlan 的 parent 已被占用。
+
+> ⚠️ **v2.96 起这个报错不会再出现** —— macvlan 的 parent **不独占**
+> （同一张网卡上可以有多条 macvlan 网络），那条预检已删除。
+> 若你还在看到这个报错，说明用的是 v2.95 之前的版本。
+
+**根因（v2.95 及更早）**：当时误判成「macvlan 的 parent 独占」。
+
+**处置**：升级到 v2.96+，或删掉旧的那条（`docker network rm <旧名>`）。
+
+##### `failed to create the macvlan port: device or resource busy`
+
+**症状**：macvlan 模式的容器起不来。
+
+**根因**：**宿主网卡不支持 macvlan 设备**，与「共享」无关。
+验证方法（手工建设备，绕开 Docker）：
+
+```bash
+sudo ip link add link <父接口> name mvtest0 type macvlan mode bridge
+# RTNETLINK answers: Device or resource busy  → 宿主不支持
+sudo ip link del mvtest0
+```
+
+**处置**：
+
+- 换一块支持 macvlan 的网卡做 parent；
+- 或改用 **ipvlan 模式**（只要求 parent 支持 ipvlan，支持面更广）；
+- 或改用 **host 模式**。
+
+> ⚠️ v2.95 的文档曾把这个报错解读成「macvlan 无法跨 project 共享」，
+> **那是误判**。实测同一条 macvlan 网络可以挂多个容器、可以跨 project，
+> 各拿独立 IP 与独立 MAC。v2.96 已修正。
+
+##### 确认当前加入的是哪条网络
+
+```bash
+# 容器实际挂着的网络名
+docker inspect ikev2-panel --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{end}}'
+
+# 宿主机上所有 ipvlan / macvlan 网络
+docker network ls --filter driver=ipvlan
+docker network ls --filter driver=macvlan
+```
+
 ---
 
 ## 2. mobileconfig 装不上 / 连不上
