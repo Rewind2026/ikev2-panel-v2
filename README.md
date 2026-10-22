@@ -126,17 +126,31 @@ L2 必填变量缺失 / 填了 v6 子网这类配置错误。
 **L2 模式：改 compose 顶部三行，不需要 `.env`**
 
 打开 `docker-compose.macvlan.yml` / `docker-compose.ipvlan.yml`，最上面有一个
-醒目的注释块，下面三行是唯一需要改的地方：
+醒目的注释块，下面三行是唯一需要改的地方（**出厂是「留空 + 中文报错」状态**）：
 
 ```yaml
-x-l2-parent:  &l2_parent  "${IKEV2_L2_PARENT:-eth0}"      # 宿主父接口名
-x-l2-subnet:  &l2_subnet  "${IKEV2_L2_SUBNET:-192.168.1.0/24}"  # 宿主所在 IPv4 子网
-x-l2-gateway: &l2_gateway "${IKEV2_L2_GATEWAY:-192.168.1.1}"     # 该子网的宿主网关
+x-l2-parent:  &l2_parent  "${IKEV2_L2_PARENT:-${IKEV2_L2_PARENT:?请在 compose 顶部 x-l2-parent 填父接口名（如 ens18）}}"
+x-l2-subnet:  &l2_subnet  "${IKEV2_L2_SUBNET:-${IKEV2_L2_SUBNET:?请在 compose 顶部 x-l2-subnet 填宿主所在 IPv4 子网（如 192.168.50.0/24）}}"
+x-l2-gateway: &l2_gateway "${IKEV2_L2_GATEWAY:-${IKEV2_L2_GATEWAY:?请在 compose 顶部 x-l2-gateway 填网关（如 192.168.50.1）}}"
 ```
 
-**把值填在 `${...:-}` 的括号里，不要把外壳删掉。** 外壳在，`.env` 用户才能
-用 `.env` 覆盖；外壳删了（写成 `"eth0"`），这个值就变成硬编码，`.env` 永久失效。
-不写 `.env` 的话，外壳留着也不影响 —— 括号里的值就是最终生效值。
+**把 `:-` 后面的整段内容替换成你的值**（外层 `${...}` 外壳保留）：
+
+```yaml
+x-l2-parent:  &l2_parent  "${IKEV2_L2_PARENT:-ens18}"
+x-l2-subnet:  &l2_subnet  "${IKEV2_L2_SUBNET:-192.168.50.0/24}"
+x-l2-gateway: &l2_gateway "${IKEV2_L2_GATEWAY:-192.168.50.1}"
+```
+
+外层 `${...}` 外壳**不能删**。留着它，`.env` 用户才能用 `.env` 覆盖；
+删了（写成 `"ens18"`），这个值就变成硬编码，`.env` 永久失效。
+
+> **留空会怎样**：compose 在**拉镜像之前**就停下来，把中文提示原样打出来：
+> ```
+> error while interpolating x-l2-subnet: required variable IKEV2_L2_SUBNET is missing a value:
+> 请在 compose 顶部 x-l2-subnet 填宿主所在 IPv4 子网（如 192.168.50.0/24）
+> ```
+> 不会拉镜像、不会建容器、不会建网络。63 实测（Docker 28.5.2 / Compose v2.40.3）。
 
 查真实值（在**宿主**上执行）：
 
@@ -154,7 +168,7 @@ ip -o -4 addr show <父接口>     # inet 那一列的 CIDR = 子网
 
 > ⚠️ **`SUBNET` / `GATEWAY` 留空是故意的**：这两项每台机器都不同，没有通用默认值。
 > 写死一个「看起来能跑」的值比留空更危险 —— 容器会正常起来但网段是错的，
-> 排查成本远高于多看一眼注释。留空时 entrypoint 会明确告诉你缺哪一项。
+> 排查成本远高于多看一眼注释。留空时 compose / entrypoint 都会明确告诉你缺哪一项。
 
 **可选：固定容器 IPv4**
 
@@ -189,11 +203,23 @@ L2 模式的网络默认就叫**驱动名** —— macvlan 模式叫 `macvlan`�
 
 也就是说，**同一张网卡上本来就只能有一条 ipvlan 网络**。与其撞车，不如显式共享。
 
+**两条路径都支持，且互通**（v2.97 起）：
+
+| 路径 | 怎么起 | 谁建网络 | 网络已存在时 |
+|------|--------|---------|-------------|
+| **纯 compose**（Docker 管理器 GUI / `docker compose up -d`） | 改 compose 顶部三行 → up | **compose 自己建** | 复用（带正确 label 时）；无 label 会报 label 不匹配 |
+| **up.sh**（可选增强） | `./scripts/up.sh` | **up.sh 建**，并逐项校验参数 | 复用 + 校验参数；不符则报错列差异 |
+
+两条路径建出来的网络**互相可用**（63 实测）：
+`up.sh` 建网时带 `--label com.docker.compose.network=ikev2-l2`，
+所以纯 compose 路径能直接复用它（只出 `was not created by compose` 的 warning，
+不影响启动）。
+
 `./scripts/up.sh` 的处置逻辑（macvlan / ipvlan **完全一致**）：
 
 | 情况 | 行为 |
 |------|------|
-| 网络不存在 | **自动创建**（`docker network create --driver <驱动> --subnet=… --gateway=… --ipv6 <名字>`） |
+| 网络不存在 | **自动创建**（`docker network create --driver <驱动> --subnet=… --gateway=… --ipv6 --label com.docker.compose.network=ikev2-l2 <名字>`） |
 | 同名网络已存在、参数一致 | **直接复用**，不修改任何东西 |
 | 同名网络已存在、参数不一致 | **报错并逐项列出差异**（子网 / 网关 / 父接口 / 模式…），不自动删改 |
 | 同名不存在，但宿主机上已有参数兼容的同驱动网络 | **自动接管**那条（你自建的名字不一样也能认出来） |
@@ -216,8 +242,10 @@ x-l2-netname: &l2_netname "${IKEV2_L2_NETWORK_NAME:-ipvlan}"
 > `up.sh` **不会**悄悄换成另一条，而是报错让你选。
 
 > ⚠️ **共享网络的 IPAM 归第一个建它的人所有**。后来者配置里的 subnet / gateway
-> 只用于「校验是否匹配」，不再决定实际网段。`docker compose down` **不会**删掉
-> 这条网络（`external: true`），所以不会误伤别的项目。
+> 只用于「校验是否匹配」，不再决定实际网段。
+> 纯 compose 路径下 `docker compose down` 会尝试删这条网络，但**别的容器还挂着时
+> 不会真删**（Docker 报 `Resource is still in use` 后放弃）—— 63 实测：
+> P1 down 后网络仍在，P2 容器照常拿到 `192.168.50.3`。
 
 > ⚠️ **两种驱动的差别只在 parent 独占性**：
 > ipvlan 的 parent 独占（一张网卡上只能一条 ipvlan 网络），

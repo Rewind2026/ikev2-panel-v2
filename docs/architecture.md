@@ -1374,17 +1374,47 @@ v2.96 把这套**推广到 macvlan**（默认名 `macvlan`）。
 都会打断那个 project。差异清单逐项列出（驱动 / 父接口 / 子网 / 网关 /
 mode / flag / IPv6 开关），并给出两个处置选项。
 
-**`external: true` 的语义**（compose networks 段，两份 L2 compose 都有）：
+**`external` 的语义**（compose networks 段，两份 L2 compose 都有，v2.97 起是插值开关）：
 
-| 行为 | 说明 |
-|------|------|
-| 网络不存在 | compose 直接报 `declared as external, but could not be found` → 所以**必须先由 `up.sh` 建好** |
-| 网络已存在 | compose 无条件复用，**不检查 label、不检查参数** |
-| `docker compose down` | **不会删掉**它（external 网络不属于 compose 的生命周期） |
+```yaml
+external: "${IKEV2_L2_EXTERNAL:-false}"
+```
 
-`external: true` 正是「跨 project 共享」需要的语义：compose 只声明「我要加入
-这条网络」，不拥有它。代价是 compose 不再兜底建网 —— 这部分职责移交
-`scripts/up.sh`（它做「不存在则建、存在则验、兼容则接管、冲突则报错」）。
+| 取值 | 场景 | 行为 |
+|------|------|------|
+| `false`（默认） | **纯 compose 路径**（Docker 管理器 GUI / `docker compose up -d`） | compose **自己**建这条网络：不存在就建（名字固定，无 project 前缀），已存在就复用（带正确 label 时） |
+| `true` | **up.sh 路径** | compose **只加入**，不创建也不删除（网络必须已由 up.sh 建好并逐项校验过） |
+
+63 实测（Docker 28.5.2 / Compose v2.40.3）：
+
+| 行为 | `external: false` | `external: true` |
+|------|------------------|------------------|
+| 网络不存在 | compose 建成，名字就是 `ipvlan`（有 `name:`，无 project 前缀） | 直接报 `declared as external, but could not be found` |
+| 网络已存在（**带** `com.docker.compose.network=ikev2-l2` label） | 复用，只出 warning | 复用，无 warning |
+| 网络已存在（**无** label） | **报错** `network ipvlan was found but has incorrect label com.docker.compose.network set to "" (expected: "ikev2-l2")` | 复用（**跳过 label 校验**） |
+| `docker compose down` | 网络是 compose 建的 → 会删（但别的容器还挂着时保留） | **不删**（external 网络不属于 compose 生命周期） |
+
+**为什么 label 这么关键**：compose 复用一条**已存在**的同名网络时会校验它上面的
+label `com.docker.compose.network` 是否等于 networks 段的 **key**（`ikev2-l2`）。
+所以：
+
+- 纯 compose 路径下 compose 自己建的网络，label 天然正确 → 别的 project 能复用；
+- `scripts/up.sh` 建的网络必须**手动带** `--label com.docker.compose.network=ikev2-l2`
+  → 才能被纯 compose 路径复用（up.sh 建的网不带 compose 的 project label，
+  compose 会打 `a network with name ipvlan exists but was not created by compose`
+  的 warning，但**能正常启动**）；
+- 两条路径建出来的网因此**互相可用**。
+
+**v2.97 的方向修正**：v2.95/v2.96 的设计前提是「用户跑 `up.sh` 建网，compose 以
+`external: true` 加入」。真实部署场景是**只跑 compose**（Docker 管理器 GUI），
+那个前提不成立 —— 写死 `external: true` 会让纯 compose 路径直接失败
+（`declared as external, but could not be found`）。所以建网责任交还给 compose，
+`up.sh` 降级为**可选增强**（参数校验 / 冲突预检 / 固定 IPv4 与宿主地址冲突检查 /
+`./logs` 目录准备 / 老网络自动接管），并在建网时补上 compose label 让两条路径互通。
+
+**up.sh 路径强制 `external=true`**：up.sh 建好并校验完网络后，会把
+`IKEV2_L2_EXTERNAL` 强制为 `true` 并 export。否则 compose 会再查一遍网络
+（打 warning）或在「自动接管来的老网络」上直接报 label 不匹配。
 
 **建网时必须显式带 `--subnet`**：不带的话 Docker 会塞默认池 `172.18.0.0/16`，
 之后任何 join 方想指定 `ipv4_address` 都会被拒

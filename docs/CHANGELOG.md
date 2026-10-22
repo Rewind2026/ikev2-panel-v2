@@ -18,6 +18,117 @@ hotfix。升级前请重点看目标版本的「⚠️ 行为变更」。
 
 ---
 
+## v2.97（2026-10-22）— 纯 compose 路径可用：建网责任交还给 compose，`up.sh` 降级为可选增强
+
+**用户诉求：「目前的应用场景只有用 compose pull 容器，不存在在外部调用 up.sh
+或其他脚本去 pull docker images 的情况。所以，如果只用 compose，我们能实现哪些？」**
+
+### 一、v2.95 / v2.96 的设计前提不成立
+
+v2.95 / v2.96 把「共享 L2 网络」的建网责任交给了 `scripts/up.sh`，compose 侧
+写死 `external: true`。这个前提是「用户跑 `up.sh`」。
+
+但真实部署场景是**只跑 compose**（飞牛 fnOS 的 Docker 管理器 GUI / 第三方面板
+的编排页直接跑 compose 文件），**没有任何脚本介入**。写死 `external: true` 时
+纯 compose 路径直接失败：
+
+```
+network ipvlan declared as external, but could not be found
+```
+
+（63 实测复现：这就是用 Docker 管理器部署起不来的根因。）
+
+### 二、纯 compose 路径能做到什么（63 全部实测通过）
+
+| 能力 | 结果 |
+|------|------|
+| 网络不存在 → 自动创建 | ✅ compose 自建，名字固定 `ipvlan`（有 `name:`，无 project 前缀） |
+| 网络已存在 → 复用 | ✅ 复用（带正确 label 时），只出 warning |
+| 多项目加入同一条网络 | ✅ P1 先建、P2 复用；两容器 IP `192.168.50.2` / `.3`，同挂 `ipvlan` |
+| `down` 不误伤共享网络 | ✅ P1 down 时 Docker 报 `Resource is still in use` → 网络保留，P2 照常 |
+| 必填变量留空 → 中文报错 | ✅ compose 在**拉镜像前**停下：`error while interpolating x-l2-subnet: required variable IKEV2_L2_SUBNET is missing a value: 请在 compose 顶部 x-l2-subnet 填宿主所在 IPv4 子网（如 192.168.50.0/24）` |
+| 与 up.sh 路径互通 | ✅ up.sh 建的网带 label，纯 compose 能直接复用 |
+
+### 三、改了什么
+
+**compose 侧**（`docker-compose.macvlan.yml` / `docker-compose.ipvlan.yml`）：
+
+```yaml
+# networks 段
+external: "${IKEV2_L2_EXTERNAL:-false}"    # 之前是写死的 external: true
+```
+
+```yaml
+# 顶部三项必填变量：出厂「留空 + 中文报错」形态
+x-l2-parent:  &l2_parent  "${IKEV2_L2_PARENT:-${IKEV2_L2_PARENT:?请在 compose 顶部 x-l2-parent 填父接口名（如 ens18）}}"
+x-l2-subnet:  &l2_subnet  "${IKEV2_L2_SUBNET:-${IKEV2_L2_SUBNET:?请在 compose 顶部 x-l2-subnet 填宿主所在 IPv4 子网（如 192.168.50.0/24）}}"
+x-l2-gateway: &l2_gateway "${IKEV2_L2_GATEWAY:-${IKEV2_L2_GATEWAY:?请在 compose 顶部 x-l2-gateway 填网关（如 192.168.50.1）}}"
+```
+
+`external` 的两种取值（63 实测）：
+
+| 取值 | 场景 | 行为 |
+|------|------|------|
+| `false`（默认） | 纯 compose 路径 | compose 自己建：不存在就建，已存在就复用 |
+| `true` | up.sh 路径 | compose 只加入，不创建也不删除 |
+
+**关键：external=true 会跳过 label 校验，external=false 不会。**
+compose 复用一条已存在的同名网络时会校验它上面的
+label `com.docker.compose.network` 是否等于 networks 段的 **key**（`ikev2-l2`）：
+
+| 场景 | `external: false` | `external: true` |
+|------|------------------|------------------|
+| 网络不存在 | compose 建成 | 报 `declared as external, but could not be found` |
+| 网络已存在、**带** label | 复用（只出 warning） | 复用（无 warning） |
+| 网络已存在、**无** label | **报错** `incorrect label ... (expected: "ikev2-l2")` | 复用（跳过校验） |
+
+**up.sh 侧**：
+
+- 建网时带 `--label com.docker.compose.network=ikev2-l2` → up.sh 建的网
+  能被纯 compose 路径复用（两条路径从此互通）；
+- 建完网后**强制** `IKEV2_L2_EXTERNAL=true` 并 export → compose 只加入，
+  不会跟 up.sh 抢网络的管理权，也不会在「自动接管来的老网络」上撞 label 校验；
+- `compose_get()` 新增「嵌套 `:?`」形态识别（出厂形态下用户还没填值 → 返回空，
+  让 `net_mode_validate` 报「缺少必填变量」，而不是把内层表达式当默认值）。
+
+**network-mode.sh 侧**：
+
+- 新增常量 `NET_SHARED_NETWORK_COMPOSE_KEY="ikev2-l2"`（compose networks 段的 key）；
+- `net_mode_validate` 校验 `IKEV2_L2_EXTERNAL` 只能是 `true` / `false`；
+- host 模式忽略 `IKEV2_L2_EXTERNAL`（只 WARN）。
+
+### 四、纯 compose 路径**做不到**的（都还是 up.sh 专属）
+
+| 能力 | 说明 |
+|------|------|
+| 参数不匹配报差异表 | compose 只校验 label，不比对 driver / parent / 子网 / 模式 |
+| ipvlan parent 独占预检 | compose 不做，撞了才由 daemon 报英文 |
+| 容器 IPv4 与宿主地址冲突检查 | 撞上会让**宿主入站连接全断**（实测 SSH 直接 reset） |
+| `./logs` bind mount 目录准备 | compose 路径要自己 `mkdir -p logs && chmod 1777 logs` |
+| 老网络自动接管 | compose 不认参数兼容的旧网络 |
+
+### ⚠️ 行为变更
+
+| 项 | 之前（v2.96） | 现在（v2.97） |
+|---|---|---|
+| compose networks 段的 external | 写死 `true` | `"${IKEV2_L2_EXTERNAL:-false}"`（默认 false = compose 自己建） |
+| 顶部三项必填变量的出厂值 | 有默认值（`ens18` / `192.168.1.0/24` / `192.168.1.1`） | **留空 + 中文报错**（`:?` 嵌套形态） |
+| 谁建 L2 网络 | 只有 `up.sh` | **compose（默认）或 up.sh**（两条路径互通） |
+| up.sh 建的网络 | 无 compose label（纯 compose 复用不了） | 带 `com.docker.compose.network=ikev2-l2` |
+| 纯 compose 部署 | **起不来**（`declared as external`） | **可用** |
+
+> ⚠️ **老用户升级注意**：v2.96 的 compose 文件顶部三项带**写死的默认值**
+> （`ens18` / `192.168.1.0/24` / `192.168.1.1`）。v2.97 改成留空 —— 升级后
+> **必须填上真实值**，否则 compose 会在拉镜像前用中文报错提醒你。
+> `.env` 用户不受影响（`.env` 优先级高于文件里的字面量）。
+
+**回归测试**：`tests/network_mode_test.sh` 的 NM-63 第 3 条改为校验插值开关，
+新增 **NM-64**（16 条断言：嵌套 `:?` 形态 / compose key 与常量一致 / up.sh 带
+label / up.sh 强制 external=true / `IKEV2_L2_EXTERNAL` 合法性 / host 模式忽略）。
+全量 **195 passed / 0 failed**。
+
+---
+
 ## v2.96（2026-10-21）— macvlan 也自适应了：固定名 `macvlan` / `ipvlan`，两种驱动都能多项目共享
 
 **用户诉求：「现在我希望 macvlan 也要改成自适应的，并且我希望无论是 macvlan 还是

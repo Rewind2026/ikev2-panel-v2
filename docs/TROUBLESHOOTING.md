@@ -895,7 +895,7 @@ docker exec ikev2-panel ip route replace 192.168.50.0/24 dev eth0 scope link tab
 
 **升级到 v2.92 后** 这个问题自动消失，不需要任何手工操作。
 
-#### 1.7.9 共享 L2 网络相关的报错（v2.95 / v2.96）
+#### 1.7.9 共享 L2 网络相关的报错（v2.95 / v2.96 / v2.97）
 
 v2.95 起 ipvlan 模式用**固定名**的网络（默认 `ipvlan`），v2.96 起 macvlan 模式
 同样（默认 `macvlan`），所有 project 加入**同一条**。以下报错都源于此。
@@ -904,32 +904,47 @@ v2.95 起 ipvlan 模式用**固定名**的网络（默认 `ipvlan`），v2.96 �
 
 **症状**：`docker compose up` 直接失败，容器没起来。
 
-**根因**：compose networks 段是 `external: true` —— 这条网络**不由 compose 管理**，
-所以 compose 不写 label。如果这条网络是**旧的 compose 建的**（带 label），
-compose 校验 label 时就会报这个。
+**根因**：`external` 默认为 `false`（v2.97），compose 复用一条**已存在**的同名
+网络时会校验它上面的 label `com.docker.compose.network` 是否等于 networks 段的
+**key**（`ikev2-l2`）。不带这个 label 的网络（`docker network create` 手工建的、
+或老版本 compose 建的）就过不了这一关。
 
-**处置**：删掉旧网络让它按新的方式重建（注意确认没有别的 project 在用）：
+**处置**（二选一）：
 
 ```bash
-docker network rm <旧网络名>
+# 1. 走 up.sh —— 它建网时带 --label com.docker.compose.network=ikev2-l2，
+#    且强制 external=true（跳过 label 校验），最省事
 ./scripts/up.sh
+
+# 2. 手工给这条网络补上 label（label 只能在建网时给，docker network update 不支持）
+docker network rm <网络名>
+docker network create <网络名> \
+  --driver ipvlan --opt parent=ens18 --opt ipvlan_mode=l2 --opt ipvlan_flag=bridge \
+  --subnet 192.168.50.0/24 --gateway 192.168.50.1 --ipv6 \
+  --label com.docker.compose.network=ikev2-l2
 ```
 
-> ⚠️ 这条报错**只在网络带 compose label 时**出现。共享网络里若已有人用
-> `docker network create` 手工建过（无 label），compose 不会报，直接复用。
+> ⚠️ 删网络前先确认没有别的 project 在用（`docker network inspect <名>` 看
+> 有没有容器挂着）。删了会打断那些容器。
 
 ##### `declared as external, but could not be found`
 
 **症状**：`docker compose up` 报网络不存在。
 
-**根因**：`external: true` 意味着 compose **不负责建网**。建网是
-`scripts/up.sh` 的职责。
+**根因**：`external: true` 意味着 compose **不负责建网**。v2.97 起
+`external` 默认是 `false`（compose 自己建），所以这条报错只会出现在
+**显式设了 `IKEV2_L2_EXTERNAL=true`**（或 `up.sh` 路径 —— up.sh 自己建网），
+而网络又确实不存在时。
 
 **处置**：
 
 ```bash
-# 正确做法：走 up.sh（它会「不存在则建、存在则验」）
+# 走 up.sh（它会「不存在则建、存在则验」）
 ./scripts/up.sh
+
+# 或纯 compose 路径：把 external 设回 false（默认值），让 compose 自己建
+#   .env 里删掉 IKEV2_L2_EXTERNAL=true 这一行即可
+#   或在 compose 的 networks 段把 external 改成 false
 
 # 或手工建一条（参数必须和 compose 里的一致，且必须带 --subnet）
 docker network create ipvlan \
@@ -941,6 +956,16 @@ docker network create ipvlan \
 > 之后任何 join 方想指定 `ipv4_address` 都会被拒
 > （`user specified IP address is supported only when connecting to networks with
 > user configured subnets`）。
+
+##### `a network with name ipvlan exists but was not created by compose`
+
+**症状**：一条 **warning**，**不影响启动**（容器照常起来）。
+
+**根因**：这条网络是 `up.sh`（或 `docker network create`）建的，不是 compose 建的，
+所以没有 `com.docker.compose.project` label。compose 只是提醒你一声。
+
+**处置**：不用管。也可以消掉 —— 走纯 compose 路径让 compose 自己建这条网络，
+或让 `up.sh` 接管前先删掉旧的。
 
 ##### `ERR: 已存在的网络 'xxx' 与当前配置不匹配`
 
