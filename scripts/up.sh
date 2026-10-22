@@ -72,8 +72,15 @@ env_get() {
 # 默认名随模式而变（macvlan → "macvlan"，ipvlan → "ipvlan"），
 # 所以这里**不能**在读到空值时就补默认值 —— 那时模式还没归一化。
 # 真正的默认值由后面的 _l2_shared_network_name() 在建网时按模式解析。
+#
+# IKEV2_L2_EXTERNAL（v2.97）也在这条链上：它是 compose networks 段
+# `external: "${IKEV2_L2_EXTERNAL:-false}"` 的取值来源。
+# 先 export 出来，是为了让 net_mode_validate 能校验它的合法性；
+# 真正生效的值在下面「共享网络建好之后」会被**强制**为 true
+# （up.sh 自己建网 → compose 必须走 external 语义，否则 compose 会
+#   抢着建网 / 报 label 不匹配 / down 时把共享网络删掉）。
 for _k in IKEV2_L2_PARENT IKEV2_L2_SUBNET IKEV2_L2_GATEWAY IKEV2_L2_IPV4 \
-         IKEV2_L2_NETWORK_NAME; do
+         IKEV2_L2_NETWORK_NAME IKEV2_L2_EXTERNAL; do
   if [ -z "${!_k:-}" ]; then
     declare "$_k=$(env_get "$_k")"
     export "$_k"
@@ -101,6 +108,12 @@ compose_get() {
   _cf="./docker-compose.${1}.yml"
   [ -f "$_cf" ] || return 0
   _key="${2//_/-}"
+  # 形态 0：嵌套必填 "${VAR:-${VAR:?中文提示}}"（v2.97 出厂形态）
+  #   这形态表示「用户还没填值」→ 返回空，让 net_mode_validate 报缺变量。
+  #   必须放在形态 1 之前：形态 1 的正则 ([^}]*) 会把内层表达式当成默认值。
+  if grep -qE "^x-${_key}:[[:space:]]*&${2}[[:space:]]+\"\\\$\{[A-Za-z_][A-Za-z0-9_]*:-\\\$\{[A-Za-z_][A-Za-z0-9_]*:\?" "$_cf"; then
+    return 0
+  fi
   # 形态 1：${VAR:-默认值} → 取默认值
   _v="$(sed -nE "s/^x-${_key}:[[:space:]]*&${2}[[:space:]]+\"\\\$\{[A-Za-z_][A-Za-z0-9_]*:-([^}]*)\}\".*/\1/p" "$_cf" | head -n1)"
   if [ -n "$_v" ]; then
@@ -561,10 +574,21 @@ _l2_shared_network_ensure() {
   #
   # --ipv6 让 Docker 自动补一个 v6 网段并打开 enable_ipv6 ——
   # 容器端点建好时 disable_ipv6 才会是 0，接口才收得到 RA（拿 GUA）。
+  #
+  # ⚠️ --label com.docker.compose.network=ikev2-l2 是**必须的**：
+  #   compose 在 external=false 时复用一条已存在的同名网络，会校验它上面的
+  #   com.docker.compose.network label 是否等于 compose networks 段的 **key**
+  #   （ikev2-l2），不匹配就报
+  #     "network <名> was found but has incorrect label
+  #      com.docker.compose.network set to "" (expected: "ikev2-l2")"
+  #   带上这个 label，本脚本建的网才能被**纯 docker compose** 路径复用
+  #   （Docker 管理器 GUI 部署就是那条路径），两条路径从此互通。
+  #   63 实测：带 label 的网 → 纯 compose 正常启动、down 也不删它。
   _cmd=(docker network create
         --driver "$_driver"
         --opt "parent=$_parent"
-        --opt "$(_l2_mode_opt_key "$_driver")=$_mode")
+        --opt "$(_l2_mode_opt_key "$_driver")=$_mode"
+        --label "com.docker.compose.network=${NET_SHARED_NETWORK_COMPOSE_KEY}")
   [ -n "$_flag" ] && _cmd+=(--opt "$(_l2_flag_opt_key "$_driver")=$_flag")
   _cmd+=(--subnet "$_subnet" --gateway "$_gateway" --ipv6 "$_name")
 
@@ -600,6 +624,34 @@ elif [ "$NETWORK_MODE" = "$NET_MODE_MACVLAN" ]; then
     "macvlan" \
     "${IKEV2_L2_PARENT}" "${IKEV2_L2_SUBNET}" "${IKEV2_L2_GATEWAY}" \
     "${IKEV2_MACVLAN_MODE:-bridge}" ""
+fi
+
+# ---------- L2 模式：强制 compose 走 external 语义（v2.97）----------
+#
+# 上面这段已经把共享网络建好（或确认已存在且参数一致），
+# 所以 compose 必须**只加入、不创建、不删除**这条网络。
+#
+# 为什么必须强制（而不是让 .env 说了算）：
+#   compose 的 networks 段是 `external: "${IKEV2_L2_EXTERNAL:-false}"`，
+#   纯 compose 路径（Docker 管理器 GUI）默认 false = compose 自己建 ——
+#   那是对的，因为那时没有 up.sh 帮它建。
+#   但 up.sh 路径下网络已经存在且已逐项校验过：
+#     · external=false → compose 会再查一遍网络并打 warning
+#       "a network with name ipvlan exists but was not created by compose"，
+#       语义上等于让 compose 抢已建好的网络的管理权
+#     · 极端情况：这条网络是「自动接管」来的（老用户的 <project>_ikev2-l2），
+#       它**没有** com.docker.compose.network label，
+#       external=false 会直接报 "incorrect label ... (expected: ikev2-l2)"，
+#       整个启动失败（这正是 63 上 Docker 管理器启动失败的根因）。
+#   external=true 则：compose 无条件复用、不校验 label、down 也不删它。
+#   63 实测（Docker 28.5.2 / Compose v2.40.3）：external=true + 网络无 label → 正常启动。
+if [ "$NETWORK_MODE" = "$NET_MODE_MACVLAN" ] || [ "$NETWORK_MODE" = "$NET_MODE_IPVLAN" ]; then
+  if [ "${IKEV2_L2_EXTERNAL:-false}" != "true" ]; then
+    warn "IKEV2_L2_EXTERNAL=${IKEV2_L2_EXTERNAL:-（未设置）} → 由 up.sh 强制为 true"
+    warn "  共享网络已由 up.sh 建好并校验，compose 只加入、不创建、不删除"
+  fi
+  IKEV2_L2_EXTERNAL=true
+  export IKEV2_L2_EXTERNAL
 fi
 
 # ---------- 准备 ./logs bind mount 目标(v2.86-PR13.4)----------

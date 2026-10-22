@@ -83,6 +83,22 @@ net_mode_ddos_chain() {
 NET_SHARED_NETWORK_NAME_DEFAULT_IPVLAN="ipvlan"
 NET_SHARED_NETWORK_NAME_DEFAULT_MACVLAN="macvlan"
 
+# compose networks 段的 **key**（不是网络名）。
+#
+# 为什么需要这个常量（v2.97）：
+#   compose 复用一条**已存在**的同名网络时，会校验网络上的 label
+#   `com.docker.compose.network` 是否等于 networks 段的 key（实测 63，
+#   Docker 28.5.2 / Compose v2.40.3）：
+#     不匹配 → "network ipvlan was found but has incorrect label
+#              com.docker.compose.network set to "" (expected: "ikev2-l2")"
+#   所以 scripts/up.sh 建网时必须带上这个 label，
+#   否则 up.sh 建的网**纯 docker compose 路径复用不了**。
+#
+# 值必须与 docker-compose.{macvlan,ipvlan}.yml 里 networks 段的 key 一致
+# （两份文件都是 ikev2-l2）。改 networks 段的 key 时这里要同步改，
+# tests/network_mode_test.sh 的 NM-64 会强制校验两处一致。
+NET_SHARED_NETWORK_COMPOSE_KEY="ikev2-l2"
+
 # 按模式取默认网络名。
 #
 # 为什么不用一个全局常量：默认名要跟驱动一致（用户要求「自动创建的时候的
@@ -241,6 +257,9 @@ net_mode_validate() {
       if [ -n "${IKEV2_L2_NETWORK_NAME:-}" ]; then
         echo "WARN: host 模式下忽略 IKEV2_L2_NETWORK_NAME=${IKEV2_L2_NETWORK_NAME}" >&2
       fi
+      if [ -n "${IKEV2_L2_EXTERNAL:-}" ]; then
+        echo "WARN: host 模式下忽略 IKEV2_L2_EXTERNAL=${IKEV2_L2_EXTERNAL}" >&2
+      fi
       return 0
       ;;
 
@@ -345,6 +364,23 @@ net_mode_validate() {
           return 1
         }
       fi
+
+      # external 开关（v2.97）。compose 的 networks 段用它决定「谁建网」：
+      #   false（默认）→ compose 自己建（纯 docker compose 路径可用）
+      #   true          → compose 只加入（scripts/up.sh 建好并校验过后走这条）
+      #
+      # 非法值直接拒：compose 的插值是字符串塞进 YAML，值写错时
+      # 报错信息会很难懂（"cannot unmarshal !!str `yes` into bool"），
+      # 与其让用户去猜，不如在这里点名。
+      case "${IKEV2_L2_EXTERNAL:-false}" in
+        true|false) ;;
+        *)
+          echo "ERR: IKEV2_L2_EXTERNAL='${IKEV2_L2_EXTERNAL:-}' 非法；合法值: true | false" >&2
+          echo "     false = 由 docker compose 自己建这条网络（默认，纯 compose 部署用这个）" >&2
+          echo "     true  = 复用已存在的网络（scripts/up.sh 会自动设成 true）" >&2
+          return 1
+          ;;
+      esac
 
       return 0
       ;;

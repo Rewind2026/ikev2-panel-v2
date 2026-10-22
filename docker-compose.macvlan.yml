@@ -13,20 +13,27 @@
 # ⚠️ SUBNET / GATEWAY 留空是**故意的**：这两项每台机器都不同，
 #    没有任何通用默认值。写死一个「看起来能跑」的值比留空更危险 ——
 #    容器会正常起来但网段是错的，排查成本远高于这里多看一眼注释。
-#    留空时 compose 会在 up 阶段直接报错（见文件末尾 networks 段）。
+#    留空时 compose 会在**拉镜像之前**停下来，并把中文提示原样打出来
+#    （见下面三行里的 ${...:?...}）。
 #
 # 优先级：shell 环境变量 > .env 文件 > 下面这个字面量。
 #   愿意用 .env 的人可以照旧用，三个变量名不变。
 #   （anchor 里套的就是 ${VAR:-默认}，实测 Compose v2.40.3 行为正确）
 #
-# ⚠️ 要填值时**把值填在 ${...:-} 的括号里**，别把外壳删掉：
-#     x-l2-parent:  &l2_parent  "${IKEV2_L2_PARENT:-ens18}"   ← 对
-#     x-l2-parent:  &l2_parent  "ens18"                      ← 错，.env 会永久失效
+# ⚠️ 要填值时**把 :- 后面的整段内容替换成你的值**，别把 ${...} 外壳删掉：
+#     x-l2-parent:  &l2_parent  "${IKEV2_L2_PARENT:-ens18}"     ← 对
+#     x-l2-parent:  &l2_parent  "ens18"                        ← 错，.env 会永久失效
 #   外壳在，.env 里同名变量才能覆盖它（标准优先级：shell > .env > 本文件）。
 #   不写 .env 的话，外壳留着不影响 —— 括号里就是最终生效值。
-x-l2-parent:  &l2_parent  "${IKEV2_L2_PARENT:-}"
-x-l2-subnet:  &l2_subnet  "${IKEV2_L2_SUBNET:-}"
-x-l2-gateway: &l2_gateway "${IKEV2_L2_GATEWAY:-}"
+#
+# 下面三行出厂是「留空 + 中文报错」状态，例如：
+#   "${IKEV2_L2_PARENT:-${IKEV2_L2_PARENT:?请在 compose 顶部 x-l2-parent 填父接口名（如 ens18）}}"
+# 内层 ${...:?...} 是 compose 自带的**必填校验**：变量既没设、默认值也是空时，
+# `docker compose up` 立刻停下并把这句中文原样打出来（不会拉镜像、不会建容器）。
+# 填完就是上面那种写法 —— 把 :- 后面整段换成你的值即可。
+x-l2-parent:  &l2_parent  "${IKEV2_L2_PARENT:-${IKEV2_L2_PARENT:?请在 compose 顶部 x-l2-parent 填父接口名（如 ens18）}}"
+x-l2-subnet:  &l2_subnet  "${IKEV2_L2_SUBNET:-${IKEV2_L2_SUBNET:?请在 compose 顶部 x-l2-subnet 填宿主所在 IPv4 子网（如 192.168.50.0/24）}}"
+x-l2-gateway: &l2_gateway "${IKEV2_L2_GATEWAY:-${IKEV2_L2_GATEWAY:?请在 compose 顶部 x-l2-gateway 填网关（如 192.168.50.1）}}"
 
 # ---- 共享网络名（v2.96）----
 #
@@ -582,15 +589,29 @@ networks:
     # 转发开关与 SLAAC 所需的 sysctl 写在 service 段的 `sysctls:` 里，
     # 不在这里 —— 原因见 service 段注释。
     #
-    # ---- external: true 的语义（v2.96）----
+    # ---- external 的语义（v2.97）----
     #
-    # external = 这条网络**不由 compose 拥有**：compose 不建、不删、不检查 label，
-    # 只声明「我要加入这条网络」。这正是跨 project 共享需要的语义。
+    # external 由环境变量 IKEV2_L2_EXTERNAL 控制（默认 false）：
     #
-    #   · 网络不存在 → compose 报 "declared as external, but could not be found"
-    #     → 所以必须先由 scripts/up.sh 建好（up.sh 会「不存在则建、存在则验」）
-    #   · 网络已存在 → compose 无条件复用，不检查 label、不检查参数
-    #   · docker compose down → **不会**删掉它（不属于 compose 的生命周期）
+    #   false（默认）→ compose **自己**建这条网络：不存在就建，已存在就复用。
+    #                    → 纯 `docker compose -f docker-compose.macvlan.yml up -d`
+    #                      就能跑通，**不依赖任何脚本**（Docker 管理器 GUI 场景）。
+    #   true          → compose **只加入**，不创建也不删除（网络必须已经存在）。
+    #                    → scripts/up.sh 走这条：建网 + 参数校验 + 冲突预检归它管。
     #
-    # 代价：compose 不再兜底建网。这部分职责移交 scripts/up.sh。
-    external: true
+    # 两条路都实测通过（63 实测，Docker 28.5.2 / Compose v2.40.3）：
+    #   · 纯 compose：网络不存在 → "Network macvlan Created"（名字就是 macvlan，
+    #     因为上面写了 name:，没有 project 前缀）；已存在 → 复用，只出 warning
+    #   · up.sh：先建网（带 com.docker.compose.network label）→ compose 以
+    #     external 方式加入，参数由 up.sh 逐项校验过
+    #
+    # ⚠️ 跨 project 复用同一条网络时，compose 会检查网络上的 label：
+    #    com.docker.compose.network 必须等于本文件 networks 段的 **key**（ikev2-l2），
+    #    否则报 "network macvlan was found but has incorrect label
+    #    com.docker.compose.network set to "" (expected: "ikev2-l2")"。
+    #    up.sh 建网时带上这个 label，所以两条路径建出来的网可以互相复用。
+    #
+    # external = true 时 compose 不拥有这条网络，down 也不会删它；
+    # external = false 时 compose 拥有它，但只要还有别的容器挂着，
+    # down 就会报 "Resource is still in use" 并保留网络（不会误伤别人）。
+    external: "${IKEV2_L2_EXTERNAL:-false}"

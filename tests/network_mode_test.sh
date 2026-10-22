@@ -32,7 +32,7 @@ bad()  { FAIL=$((FAIL+1)); FAILED_IDS+=("$1"); printf '  %s %s — %s\n' "$(_red
 validate_rc() {
   (
     unset IKEV2_L2_PARENT IKEV2_L2_SUBNET IKEV2_L2_GATEWAY IKEV2_L2_IPV4
-    unset IKEV2_L2_NETWORK_NAME
+    unset IKEV2_L2_NETWORK_NAME IKEV2_L2_EXTERNAL
     unset IKEV2_MACVLAN_MODE IKEV2_IPVLAN_MODE IKEV2_IPVLAN_FLAG
     unset IKEV2_L2_IPV6_SYSCTL IKEV2_SERVER_ADDR_V6
     while [ "$#" -gt 0 ]; do
@@ -1189,13 +1189,23 @@ for _pair in "ipvlan:$IPVL" "macvlan:$MACV"; do
   fi
 done
 
-# 3) 两份 compose 的 networks 段都必须有 external: true（compose 不建也不删，由 up.sh 管）
+# 3) 两份 compose 的 networks 段都必须有 external 插值开关（v2.97）
+#
+#    external: "${IKEV2_L2_EXTERNAL:-false}"
+#
+#    语义（63 实测，Docker 28.5.2 / Compose v2.40.3）：
+#      false（默认）→ compose 自己建这条网络（纯 compose 路径可用）
+#      true          → compose 只加入，不创建也不删除（up.sh 路径）
+#    所以这里**不能**再写死 external: true —— 那样纯 compose 路径直接失败：
+#      "network ipvlan declared as external, but could not be found"
 for _pair in "ipvlan:$IPVL" "macvlan:$MACV"; do
   _m="${_pair%%:*}"; _f="${_pair#*:}"
-  if sed -n '/^networks:/,$p' "$_f" | grep -qE '^[[:space:]]+external:[[:space:]]+true[[:space:]]*$'; then
-    ok "NM-63 $_m networks 段 external: true（共享网络由宿主侧管理）"
+  if sed -n '/^networks:/,$p' "$_f" \
+     | grep -qE '^[[:space:]]+external:[[:space:]]+"\$\{IKEV2_L2_EXTERNAL:-false\}"[[:space:]]*$'; then
+    ok "NM-63 $_m networks 段 external 为插值开关 \${IKEV2_L2_EXTERNAL:-false}"
   else
-    bad "NM-63 $_m networks 段 external: true" "not found"
+    bad "NM-63 $_m networks 段 external 为插值开关 \${IKEV2_L2_EXTERNAL:-false}" \
+        "not found"
   fi
 done
 
@@ -1263,6 +1273,103 @@ if grep -q 'if \[ "\$_driver" = "ipvlan" \]; then' "$SCRIPT_DIR/../scripts/up.sh
   ok "NM-63 parent 独占预检只对 ipvlan 生效"
 else
   bad "NM-63 parent 独占预检只对 ipvlan 生效" "not found"
+fi
+
+# ---------- NM-64 纯 compose 路径可用的三件套（v2.97）----------
+#
+# v2.96 的设计前提是「用户跑 up.sh，up.sh 建网 + compose 以 external 加入」。
+# v2.97 修正：真实部署场景是**只跑 compose**（Docker 管理器 GUI），
+# 所以建网责任必须能交还给 compose。三件套缺一不可：
+#
+#   ① networks 段的 external 是插值开关（NM-63 第 3 条已查）
+#   ② 顶部三项必填变量用嵌套 :? 形态 → 留空时 compose 在**拉镜像前**
+#      就用中文报错（不是英文的 "required variable ... is missing a value"）
+#   ③ up.sh 建网时带 com.docker.compose.network label → 两条路径建出来的
+#      网络可以互相复用（否则纯 compose 复用 up.sh 建的网会报
+#      "incorrect label com.docker.compose.network set to "" (expected: ikev2-l2)"）
+echo "-- 纯 compose 路径接线（NM-64）"
+
+# 1) 两份 compose 顶部三项必须是嵌套 :? 形态（中文报错）
+for _pair in "ipvlan:$IPVL" "macvlan:$MACV"; do
+  _m="${_pair%%:*}"; _f="${_pair#*:}"
+  for _v in PARENT SUBNET GATEWAY; do
+    _raw="$(grep -E "^x-l2-$(echo "$_v" | tr 'A-Z' 'a-z'):" "$_f" | head -1)"
+    if printf '%s' "$_raw" | grep -qE '\$\{IKEV2_L2_[A-Z]+:-\$\{IKEV2_L2_[A-Z]+:\?.+\}\}'; then
+      ok "NM-64 $_m x-l2-$(echo "$_v" | tr 'A-Z' 'a-z') 用嵌套 :? 必填（留空中文报错）"
+    else
+      bad "NM-64 $_m x-l2-$(echo "$_v" | tr 'A-Z' 'a-z') 用嵌套 :? 必填" "got: ${_raw}"
+    fi
+  done
+done
+
+# 2) network-mode.sh 的 compose key 常量必须与两份 compose 的 networks 段 key 一致
+#
+#    compose 复用已存在的同名网络时，会校验网络上的 label
+#    com.docker.compose.network 是否等于 networks 段的 **key**。
+#    key 写错 → up.sh 建出来的网纯 compose 路径复用不了。
+_nm_key="$(grep -E '^NET_SHARED_NETWORK_COMPOSE_KEY=' "$NETMODE_SH" | head -1 | cut -d= -f2- | tr -d '"'"'" | tr -d ' ')"
+if [ -z "$_nm_key" ]; then
+  bad "NM-64 network-mode.sh 有 NET_SHARED_NETWORK_COMPOSE_KEY" "not found"
+else
+  ok "NM-64 network-mode.sh 有 NET_SHARED_NETWORK_COMPOSE_KEY（$_nm_key）"
+  for _pair in "ipvlan:$IPVL" "macvlan:$MACV"; do
+    _m="${_pair%%:*}"; _f="${_pair#*:}"
+    _ck="$(sed -n '/^networks:/,$p' "$_f" | grep -E '^[[:space:]]+[A-Za-z0-9_-]+:[[:space:]]*$' | head -1 | tr -d ' :')"
+    if [ "$_ck" = "$_nm_key" ]; then
+      ok "NM-64 $_m networks 段 key 与常量一致（$_ck）"
+    else
+      bad "NM-64 $_m networks 段 key 与常量一致" "compose=${_ck} const=${_nm_key}"
+    fi
+  done
+fi
+
+# 3) up.sh 建网必须带 com.docker.compose.network label
+if grep -q -- '--label "com.docker.compose.network=' "$SCRIPT_DIR/../scripts/up.sh"; then
+  ok "NM-64 up.sh 建网带 com.docker.compose.network label（两条路径互通）"
+else
+  bad "NM-64 up.sh 建网带 com.docker.compose.network label" "not found"
+fi
+
+# 4) up.sh 必须强制 external=true（否则 compose 抢已建好的网络 / 报 label 错）
+if grep -q 'IKEV2_L2_EXTERNAL=true' "$SCRIPT_DIR/../scripts/up.sh" \
+   && grep -q 'export IKEV2_L2_EXTERNAL' "$SCRIPT_DIR/../scripts/up.sh"; then
+  ok "NM-64 up.sh 强制并 export IKEV2_L2_EXTERNAL=true"
+else
+  bad "NM-64 up.sh 强制并 export IKEV2_L2_EXTERNAL=true" "not found"
+fi
+
+# 5) network-mode.sh 必须校验 IKEV2_L2_EXTERNAL 只能是 true / false
+if grep -q 'IKEV2_L2_EXTERNAL' "$NETMODE_SH" \
+   && grep -qE 'true\|false' "$NETMODE_SH"; then
+  ok "NM-64 network-mode.sh 校验 IKEV2_L2_EXTERNAL 合法值"
+else
+  bad "NM-64 network-mode.sh 校验 IKEV2_L2_EXTERNAL 合法值" "not found"
+fi
+
+# 6) host 模式必须忽略 IKEV2_L2_EXTERNAL（只 WARN，不失败）
+validate_rc "MODE=host" "IKEV2_L2_EXTERNAL=true"
+if [ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -q "WARN.*IKEV2_L2_EXTERNAL"; then
+  ok "NM-64 host 模式忽略 IKEV2_L2_EXTERNAL（只 WARN）"
+else
+  bad "NM-64 host 模式忽略 IKEV2_L2_EXTERNAL（只 WARN）" "rc=$RC out=$OUT"
+fi
+
+# 7) L2 模式 + 非法 IKEV2_L2_EXTERNAL → 必须报错（不是静默忽略）
+validate_rc "MODE=ipvlan" "IKEV2_L2_PARENT=eth0" "IKEV2_L2_SUBNET=192.168.1.0/24" \
+            "IKEV2_L2_GATEWAY=192.168.1.1" "IKEV2_L2_EXTERNAL=maybe"
+if [ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -q "IKEV2_L2_EXTERNAL"; then
+  ok "NM-64 L2 模式 + 非法 IKEV2_L2_EXTERNAL → 报错"
+else
+  bad "NM-64 L2 模式 + 非法 IKEV2_L2_EXTERNAL → 报错" "rc=$RC out=$OUT"
+fi
+
+# 8) L2 模式 + 合法 IKEV2_L2_EXTERNAL=true → 必须通过
+validate_rc "MODE=ipvlan" "IKEV2_L2_PARENT=eth0" "IKEV2_L2_SUBNET=192.168.1.0/24" \
+            "IKEV2_L2_GATEWAY=192.168.1.1" "IKEV2_L2_EXTERNAL=true"
+if [ "$RC" -eq 0 ]; then
+  ok "NM-64 L2 模式 + IKEV2_L2_EXTERNAL=true → 通过"
+else
+  bad "NM-64 L2 模式 + IKEV2_L2_EXTERNAL=true → 通过" "rc=$RC out=$OUT"
 fi
 
 echo
