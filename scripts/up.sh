@@ -489,7 +489,14 @@ _l2_shared_network_verify() {
   [ "$_a_gateway" = "$_gateway" ] || _diff="$_diff"$'\n'"     网关:             期望=$_gateway        实际=$_a_gateway"
   [ "$_a_mode" = "$_mode" ]       || _diff="$_diff"$'\n'"     $(_l2_mode_opt_key "$_driver"): 期望=$_mode  实际=$_a_mode"
   [ -z "$_flag" ] || { [ "$_a_flag" = "$_flag" ] || _diff="$_diff"$'\n'"     $(_l2_flag_opt_key "$_driver"): 期望=$_flag  实际=$_a_flag"; }
-  [ "$_a_v6" = "true" ]           || _diff="$_diff"$'\n'"     IPv6:             期望=enable_ipv6=true  实际=EnableIPv6=$_a_v6"
+  [ "$_a_v6" = "false" ]          || _diff="$_diff"$'\n'"     IPv6:             期望=EnableIPv6=false（v6 走 RA/SLAAC） 实际=$_a_v6"
+  # 老版本建的网络带 --ipv6（EnableIPv6=true，多一个自动 ULA 段）。
+  # 它**不阻断启动**：端点参数来自 compose 的 driver_opts，IPv6 仍由 RA 下发，
+  # 只是 eth0 上会多一个不路由的 ULA。这里 WARN 提示，由用户择机清理。
+  if [ "$_a_v6" = "true" ]; then
+    warn "共享网络 '$_name' 是旧版本建的（EnableIPv6=true，多一个自动 ULA 段）"
+    warn "  不影响 IPv6 RA/SLAAC，但建议择机清理：停掉相关容器后 docker network rm $_name 再重启"
+  fi
 
   if [ -n "$_diff" ]; then
     echo "ERR: 已存在的网络 '$_name' 与当前配置不匹配：" >&2
@@ -572,8 +579,11 @@ _l2_shared_network_ensure() {
   # （"user specified IP address is supported only when connecting to networks
   #   with user configured subnets"）。
   #
-  # --ipv6 让 Docker 自动补一个 v6 网段并打开 enable_ipv6 ——
-  # 容器端点建好时 disable_ipv6 才会是 0，接口才收得到 RA（拿 GUA）。
+  # ⚠️ 不带 --ipv6：IPv6 完全交给上游路由器 RA + 容器 SLAAC（「路由器下发」）。
+  #    带 --ipv6（不带 v6 子网）Docker 会从内置 ULA 池自动分一个 fd00::/64 段，
+  #    容器 eth0 上出现不路由的 ULA + 指向不存在网关的默认路由，污染选路。
+  #    容器端点的 IPv6 由 compose service networks 的 endpoint sysctls 打开
+  #    （IFNAME.disable_ipv6=0 / IFNAME.accept_ra=2），详见 compose 文件注释。
   #
   # ⚠️ --label com.docker.compose.network=ikev2-l2 是**必须的**：
   #   compose 在 external=false 时复用一条已存在的同名网络，会校验它上面的
@@ -590,7 +600,7 @@ _l2_shared_network_ensure() {
         --opt "$(_l2_mode_opt_key "$_driver")=$_mode"
         --label "com.docker.compose.network=${NET_SHARED_NETWORK_COMPOSE_KEY}")
   [ -n "$_flag" ] && _cmd+=(--opt "$(_l2_flag_opt_key "$_driver")=$_flag")
-  _cmd+=(--subnet "$_subnet" --gateway "$_gateway" --ipv6 "$_name")
+  _cmd+=(--subnet "$_subnet" --gateway "$_gateway" "$_name")
 
   if ! "${_cmd[@]}"; then
     echo >&2

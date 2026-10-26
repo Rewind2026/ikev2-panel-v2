@@ -557,7 +557,10 @@ sysctls:
   net.ipv6.conf.default.accept_ra: "2"   # SLAAC 必需
 ```
 
-配套 `networks.ikev2-l2.enable_ipv6: true`。
+配套 `services.ikev2-panel.networks.ikev2-l2` 块的 endpoint sysctls
+（`net.ipv6.conf.IFNAME.disable_ipv6=0,net.ipv6.conf.IFNAME.accept_ra=2`，
+Docker 官方「Use router-assigned IPv6 addresses」通道）；
+`networks.ikev2-l2` 段**不开** `enable_ipv6`（开了 Docker 会自动塞 ULA 段）。
 实测细节与其他写法的失败原因见 [architecture.md §12.8.2](docs/architecture.md)。
 
 ```bash

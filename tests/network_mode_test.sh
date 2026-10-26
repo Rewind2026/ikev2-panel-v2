@@ -242,8 +242,8 @@ else
 fi
 
 # ---------- L2 sysctl 单一真源（最关键的一条）----------
-# v2.86-PR20 实测后重写：注入点从 driver option 改成 service 段 sysctls，
-# 取值也从 IFNAME/disable_ipv6 改成 all/default.accept_ra。
+# netns 级：service 段 sysctls（forwarding + default.accept_ra）；
+# 接口级：endpoint sysctls（见 NM-38）。两条通道缺一不可。
 SYSC="$(bash -c ". '$NETMODE_SH'; net_mode_sysctls")"
 if printf '%s' "$SYSC" | grep -q "net.ipv4.conf.all.forwarding=1" \
    && printf '%s' "$SYSC" | grep -q "net.ipv6.conf.all.forwarding=1" \
@@ -253,12 +253,13 @@ else
   bad "NM-22 net_mode_sysctls" "got=$SYSC"
 fi
 
-# 回读清单必须覆盖全部三条，且用 IFNAME 占位（运行时替换成真实网卡名）
+# 回读清单必须覆盖全部四条，且用 IFNAME 占位（运行时替换成真实网卡名）
 CHK="$(bash -c ". '$NETMODE_SH'; net_mode_sysctl_checks")"
-if printf '%s' "$CHK" | grep -q "net/ipv4/conf/IFNAME/forwarding|1" \
+if printf '%s' "$CHK" | grep -q "net/ipv6/conf/IFNAME/disable_ipv6|0" \
+   && printf '%s' "$CHK" | grep -q "net/ipv4/conf/IFNAME/forwarding|1" \
    && printf '%s' "$CHK" | grep -q "net/ipv6/conf/IFNAME/forwarding|1" \
    && printf '%s' "$CHK" | grep -q "net/ipv6/conf/IFNAME/accept_ra|2"; then
-  ok "NM-37 net_mode_sysctl_checks 覆盖三条回读项"
+  ok "NM-37 net_mode_sysctl_checks 覆盖四条回读项（含 disable_ipv6）"
 else
   bad "NM-37 net_mode_sysctl_checks" "got=$CHK"
 fi
@@ -307,21 +308,49 @@ for p in "$BASE" "$MACV" "$IPVL"; do
   fi
 done
 
-# ---------- L2 sysctl 注入点与 compose 文件一致 ----------
-# v2.86-PR20 实测结论（Docker 28.5.2，192.168.50.63）：
-#   - networks.<name>.options 不是合法 Compose 字段，config 直接报错
-#   - driver option com.docker.network.endpoint.sysctls 两种格式都不生效
-#   - 唯一可用通道是 service 段 sysctls:，且只能写 conf.all / conf.default
-# 这三条守护就是为了防止有人改回那两条死路。
+# ---------- L2 IPv6 注入点与 compose 文件一致（RA/SLAAC 官方模式）----------
+# Docker 官方 macvlan/ipvlan 文档「Use router-assigned IPv6 addresses」：
+#   - 网络不带 v6 子网（不开 enable_ipv6）→ Docker 建端点时把 disable_ipv6 置 1
+#   - 接口级 sysctl 只能走 endpoint driver_opts（service networks 块）：
+#     com.docker.network.endpoint.sysctls=IFNAME.disable_ipv6=0,IFNAME.accept_ra=2
+#   - 端点级选项必须在 services.<服务>.networks.<网络>.driver_opts，
+#     放到 networks 段会被静默忽略（v2.86-PR20 实测误判的根源）
+#
+# ⚠️ 本测试开了 pipefail（见文件头），「剥注释后 grep -q」必须先存变量再 grep
+#    （sed|grep -q 会在命中时让上游 sed 吃 SIGPIPE，时好时坏，见 NM-49 处说明）。
+MACV_CODE="$(sed -e 's/[[:space:]]*#.*$//' "$MACV")"
+IPVL_CODE="$(sed -e 's/[[:space:]]*#.*$//' "$IPVL")"
+for _pair in "macvlan:$MACV_CODE" "ipvlan:$IPVL_CODE"; do
+  _drv="${_pair%%:*}"
+  _code="${_pair#*:}"
+  _name_map="macvlan:docker-compose.macvlan.yml ipvlan:docker-compose.ipvlan.yml"
+  f="${_name_map##*$_drv:}"; f="${f%% *}"
+  # 1) service networks 块必须带 endpoint sysctls（非注释行）
+  if printf '%s' "$_code" | grep -q "com.docker.network.endpoint.sysctls"; then
+    ok "NM-38 ${f} service networks 带 endpoint.sysctls"
+  else
+    bad "NM-38 ${f} service networks 带 endpoint.sysctls" "not found"
+  fi
+  # 2) endpoint sysctls 必须同时打开 disable_ipv6=0 与 accept_ra=2（IFNAME 占位）
+  if printf '%s' "$_code" \
+     | grep -q 'com.docker.network.endpoint.sysctls:.*IFNAME.disable_ipv6=0,net.ipv6.conf.IFNAME.accept_ra=2'; then
+    ok "NM-38 ${f} endpoint.sysctls 含 disable_ipv6=0 + accept_ra=2"
+  else
+    bad "NM-38 ${f} endpoint.sysctls 含 disable_ipv6=0 + accept_ra=2" "not found"
+  fi
+  # 3) networks 段绝不能开 enable_ipv6 —— 开了 Docker 会自动塞 ULA 池，
+  #    容器 eth0 出现不路由的 ULA + 假默认路由，与「RA 路由器下发」冲突
+  if printf '%s' "$_code" | grep -qE '^[[:space:]]*enable_ipv6:[[:space:]]*'; then
+    bad "NM-28 ${f} networks 段不含 enable_ipv6" "found one（IPv6 必须走 RA/SLAAC，不能开 enable_ipv6）"
+  else
+    ok "NM-28 ${f} networks 段不含 enable_ipv6"
+  fi
+done
+unset MACV_CODE IPVL_CODE
+
 for p in "$MACV" "$IPVL"; do
   f="$(basename "$p")"
-  # 1) 不得再出现非法字段 / 无效驱动选项
-  if sed -e 's/[[:space:]]*#.*$//' "$p" | grep -q "com.docker.network.endpoint.sysctls"; then
-    bad "NM-38 ${f} 不含 endpoint.sysctls 驱动选项" "found in a non-comment line"
-  else
-    ok "NM-38 ${f} 不含 endpoint.sysctls 驱动选项"
-  fi
-  # 2) service 段 sysctls 三条齐全（值必须与 net_mode_sysctls() 一致）
+  # service 段 sysctls 三条齐全（值必须与 net_mode_sysctls() 一致）
   missing=""
   grep -qE '^[[:space:]]*net\.ipv4\.conf\.all\.forwarding:[[:space:]]*"1"[[:space:]]*$' "$p" \
     || missing="$missing net.ipv4.conf.all.forwarding=1"
@@ -333,12 +362,6 @@ for p in "$MACV" "$IPVL"; do
     ok "NM-23 ${f} service 段 sysctls 三条齐全"
   else
     bad "NM-23 ${f} service 段 sysctls 三条齐全" "missing:$missing"
-  fi
-  # 3) networks 段必须 enable_ipv6，否则 disable_ipv6=1 收不到 RA
-  if sed -e 's/[[:space:]]*#.*$//' "$p" | grep -qE '^[[:space:]]*enable_ipv6:[[:space:]]*true[[:space:]]*$'; then
-    ok "NM-28 ${f} networks 段 enable_ipv6: true"
-  else
-    bad "NM-28 ${f} networks 段 enable_ipv6: true" "not found"
   fi
 done
 

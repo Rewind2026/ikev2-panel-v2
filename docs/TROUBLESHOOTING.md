@@ -429,19 +429,23 @@ docker exec ikev2-panel sh -c 'cat /proc/sys/net/ipv4/conf/eth0/forwarding \
   /proc/sys/net/ipv6/conf/eth0/accept_ra \
   /proc/sys/net/ipv6/conf/eth0/disable_ipv6'
 
-# 3) 确认 disable_ipv6 是 0（由 networks 段 enable_ipv6 决定，不由 sysctls 决定）
-docker network inspect ikev2-panel-v2-main_ikev2-l2 \
-  --format '{{.EnableIPv6}} {{.Driver}}'
+# 3) 确认 disable_ipv6 是 0（由 service networks 块的 endpoint sysctls 保证）
+docker exec ikev2-panel cat /proc/sys/net/ipv6/conf/eth0/disable_ipv6
+
+# 4) 看容器的端点参数（endpoint sysctls 在这里，不在 HostConfig.Sysctls）
+docker inspect ikev2-panel --format '{{json .NetworkSettings.Networks}}'
 ```
 
 **解法**：
 
 1. 确认走的是 L2 compose 文件（`docker network inspect` 看到的 driver 应是
    `macvlan` / `ipvlan`，不是 `host`）；
-2. 确认 `networks.ikev2-l2` 段有 `enable_ipv6: true`，service 段有三条
+2. 确认 `services.ikev2-panel.networks.ikev2-l2` 块有 endpoint sysctls
+   （`net.ipv6.conf.IFNAME.disable_ipv6=0,net.ipv6.conf.IFNAME.accept_ra=2`，
+   Docker 官方「Use router-assigned IPv6 addresses」通道），service 段有三条
    `sysctls`（`net.ipv4.conf.all.forwarding` / `net.ipv6.conf.all.forwarding` /
-   `net.ipv6.conf.default.accept_ra`）。这是唯一可用的注入通道，
-   其他写法实测都不生效 —— 见 [architecture.md §12.8.2](architecture.md)；
+   `net.ipv6.conf.default.accept_ra`）。且 `networks.ikev2-l2` 段**不开**
+   `enable_ipv6` —— 见 [architecture.md §12.8.2](architecture.md)；
 3. 确认上游路由器**对这个网段真的在发 RA**（有些企业网 / 云 VPC 不发）；
 4. `accept_ra=2` 是必须的 —— 本项目要开 IP forwarding，内核在 forwarding 打开时
    会把默认态的 `accept_ra` 抑制掉，不显式写 2 就收不到 RA。

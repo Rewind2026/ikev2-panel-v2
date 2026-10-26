@@ -818,15 +818,16 @@ echo "${LOG_PREFIX} IP forwarding OK (v4=$(cat /proc/sys/net/ipv4/ip_forward 2>/
 #   把处于**默认态**的接口 accept_ra 强制刷成 0。
 #   L2 compose 用 sysctls 写了 net.ipv6.conf.default.accept_ra=2（显式值不是
 #   默认态，内核不会再改写），但那是"应该成立"，不是"一定成立"——
-#   一旦用户改了 compose 文件、漏了 enable_ipv6、或换了不同 Docker 版本，
+#   一旦用户改了 compose 文件、漏了 endpoint sysctls、或换了不同 Docker 版本，
 #   就会静默失效，表现为"客户端能连 VPN 但没有 IPv6 出口"。
 #   这里显式回读一次：被改写就 FATAL，给出可执行的修复动作，而不是让用户
 #   在 §1 拿到一个含糊的 "no global IPv6 address"。
 #
 # 期望值取自 net_mode_sysctl_checks()，与 compose 的 sysctls 块同源。
-# 注意 disable_ipv6 不在复核列表里：它由 networks 段的 enable_ipv6: true 保证
-# （实测不开就是 1，且没有任何 sysctl 能把它从 service 段改回来），
-# 真出问题会表现为下面的 accept_ra=2 仍然拿不到 GUA，由地址探测兜住。
+# disable_ipv6 也在复核列表里：它由 service networks 块的 endpoint sysctls
+# （IFNAME.disable_ipv6=0）保证 —— 网络不带 v6 子网时 Docker 会把它置 1，
+# 只有端点级 sysctl 能改回来；若 endpoint sysctls 没生效（版本/位置问题），
+# 这里 FATAL exit 10，绝不静默降级。
 if net_mode_has_own_ip "$IKEV2_NETWORK_MODE" && [ -e "/proc/sys/net/ipv6/conf/${OUT_IF}/accept_ra" ]; then
   _slaac_bad=""
   _slaac_shown=""
@@ -849,8 +850,8 @@ EOF
     echo "${LOG_PREFIX}   不符项：${_slaac_bad}" >&2
     echo "${LOG_PREFIX}   期望（net_mode_sysctl_checks）：" >&2
     net_mode_sysctl_checks | sed 's/^/     /' >&2
-    echo "${LOG_PREFIX}   常见原因：L2 compose 文件被改动，或 networks 段漏了 enable_ipv6: true" >&2
-    echo "${LOG_PREFIX}   排查：docker inspect ikev2-panel --format '{{.HostConfig.Sysctls}}'" >&2
+    echo "${LOG_PREFIX}   常见原因：L2 compose 文件被改动，或 service networks 段漏了 endpoint sysctls（IFNAME.disable_ipv6=0 / IFNAME.accept_ra=2）" >&2
+    echo "${LOG_PREFIX}   排查：docker inspect ikev2-panel --format '{{json .NetworkSettings.Networks}}' && docker exec ikev2-panel cat /proc/sys/net/ipv6/conf/${OUT_IF}/disable_ipv6" >&2
     echo "${LOG_PREFIX}   修复：docker compose -f docker-compose.${IKEV2_NETWORK_MODE}.yml down && docker compose -f docker-compose.${IKEV2_NETWORK_MODE}.yml up -d" >&2
     exit 10
   fi

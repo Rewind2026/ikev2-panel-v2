@@ -401,25 +401,29 @@ net_mode_validate() {
 # ---------- L2 sysctl 单一真源 ----------
 # docker-compose.{macvlan,ipvlan}.yml 的 service 段 sysctls 块与本函数必须同值。
 #
-# 实测结论（Docker 28.5.2，macvlan/ipvlan，192.168.50.63 parent=ens18）：
+# IPv6 的注入分两条通道（缺一不可）：
 #
-# 1) 容器内 /proc/sys 是 ro 挂载，NET_ADMIN 也写不了
+# 1) 容器内 /proc/sys 是 ro 挂载（实测 192.168.50.63）：
 #       proc /proc/sys proc ro,nosuid,nodev,noexec,relatime
-#    → 只能靠 Docker 建容器时注入，entrypoint 无权自愈。
+#    → 一切 sysctl 都只能靠 Docker 建容器时注入，entrypoint 无权自愈。
 #
-# 2) driver option `com.docker.network.endpoint.sysctls` 在本场景**不生效**：
-#    逗号串与 JSON 两种格式实测都是 v4fwd=1 v6fwd=0 ra=1 gua=0，
-#    即只有 v4 forwarding 被动生效（那是 netns 默认值，不是我们注入的）。
-#    且 networks.<name>.options 根本不是合法 Compose 字段，`docker compose config`
-#    会直接报 additional properties 'options' not allowed。
-#    → 唯一可用通道是 service 段 `sysctls:`。
+# 2) netns 级（本函数，= compose service 段 sysctls 块）：
+#    v4/v6 forwarding（conf.all.*）+ default.accept_ra=2。
+#    service 段 sysctls 只能写 conf.all / conf.default：写 IFNAME 占位符会被
+#    Docker 以 unsafe procfs detected 拒绝，写 eth0 也被拒（must be supplied
+#    using driver option ...）。conf.all.forwarding=1 由内核传播到所有接口。
 #
-# 3) service 段 sysctls 里 IFNAME 占位符不可用（Docker 报 unsafe procfs detected），
-#    直接写 eth0 也被拒（must be supplied using driver option ...）。
-#    → 只能写 conf.all / conf.default，由内核或 netns 新建接口时生效。
+# 3) 接口级（compose service networks 块的 driver_opts，endpoint sysctls）：
+#    net.ipv6.conf.IFNAME.disable_ipv6=0,net.ipv6.conf.IFNAME.accept_ra=2
+#    —— Docker 官方 macvlan/ipvlan 文档「Use router-assigned IPv6 addresses」
+#    明确的唯一通道，IFNAME 由 Docker 挂端点时替换成真实网卡名。
+#    ⚠️ 必须放在 **services.<服务>.networks.<网络>.driver_opts**（端点选项）。
+#    放到 networks 段的 driver_opts（网络选项）会被静默忽略 ——
+#    v2.86-PR20「endpoint sysctls 不生效」的实测结论即源于此，现予纠正。
 #
-# 4) 必须配合 networks 段的 enable_ipv6: true，否则 Docker 建端点时把
-#    disable_ipv6 置 1，收不到 RA（实测 dis6=1 gua=0）。
+# 4) 网络本身**不带 v6 子网、不开 enable_ipv6**：开的话 Docker 会从内置
+#    ULA 池自动分一个 fd00::/64 段，容器 eth0 出现不路由的 ULA + 假默认路由。
+#    IPv6 地址与默认路由一律来自上游路由器 RA（SLAAC），Docker 不经手。
 net_mode_sysctls() {
   cat <<'EOF'
 net.ipv4.conf.all.forwarding=1
@@ -434,8 +438,11 @@ EOF
 # 为什么 accept_ra 查 conf.eth0 而不是 conf.default：
 #   default 只决定"此后新建接口"的取值，容器 eth0 建好后就固定在 eth0 上了。
 #   回读必须读实际承载业务的那块网卡，否则校验的是一个没人用的值。
+# disable_ipv6 也在清单里：它由 endpoint sysctls（通道 3）保证，
+# endpoint sysctls 若因 Docker 版本/放置位置问题没生效，这里会 FATAL exit 10。
 net_mode_sysctl_checks() {
   cat <<'EOF'
+net/ipv6/conf/IFNAME/disable_ipv6|0
 net/ipv4/conf/IFNAME/forwarding|1
 net/ipv6/conf/IFNAME/forwarding|1
 net/ipv6/conf/IFNAME/accept_ra|2

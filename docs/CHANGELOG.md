@@ -18,6 +18,81 @@ hotfix。升级前请重点看目标版本的「⚠️ 行为变更」。
 
 ---
 
+## v2.98（2026-10-26）— IPv6 修复：去掉 ULA 假地址，L2 网络改走上游路由器 RA/SLAAC 下发
+
+**用户诉求：「compose 创建的 ipvlan 和 macvlan 网络 IPv6 部分外部访问不了，
+需要把 IPv6 改成 RA 路由器下发那种才行。」**
+
+### 一、根因：`enable_ipv6: true` + 只配 IPv4 的 IPAM = 容器拿到不路由的 ULA
+
+v2.97 及之前的两份 L2 compose 写了 `enable_ipv6: true`，但 `ipam.config`
+只配了 IPv4 subnet/gateway。Docker 看到网络要 IPv6 又没给段，就从内置
+ULA 池（fd00::/8）自动挑一段分给网络。容器于是：
+
+1. 拿到一个 `fd00::/8` 地址——上游路由器根本没有这条路由，出网即黑洞
+   （v2.97 发布说明里那个「GUA」`fd82:f5a0:6f67::2`，fd 开头其实就是 ULA）；
+2. 同时在该接口上装了一条指向**不存在网关**的假默认路由。
+
+结果：容器 ping 不通任何真实 v6 网关，外部也访问不了容器的 v6 地址。
+
+### 二、官方姿势：网络不带 v6 段，端点上重新打开 RA（Docker ≥ 26.0.2）
+
+Docker macvlan / ipvlan 文档「Use router-assigned IPv6 addresses」：网络不配
+IPv6 子网时，Docker（26.0.2 起，CVE-2024-32473 修复后）建端点会把
+`net.ipv6.conf.<if>.disable_ipv6` 置 1，要用 **endpoint 级 sysctl** 翻回来：
+
+```yaml
+services:
+  ikev2-panel:
+    networks:
+      ikev2-l2:
+        ipv4_address: *l2_ipv4
+        driver_opts:
+          com.docker.network.endpoint.sysctls: "net.ipv6.conf.IFNAME.disable_ipv6=0,net.ipv6.conf.IFNAME.accept_ra=2"
+```
+
+两个关键点：
+
+- **必须写在 service 段 networks 块的 `driver_opts`（端点级）**。写到文件末尾
+  `networks.<name>.driver_opts`（网络级）会被**静默忽略**——v2.86-PR20
+  「endpoint sysctls 不生效」的错误结论就是把网络级和端点级搞混了。
+- **`accept_ra=2`**：容器必开 IP forwarding，内核（RFC 4861）在 forwarding
+  开启时默认丢弃 RA，必须显式写 2。service 段 `sysctls`（netns 级）继续兜底
+  forwarding 与 `conf.default.accept_ra`。
+
+### 三、改了什么
+
+| 文件 | 改动 |
+|------|------|
+| docker-compose.macvlan.yml / docker-compose.ipvlan.yml | 删 `enable_ipv6: true`；ipam 只留 IPv4；service 段 networks 块加 endpoint sysctls（`disable_ipv6=0` + `accept_ra=2`） |
+| scripts/network-mode.sh | sysctl 单一真源从三条改四条（新增 `net/ipv6/conf/IFNAME/disable_ipv6|0`） |
+| scripts/up.sh | L2 网络校验翻转为「必须不带 v6」（老 EnableIPv6=true 网络只 WARN）；建网去 `--ipv6` |
+| scripts/entrypoint.sh | SLAAC 回读复核从三条变四条（新增 `disable_ipv6=0`），不对就 FATAL 并指向 endpoint sysctls |
+| tests/network_mode_test.sh | NM-28 翻转（**禁止** enable_ipv6）、NM-37 加第四条断言、NM-38 要求端点级 driver_opts |
+| .env.example / README.md / docs/architecture.md / docs/TROUBLESHOOTING.md | 同步新方案、原理与排错指引 |
+
+### ⚠️ 行为变更
+
+| 项 | 之前（v2.97） | 现在（v2.98） |
+|---|---|---|
+| 容器 IPv6 地址 | Docker 内置 ULA（fd00::/8，不路由） | 路由器 RA/SLAAC 下发的公网 GUA |
+| compose 的 `enable_ipv6` | `true` | **不允许出现**（测试强制） |
+| 路由器前缀变化 | 容器地址不变（假稳定） | 跟随前缀自动更新 |
+| up.sh 对 L2 网络的 v6 要求 | 要求 EnableIPv6=true，建网带 `--ipv6` | 要求不带 v6，建网去 `--ipv6` |
+
+> ⚠️ **升级注意**：这次 entrypoint 变了（SLAAC 复核第四条），要用 v2.98
+> 镜像（`docker compose pull`）。v2.97 建的 L2 网络（EnableIPv6=true）建议
+> `down` + `network rm` 后重建，详见 [RELEASE_NOTES_v2.98.md](RELEASE_NOTES_v2.98.md)。
+
+**回归测试**：全量 **197 passed / 0 failed**（NM-28 翻转 / NM-37 四条 /
+NM-38 端点级）。
+
+**63 实测**（fnOS，Docker 28.5.2，macvlan）：容器约 3s 拿到 GUA
+`2408:832e:…/64` + `proto ra` 默认路由；endpoint sysctl 生效；容器
+`curl -6` 可达；同网段 shim 经容器 GUA 访问 `:8443/healthz` → 200。
+
+---
+
 ## v2.97（2026-10-22）— 纯 compose 路径可用：建网责任交还给 compose，`up.sh` 降级为可选增强
 
 **用户诉求：「目前的应用场景只有用 compose pull 容器，不存在在外部调用 up.sh

@@ -147,13 +147,10 @@ services:
     # 也不需要 `!reset` —— 因为本文件是完整的，不叠加 base。
     #
     # 容器 IP 从宿主所在网段分配，所以 500/4500/8443 与宿主服务完全不冲突。
-    # networks 段的 driver_opts / ipam / enable_ipv6 在文件末尾。
+    # networks 段的 driver_opts / ipam 在文件末尾。
     #
-    # v2.86-PR20：转发开关与 SLAAC 的 sysctl 在 service 段的 `sysctls:` 块，
-    # 不在 networks 段 —— 原因见 service 段那段详细实测记录。
-    #
-    # 这里用**长语法**（`ikev2-l2: {ipv4_address: ...}`）而不是短语法（`- ikev2-l2`），
-    # 因为固定 IPv4 地址属于 endpoint 级配置，短语法表达不了。
+    # IPv6 走「RA 路由器下发」：网络不带 v6 子网（Docker 不做 v6 IPAM），
+    # 端点上用 IFNAME 占位的 endpoint sysctls 重新打开 IPv6（见下面 networks: 块）。
     # 长语法在 ipv4_address 为空时展开成 `ikev2-l2: {}`，
     # 与短语法行为完全一致（实测别名同为 [<容器名>, <服务名>]）。
     networks:
@@ -161,6 +158,18 @@ services:
         # 固定容器 IPv4。留空 = Docker IPAM 自动分配。
         # 值来自文件顶部的 x-l2-ipv4 anchor（改那里，不要改这里）。
         ipv4_address: *l2_ipv4
+        #
+        # ---- IPv6：RA 路由器下发（SLAAC），Docker 不经手 ----
+        # 网络本身不带 v6 子网（见文件末尾 networks 段），Docker 建端点时会把
+        # disable_ipv6 置 1 —— 必须在**端点**上用 IFNAME 占位 sysctl 打开。
+        # 这是 Docker 官方 macvlan 文档「Use router-assigned IPv6 addresses」
+        # 给出的唯一通道；接口级 sysctl 只能走 endpoint driver_opts
+        # （service 段 sysctls 里写 eth0 会被 Docker 拒绝）。
+        #   disable_ipv6=0 → 接口恢复收 RA
+        #   accept_ra=2    → 容器必开 forwarding，内核默认丢弃 RA，必须显式放行
+        # IFNAME 是字面占位符，Docker 挂端点时替换成真实网卡名（eth0）。
+        driver_opts:
+          com.docker.network.endpoint.sysctls: "net.ipv6.conf.IFNAME.disable_ipv6=0,net.ipv6.conf.IFNAME.accept_ra=2"
 
     cap_drop:
       - ALL
@@ -222,27 +231,30 @@ services:
     #   - IPv4 = 0 → FATAL exit 11（没有转发则所有客户端都出不了网）
     #   - IPv6 = 0 → WARN（客户端会 IPv4 回退，属降级不属故障）
     #
-    # v2.86-PR20 修正：转发与 SLAAC 的 sysctl **就是**用 service 段的 `sysctls:` 块
-    # 注入的。之前注释说"sysctls 块会被 runc 以 not allowed in host network
+    # v2.86-PR20 修正 + 本次（RA/SLAAC 官方模式）再修正：IPv6 相关 sysctl
+    # 分**两条通道**注入，各管各的，缺一不可。
+    # 之前注释说"sysctls 块会被 runc 以 not allowed in host network
     # namespace 拒绝、改用 networks 段的 endpoint sysctls"——那条结论只对
     # network_mode: host 成立（host 模式下 /proc/sys 与宿主共享，runc 确实拒绝）。
     # L2 模式下容器有自己的 netns，runc 允许写，service 段 sysctls 完全可用。
     #
-    # 为什么写 all/default 而不是 IFNAME/eth0：
-    #   - IFNAME 占位符只有 driver option `com.docker.network.endpoint.sysctls`
-    #     支持；service 段 sysctls 里 Docker 会直接以 `unsafe procfs detected`
-    #     拒绝（Docker 28.5.2 实测）。
-    #   - 直接写 eth0 也会被 Docker 拒绝：
-    #     `interface specific sysctl setting "net.ipv4.conf.eth0.forwarding"
-    #      must be supplied using driver option ...`（实测）。
+    # 通道一 —— service 段 `sysctls:`（本块）：netns 级，只能写 conf.all/conf.default：
+    #   - IFNAME 占位符只有 endpoint driver_opts 支持；service 段里写 IFNAME 会被
+    #     Docker 以 `unsafe procfs detected` 拒绝，直接写 eth0 也被拒
+    #     （`interface specific sysctl setting ... must be supplied using
+    #       driver option ...`，实测）。
     #   - conf.all.forwarding=1 会由内核传播到本 netns 内所有接口；
-    #     conf.default.accept_ra=2 决定**此后新建**接口的 RA 策略，
-    #     而容器 eth0 正是 Docker 建端点时新建的，所以能吃到。
-    #   实测（Docker 28.5.2，macvlan，192.168.50.63 上 parent=ens18）：
-    #     不注入                          → v4fwd=1 v6fwd=0 ra=1 gua=0
-    #     仅 endpoint sysctls(逗号串)      → v4fwd=1 v6fwd=0 ra=1 gua=0  ← 根本没生效
-    #     仅 endpoint sysctls(JSON)        → v4fwd=1 v6fwd=0 ra=1 gua=0  ← 根本没生效
-    #     本块 sysctls + enable_ipv6       → v4fwd=1 v6fwd=1 ra=2 gua=1  ← 生效
+    #     conf.default.accept_ra=2 决定**此后新建**接口的 RA 策略。
+    #
+    # 通道二 —— service networks 块的 `driver_opts:`（端点级，见上面 networks:）：
+    #   `com.docker.network.endpoint.sysctls=net.ipv6.conf.IFNAME.disable_ipv6=0,
+    #    net.ipv6.conf.IFNAME.accept_ra=2`
+    #   接口级 sysctl（disable_ipv6 / eth0 的 accept_ra）**只能**走这里 ——
+    #   Docker 官方 macvlan 文档「Use router-assigned IPv6 addresses」明确此通道。
+    #   ⚠️ 注意放置位置：必须是 **services.<服务>.networks.<网络>.driver_opts**
+    #   （端点选项）；放到文件末尾 networks 段的 driver_opts（网络选项）里会被
+    #   静默忽略 —— 这就是 v2.86-PR20 时期「endpoint sysctls 不生效」实测结论的
+    #   真实原因（当时把它当网络级选项测的），该结论不成立，现予纠正。
 
     # v2.86-PR11:删除 privileged: true。NET_ADMIN 已足够做 tc 限速等操作。
     # 容器逃逸风险从"root on host"降到"普通进程"(仍需 0day 才逃逸)。
@@ -291,6 +303,8 @@ services:
       # 而内核在 forwarding 开启时会把处于默认态的 accept_ra 抑制掉，RA 会被丢弃。
       # 写 conf.default 而非 conf.all：容器 eth0 由 Docker 建端点时新建，
       # default 决定的就是它新建那一刻的 RA 策略。
+      # （双保险：eth0 上的 accept_ra=2 另由 endpoint sysctls 显式保证，
+      #   见上面 networks 块；entrypoint 回读复核的是 eth0 实际值。）
       net.ipv6.conf.default.accept_ra: "2"
 
     volumes:
@@ -571,23 +585,27 @@ networks:
       # bridge(默认) | private | vepa
       # passthru 不支持 IPAM（拿不到地址），本项目禁用。
       macvlan_mode: ${IKEV2_MACVLAN_MODE:-bridge}
-    # 只配 IPv4。IPv6 走 RA/SLAAC —— 若在 IPAM 里配 v6 子网，
-    # Docker 会接管 IPv6 并默认分配 ULA(fd00::/8)，公网不可达。
+    # 只配 IPv4。IPv6 完全交给上游路由器的 RA + 容器 SLAAC（「路由器下发」）。
+    #
+    # ⚠️ 不要 enable_ipv6: true，也不要在 IPAM 里配 v6 子网：
+    #   - IPAM 配 v6 子网 → Docker 接管 IPv6，把前缀写死进 compose；
+    #     家宽前缀（DHCPv6-PD）一变，容器地址全部作废，公网不可达。
+    #   - enable_ipv6: true 而不配子网 → Docker 从内置 ULA 池自动分一个
+    #     fd00::/64 段，容器 eth0 上出现不路由的 ULA 地址 + 指向不存在网关的
+    #     默认路由，污染选路（CHANGELOG 里实测见到的 fd48:... 就是它）。
+    #   正确做法 = Docker 官方 macvlan 文档「Use router-assigned IPv6 addresses」：
+    #   网络不带 v6 子网 → Docker 会把端点 disable_ipv6 置 1 →
+    #   在 service networks 的 driver_opts 里用 endpoint sysctls 打开
+    #   （IFNAME.disable_ipv6=0 / IFNAME.accept_ra=2，见 service 段 networks 块）。
+    #   IPv6 地址与默认路由全部来自 RA，前缀变了内核自动跟随，配置永不作废。
     ipam:
       config:
         - subnet: *l2_subnet
           gateway: *l2_gateway
-    # IPv6 不用 IPAM 静态下发，交给上游路由器的 RA + 容器 SLAAC。
     #
-    # 但必须显式打开 enable_ipv6，否则 Docker 会在端点建好时把
-    # net.ipv6.conf.eth0.disable_ipv6 置 1，接口上根本收不到 RA。
-    # 实测（v2.86-PR20，Docker 28.5.2，192.168.50.63）：
-    #   不开 enable_ipv6 → dis6=1 gua=0
-    #   开   enable_ipv6 → dis6=0 gua=1（GUA 由 RA 下发）
-    enable_ipv6: true
-    #
-    # 转发开关与 SLAAC 所需的 sysctl 写在 service 段的 `sysctls:` 里，
-    # 不在这里 —— 原因见 service 段注释。
+    # IPv6 相关的 sysctl 分两路：netns 级在 service 段 `sysctls:`，
+    # 接口级（disable_ipv6 / accept_ra）在 service networks 块的
+    # `driver_opts`（endpoint sysctls）—— 都不在本段，原因见 service 段注释。
     #
     # ---- external 的语义（v2.97）----
     #

@@ -1173,7 +1173,7 @@ docker compose -f docker-compose.ipvlan.yml up -d       # ipvlan
 | **三个文件都是完整的** | 不用 `!reset` / `!override`，所以**任何 Docker Compose 版本都能用**，不设版本下限 |
 | **host 模式没有 `ports:`** | 端口是容器直接在宿主上监听的；L2 模式容器有自己的 IP，同样不需要 `ports:` |
 | **host 模式没有 `sysctls:`** | runc 会以 `not allowed in host network namespace` 拒绝（host 模式下容器与宿主共享 netns）；L2 模式容器有自己的 netns，service 段 `sysctls:` 完全可用 |
-| **L2 模式的 sysctl 走 service 段，不是 networks 段** | 见 §12.8.2 的实测结论。`networks.<name>.options` 不是合法 Compose 字段，`docker compose config` 会直接报错；driver option `com.docker.network.endpoint.sysctls` 两种格式实测都不生效 |
+| **L2 模式的 sysctl 分两级：netns 级走 service 段 `sysctls:`，接口级走 service 段 networks 块的 `driver_opts`** | 见 §12.8.2。`networks.<name>.options` 不是合法 Compose 字段，`docker compose config` 会直接报错；endpoint sysctls（`com.docker.network.endpoint.sysctls`）放在**网络级** `networks.<name>.driver_opts` 会被静默忽略，必须放在 **service 段 `networks.<net>.driver_opts`**（端点级）才生效 |
 | **L2 文件里没有 `network_mode:`** | 与 `networks` 互斥，只能二选一 |
 | **`bridge` 已被删除** | v2.86-PR14 起移除。传 `bridge` 会被 FATAL 拒绝；`IKEV2_NETWORK_MODE` 合法值只有 `host` / `macvlan` / `ipvlan` |
 | **切换模式必须重建容器** | compose 文件决定网络，不看环境变量。改了 `-f` 就会 recreate；`up.sh` 在 L2 分支会显式提示 |
@@ -1294,8 +1294,10 @@ net_shared_network_name_valid()  # 共享网络名合法性（纯 POSIX sh，见
 | `bridge` | FATAL：已于 v2.86-PR14 移除 |
 | 其他 | FATAL + 列出合法值 |
 
-L2 容器 netns 需要的 sysctl（`net_mode_sysctls()` 的返回值，在 L2 compose 文件的
-service 段 `sysctls:` 块里静态注入）：
+L2 容器 netns 需要的 IPv6/转发 sysctl 分**两条通道**注入（层级与放置位置的实测
+见 §12.8.2）：
+
+netns 级 —— service 段 `sysctls:` 块（`net_mode_sysctls()` 的返回值）：
 
 ```
 net.ipv4.conf.all.forwarding=1
@@ -1303,16 +1305,26 @@ net.ipv6.conf.all.forwarding=1
 net.ipv6.conf.default.accept_ra=2
 ```
 
-三条都写在 service 段的**原因**见 §12.8.2（`networks.<name>.options` 非法、
-driver option 实测不生效、service 段 sysctls 里 `IFNAME`/`eth0` 都会被拒）。
+接口级 —— service 段 `networks.<net>.driver_opts` 的 endpoint sysctls：
+
+```
+com.docker.network.endpoint.sysctls: "net.ipv6.conf.IFNAME.disable_ipv6=0,net.ipv6.conf.IFNAME.accept_ra=2"
+```
+
+三条 netns 级 sysctl 必须写在 service 段 `sysctls:`：`networks.<name>.driver_opts`
+是**网络级**配置，写接口级 sysctl 会被静默忽略；而 service 段 `sysctls:` 里写
+`IFNAME`/`eth0` 又会被 Docker 拒绝 —— 接口级只能走 endpoint sysctls。
 
 `accept_ra=2` 必须是 `2`：内核功能性默认是"forwarding 关闭时接受 RA、开启时不接受"，
 而本项目必开 forwarding —— 不显式设 `2` 就会静默丢掉所有 RA。
-`disable_ipv6` 不在 sysctl 清单里，它由 networks 段的 `enable_ipv6: true` 保证
-（不开实测就是 `1`，且没有任何 sysctl 能从 service 段把它改回来）。
+`disable_ipv6` 不在 service 段 sysctl 清单里：本项目的 L2 网络不带 v6 子网
+（`EnableIPv6=false`），Docker（≥26.0.2）建端点时会**显式**把端口的
+`disable_ipv6` 置 1，这一步只发生在端点上，service 段 sysctls 够不着，
+必须用 endpoint sysctls（接口级、建端点后回写）把它翻回 0。
 
-三条都在 L2 compose 文件里**静态注入**，entrypoint 启动后按
-`net_mode_sysctl_checks()` 逐条回读复核（§12.8.1），任一条不符即 FATAL `exit 10`。
+四条期望值（前三条 + `disable_ipv6=0`）都在 L2 compose 文件里**静态注入**，
+entrypoint 启动后按 `net_mode_sysctl_checks()` 逐条回读复核（§12.8.1），
+任一条不符即 FATAL `exit 10`。
 
 ### 11.1.2 共享 L2 网络（v2.95 / v2.96）
 
@@ -1363,7 +1375,7 @@ v2.96 把这套**推广到 macvlan**（默认名 `macvlan`）。
 | ① 同名网络已存在 | `docker network inspect <name>` 成功 | **复用**，并逐项比对参数；不符 → 报错列差异 |
 | ② 同名不存在，但宿主机上有参数兼容的**同驱动**网络 | parent + 子网 + 网关 + mode(+flag) 全等 | **自动接管**那条（仅限用户没显式指定名字时） |
 | ③ parent 上已有别的同驱动网络 | 存在同 parent 的网络且不是② | **仅 ipvlan**：明确报冲突（parent 独占）；**macvlan**：允许共存 |
-| ④ 什么都没有 | —— | **创建**：`docker network create --driver <驱动> --opt parent=… --subnet=… --gateway=… --ipv6 <name>` |
+| ④ 什么都没有 | —— | **创建**：`docker network create --driver <驱动> --opt parent=… --subnet=… --gateway=… <name>`（不带 `--ipv6`，理由见下方「建网时必须显式带 `--subnet`」） |
 
 **② 只在用户没显式指定名字时才自动接管**。显式指定（`IKEV2_L2_NETWORK_NAME`
 或 compose 顶部的 `x-l2-netname` 写成非默认值）= 用户明确要求用那一条，
@@ -1419,8 +1431,11 @@ label `com.docker.compose.network` 是否等于 networks 段的 **key**（`ikev2
 **建网时必须显式带 `--subnet`**：不带的话 Docker 会塞默认池 `172.18.0.0/16`，
 之后任何 join 方想指定 `ipv4_address` 都会被拒
 （`user specified IP address is supported only when connecting to networks with
-user configured subnets`）。`--ipv6` 则让 Docker 补一个 v6 网段并打开
-`enable_ipv6` —— 不开的话端点建好时 `disable_ipv6` 会被置 1，接口收不到 RA。
+user configured subnets`）。反过来**不能再带 `--ipv6`**：开了 `enable_ipv6`
+却不给 v6 子网时，Docker 会从内置 ULA 池自动分一段 fd00::/8，容器拿到不路由的
+ULA + 一条指向不存在网关的假默认路由，污染选路 —— v6 地址改由上游 RA 下发，
+接口的 `disable_ipv6`/`accept_ra` 由 service networks 块的 endpoint sysctls
+打开（§12.8.1），建网阶段不需要任何 v6 配置。
 
 **up.sh 与 compose 必须指向同一条网络**。compose 的网络名来自 networks 段的
 `${IKEV2_L2_NETWORK_NAME:-<驱动名>}` 插值，所以：
@@ -1831,8 +1846,8 @@ host 模式从宿主网卡上直接读地址；L2 模式下容器没有配 v6 �
 
 ```
 上游路由器 ──RA──► 容器 eth0
-                    ├─ ① disable_ipv6=0   ← 由 networks 段 enable_ipv6: true 保证
-                    ├─ ② accept_ra=2      ← 见下方「为什么必须是 2」
+                    ├─ ① disable_ipv6=0   ← 由 service networks 块 endpoint sysctls 保证
+                    ├─ ② accept_ra=2      ← endpoint sysctls（主）+ conf.default（netns 级兜底）
                     └─ ③ 地址收敛（DAD + 等一个 RA 周期）
 ```
 
@@ -1846,24 +1861,29 @@ host 模式从宿主网卡上直接读地址；L2 模式下容器没有配 v6 �
 
 | 位置 | 配置 | 不设的后果 |
 |------|------|-----------|
-| `networks.ikev2-l2.enable_ipv6` | `true` | Docker 建端点时把 `disable_ipv6` 置 1，收不到任何 RA（实测 `dis6=1 gua=0`） |
+| service 段 `networks.ikev2-l2.driver_opts` | `com.docker.network.endpoint.sysctls: "net.ipv6.conf.IFNAME.disable_ipv6=0,net.ipv6.conf.IFNAME.accept_ra=2"` | Docker 建端点时把 `disable_ipv6` 置 1，收不到任何 RA（实测 `dis6=1 gua=0`） |
 | service 段 `sysctls:` | `net.ipv4.conf.all.forwarding=1` | 容器 netns 不转发 → 客户端出不了网 → `exit 11` |
 | service 段 `sysctls:` | `net.ipv6.conf.all.forwarding=1` | v6 不转发（IPv6_ONLY 场景下是致命的） |
-| service 段 `sysctls:` | `net.ipv6.conf.default.accept_ra=2` | forwarding 一开，RA 被内核丢弃 |
+| service 段 `sysctls:` | `net.ipv6.conf.default.accept_ra=2` | forwarding 一开，RA 被内核丢弃（endpoint 级 `accept_ra=2` 是主通道，这条是 netns 级兜底） |
 
-⚠️ **为什么 `disable_ipv6` 不写进 sysctls**：实测（Docker 28.5.2）
-它是 `1` 还是 `0` 完全由 `enable_ipv6: true` 决定，service 段 sysctls 改不动它。
-反过来 `accept_ra` 也不能靠 sysctls 写 `conf.eth0`（Docker 拒绝，见 §12.8.2），
-只能写 `conf.default` —— 因为容器 `eth0` 是 Docker 建端点时**新建**的，
-`conf.default` 决定的就是它新建那一刻的 RA 策略。
+⚠️ **为什么 `disable_ipv6` 必须走 endpoint sysctls**：本项目的 L2 网络不带 v6
+子网（`EnableIPv6=false`），Docker（≥26.0.2，CVE-2024-32473 修复后）建端点时会
+**显式**把端口的 `disable_ipv6` 置 1。service 段 `sysctls:` 只能写
+`conf.all`/`conf.default`（写 `IFNAME`/`eth0` 被 Docker 拒绝，见 §12.8.2），
+管不到这个端点级写入；`networks.<name>.driver_opts` 虽是合法 Compose 字段，
+但那是**网络级**配置，接口级 sysctl 会被静默忽略 —— v2.86-PR20
+"endpoint sysctls 不生效"的错误结论就源于把它放到了这一层。正确位置是
+**service 段 `networks.<net>.driver_opts`**（端点级），`IFNAME` 是字面占位符，
+Docker 建端点时替换为真实网卡名（官方文档 "Use router-assigned IPv6 addresses"）。
 
 **运行时回读复核**（entrypoint §3.2，仅 L2 模式）：静态注入是"声明"，复核才是
 "事实"。entrypoint 在 forwarding 处理完之后按 `net_mode_sysctl_checks()`
-逐条回读 `conf.IFNAME.forwarding` / `conf.IFNAME.accept_ra`：
+逐条回读 `conf.IFNAME.disable_ipv6` / `conf.IFNAME.forwarding` /
+`conf.IFNAME.accept_ra`：
 
 | 读到 | 行为 |
 |------|------|
-| 三条全对 | `[slaac] eth0: net/ipv4/conf/eth0/forwarding=1 net/ipv6/conf/eth0/forwarding=1 net/ipv6/conf/eth0/accept_ra=2 — RA/SLAAC 可用` |
+| 四条全对 | `[slaac] eth0: net/ipv6/conf/eth0/disable_ipv6=0 net/ipv4/conf/eth0/forwarding=1 net/ipv6/conf/eth0/forwarding=1 net/ipv6/conf/eth0/accept_ra=2 — RA/SLAAC 可用` |
 | 任一不符 | FATAL `exit 10` + 打印实际不符项与修复动作 |
 
 复核用 here-doc 而不是管道喂 `while`：管道会把循环体放进子 shell，
@@ -1891,34 +1911,43 @@ host 模式保持单次（行为不变）。日志会打印实际收敛耗时：
 若 15 秒还没拿到，说明上游确实没发 RA 或被网络设备拦截，
 此时按 §1 的 `exit 10` 提示排查，不要盲目加长等待。
 
-### 12.8.2 L2 sysctl 的注入通道：为什么是 service 段 `sysctls`
+### 12.8.2 L2 sysctl 的注入通道：netns 级走 service 段 `sysctls`，接口级走 endpoint sysctls
 
-这一节记录 v2.86-PR20 的实测定论。结论是**只有 service 段 `sysctls:` 可用**，
-另外两条常见写法都是死路。测试环境：Docker Engine 28.5.2 / Compose v2.40.3，
-宿主 Debian 12，parent 接口 `ens18`，子网 `192.168.50.0/24`，上游路由器发 RA。
+这一节记录 v2.86-PR20 的实测，以及后续对其**错误结论**的纠正：v2.86-PR20 得出
+"只有 service 段 `sysctls:` 可用"，是因为当时把 endpoint sysctls driver option
+放到了**网络级**（`networks.<name>`）—— 那确实不生效；放到**端点级**
+（service 段 `networks.<net>.driver_opts`）就生效了。测试环境：Docker Engine
+28.5.2 / Compose v2.40.3，宿主 Debian 12，parent 接口 `ens18`，
+子网 `192.168.50.0/24`，上游路由器发 RA。
 
 | 写法 | 结果 |
 |------|------|
 | `networks.<name>.options.com.docker.network.endpoint.sysctls` | ❌ `docker compose config` 直接报 `additional properties 'options' not allowed` —— **不是合法 Compose 字段** |
-| 同一 driver option，逗号串格式 | ❌ 容器内 `v6fwd=0 ra=1 gua=0`，即**根本没生效** |
-| 同一 driver option，JSON 格式 | ❌ 同上，`v6fwd=0 ra=1 gua=0` |
+| 同一 driver option 放 `networks.<name>.driver_opts`（网络级），逗号串 / JSON 格式 | ❌ 合法但**静默忽略**，容器内 `v6fwd=0 ra=1 gua=0` —— v2.86-PR20 的错误结论由此而来，实际是放错了层级 |
 | service 段 `sysctls:` 写 `IFNAME` 占位符 | ❌ Docker 报 `open sysctl net.ipv4.conf.IFNAME.forwarding: unsafe procfs detected` |
-| service 段 `sysctls:` 写 `eth0` | ❌ Docker 报 `interface specific sysctl setting "net.ipv4.conf.eth0.forwarding" must be supplied using driver option ...` |
-| service 段 `sysctls:` 写 `conf.all` / `conf.default` + `networks` 段 `enable_ipv6: true` | ✅ `v4fwd=1 v6fwd=1 ra=2 gua=1` |
+| service 段 `sysctls:` 写 `eth0` | ❌ Docker 报 `interface specific sysctl setting "net.ipv4.conf.eth0.forwarding" must be supplied using driver option ...` —— 报错本身就是答案：接口级要走 driver option，但得放在**端点**上 |
+| service 段 `sysctls:` 写 `conf.all` / `conf.default`（仅 netns 级三条） | ✅ `v4fwd=1 v6fwd=1` 及 `conf.default` 的 `accept_ra=2` 生效；但端点 `disable_ipv6` 仍被 Docker 置 1（无 v6 子网时），GUA 拿不到 |
+| **service 段 `networks.<net>.driver_opts` 放 `com.docker.network.endpoint.sysctls`（端点级，`IFNAME` 占位符）** | ✅ 端点建好后回写，`disable_ipv6=0 accept_ra=2` 生效，上游 RA 可达 |
 
 **最终形态**：
 
 ```yaml
 services:
   ikev2-panel:
-    sysctls:
+    sysctls:                  # netns 级：service 段只允许 conf.all / conf.default
       net.ipv4.conf.all.forwarding: "1"
       net.ipv6.conf.all.forwarding: "1"
       net.ipv6.conf.default.accept_ra: "2"
+    networks:
+      ikev2-l2:
+        ipv4_address: 192.168.50.63
+        driver_opts:          # 端点级：接口级 sysctl 的唯一正确位置
+          com.docker.network.endpoint.sysctls: "net.ipv6.conf.IFNAME.disable_ipv6=0,net.ipv6.conf.IFNAME.accept_ra=2"
 
 networks:
-  ikev2-l2:
-    enable_ipv6: true
+  ikev2-l2: {}                # ⚠️ 不要 enable_ipv6: true，也不要配 v6 子网 ——
+                              # 无 v6 子网却开 enable_ipv6 会让 Docker 自动分
+                              # ULA 段（fd00::/8），容器拿到不路由的 ULA + 假默认路由
 ```
 
 ⚠️ **host 文件绝对不能有 service 段 `sysctls:`**：host 模式下容器与宿主共享
