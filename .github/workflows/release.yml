@@ -1,0 +1,95 @@
+name: release
+
+# 自动发版：main 上**新增** docs/RELEASE_NOTES_vX.Y.md 时，
+# 自动打 tag vX.Y + 建 GitHub Release + 触发版本镜像构建。
+#
+# 为什么用 CI 而不是本地脚本：
+#   打 tag / 建 Release 需要仓库写权限，CI 自带的 GITHUB_TOKEN 就有，
+#   不依赖任何个人 PAT —— 发布动作因此可以完全在仓库内闭环。
+#
+# 幂等：tag 已存在就整段跳过（重复触发不会重复建 Release）。
+# 触发条件只看「新增了发布说明文件」，普通文档改动不会误触发。
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 找出版本号
+        id: ver
+        run: |
+          set -uo pipefail
+          BEFORE="${{ github.event.before }}"
+          SHA="${{ github.sha }}"
+          NEW=""
+          if [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ]; then
+            NEW=$(git diff --name-only --diff-filter=A "$BEFORE" "$SHA" \
+                  | grep -E '^docs/RELEASE_NOTES_v[0-9]+(\.[0-9]+)*\.md$' | head -1)
+          fi
+          if [ -z "$NEW" ]; then
+            echo "本次提交没有新增发布说明文件，跳过发版"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          VER=$(basename "$NEW" .md | sed 's/^RELEASE_NOTES_//')
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "notes=$NEW" >> "$GITHUB_OUTPUT"
+          echo "本次发布版本：$VER"
+
+      - name: 检查 tag 是否已存在
+        id: exists
+        if: steps.ver.outputs.skip != 'true'
+        run: |
+          if git rev-parse "refs/tags/${{ steps.ver.outputs.version }}" >/dev/null 2>&1; then
+            echo "tag ${{ steps.ver.outputs.version }} 已存在，跳过发版"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 创建 tag
+        if: steps.exists.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ steps.ver.outputs.version }}" \
+                  -m "Release ${{ steps.ver.outputs.version }}" "$GITHUB_SHA"
+          git push origin "refs/tags/${{ steps.ver.outputs.version }}"
+
+      - name: 创建 GitHub Release
+        if: steps.exists.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.ver.outputs.version }}
+          NOTES: ${{ steps.ver.outputs.notes }}
+        run: |
+          set -euo pipefail
+          title=$(head -1 "$NOTES" | sed 's/^# //')
+          gh release create "$TAG" --title "$title" --notes-file "$NOTES" --verify-tag
+
+      - name: 触发版本镜像构建
+        if: steps.exists.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          # 按 tag 派发 docker-publish：它认 GITHUB_REF_TYPE=tag，
+          # 会打 :2.99 / :v2.99 / :latest 三个 tag，PANEL_VERSION 也写成 2.99。
+          gh workflow run docker-publish.yml --ref "$TAG"

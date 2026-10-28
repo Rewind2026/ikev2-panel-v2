@@ -1092,7 +1092,12 @@ docker compose exec ikev2-panel tail -f /var/log/charon.log
 若填的是 IP，iOS 会去证书的 `IPAddresses` SAN 里找，找不到就报「服务器身份不可信」。
 **用 DDNS 域名**（证书 `dNSName` SAN 里有），别用 IP 字面量。
 
-### 2.3 Android 原生连不上（11+）
+### 2.3 Android 原生连不上（12+）
+
+**先确认系统版本**：原生 IKEv2 由 Mainline 模块 `packages/modules/IPsec`（IkeSessionStateMachine）承载，
+**Android 12 起系统设置里才有「IKEv2/IPsec MSCHAPv2」类型**（Android 11 及以下没有，只能用 strongSwan App）。
+AOSP 12–15 源码里 `VpnIkev2Utils` 的默认提案与本面板完全兼容（CBC/AES-GCM + SHA2 + curve25519/modp2048；
+CHILD 无 PFS，服务端 esp_proposals 已含 modpnone 条目），提案层面无需任何改动。
 
 **症状**：Android 设置 → VPN → 连接失败。
 
@@ -1103,20 +1108,21 @@ docker compose exec ikev2-panel tail -f /var/log/charon.log
 | 日志关键字 | 处置 |
 |-----------|------|
 | `MSCHAPV2 failed` | 用户名/密码错 |
-| 证书不受信任 | 仅**自签模式**需要装 CA：浏览器打开 `https://your-domain:8443/ca.cert.pem` 下载，装到「系统」信任存储（用户级存储对 VPN 不生效）。**Let's Encrypt 模式不要装**，系统已信任 ISRG Root，在 VPN 设置里把「CA 证书」留空即可 |
+| `AUTHENTICATION_FAILED` | 服务器地址与证书 SAN 不一致（Android 把「服务器地址」同时当 IDr 校验，要求与服务端 IDr 完全相等且命中 SAN）。用 IP 证书就填 IP，域名证书填域名 |
+| 证书不受信任 | 仅**自签模式**需要装 CA：浏览器打开 `https://your-domain:8443/ca.cert.pem` 下载安装（用户级即可——AOSP 的 `TrustManagerFactory` 默认信任库含用户安装的 CA；在 VPN 表单里选中它后 Android 只用这一个锚点校验）。**Let's Encrypt 模式不要装**，系统已信任 ISRG Root，在 VPN 设置里把「CA 证书」留空即可 |
 
 填参提示（AOSP IKEv2/IPSec MSCHAPv2 表单）：
 
 | 字段 | 填什么 |
 |------|--------|
 | 名称 | 任意 |
-| 类型 | IKEv2/IPSec MSCHAPv2 |
-| 服务器 | 面板地址（DDNS 域名，非 IP） |
-| IPsec 标识符 | **用户名**（与下面「用户名」相同） |
+| 类型 | IKEv2/IPSec MSCHAPv2（Android 12+ 才有） |
+| 服务器 | **与证书 SAN 完全一致**的地址（IP 证书填 IP；域名证书填 DDNS 域名） |
+| IPsec 标识符 | **用户名**（与下面「用户名」相同。AOSP 源码求证：该字段存入 `profile.ipsecIdentifier` 后映射为本地 IKE 身份 IDi；Android 的 EAP-Identity 应答恒为空串，strongSwan 服务端 `eap_id = %any` 时会拿 IDi 当 MSCHAP 用户名——所以这里必须填用户名） |
 | 用户名 / 密码 | 面板用户详情页展示的值 |
 | CA 证书 | LE 模式留空；自签模式选已安装的 CA |
 | 证书类型 | 留空或选「CA 证书」——**不要选「RSA 证书」**，那会要求客户端证书，本面板是纯密码认证 |
-| 服务器标识 | 留空或填证书 CN（DDNS 域名） |
+| 服务器标识 | 留空或填证书 CN |
 
 ### 2.3.1 Android strongSwan App 连不上
 

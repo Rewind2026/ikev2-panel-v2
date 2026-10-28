@@ -24,7 +24,9 @@
     <article class="card card-pad">
       <ol style="padding-left: 1.5rem; line-height: 1.8; color: var(--ikev2-fg);">
         <li>设置 → <strong>网络和互联网</strong> → <strong>VPN</strong> → 右上角 <strong>+</strong></li>
-        <li>类型选 <strong>「IKEv2/IPsec MSCHAPv2」</strong>（Android 11-15 默认就是第一个选项）</li>
+        <li>类型选 <strong>「IKEv2/IPsec MSCHAPv2」</strong>（<b>仅 Android 12+ 有原生 IKEv2</b>；
+          Android 11 及以下系统设置里没有这个类型，请直接用下方 strongSwan App 方案。
+          AOSP 源码求证：原生 IKEv2 由 Mainline 模块 packages/modules/IPsec 承载，Android 12 起才进系统设置）</li>
         <li>按下表填写（<strong>不需要</strong>任何预共享密钥 PSK）</li>
         <li>保存 → 点连接 → 通知栏出现钥匙图标 = 连上</li>
       </ol>
@@ -80,9 +82,13 @@
 <span class="term-prompt">name</span>     = IKEv2 VPN
 
 <span class="term-comment"># 服务器（域名或 IP）</span>
+<span class="term-comment">#   原生客户端把「服务器地址」同时当 IDr 证书校验标识用：</span>
+<span class="term-comment">#   必须与证书 SAN 完全一致（本面板签 IP 证书 → 这里就填同一个 IP）</span>
 <span class="term-prompt">server</span>   = {{.ServerAddr}}
 
-<span class="term-comment"># IPsec 标识符 = 用户名（EAP 预共享密钥标识）</span>
+<span class="term-comment"># IPsec 标识符 = 用户名（AOSP 源码求证：该字段映射为本地 IKE 身份 IDi；</span>
+<span class="term-comment">#   Android 原生 EAP-Identity 回空串，strongSwan 服务端 eap_id=%any 时</span>
+<span class="term-comment">#   会拿 IDi 当 MSCHAP 用户名，所以这里必须填用户名而不是服务器地址）</span>
 <span class="term-prompt">ipsec_id</span> = {{.User.Username}}
 
 <span class="term-comment"># 凭据</span>

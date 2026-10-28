@@ -62,7 +62,8 @@ RUN set -eux; \
 #   --enable-swanctl          swanctl 二进制
 #   --enable-eap-mschapv2     EAP-MSCHAPv2（用户名/密码认证）
 #   --enable-openssl          openssl plugin（RSA / ECDSA / AES-GCM）
-#   --enable-sha2 / hmac      关键 PRF / 完整性算法（v2.86-PR10 删除 sha1/md5/stroke，RFC 8247 合规）
+#   --enable-sha2 / hmac      关键 PRF / 完整性算法
+#   --enable-sha1             v2.86-PR14 回加：Windows / Android 原生 IKEv2 客户端兼容（见下）
 #   --enable-nonce / random   随机数生成
 #   --enable-aes / ctr / ccm / gcm / chapoly  标准 ESP 加密套件
 #   --enable-curve25519       现代 ECDH group（默认 ECP256 也需要 openssl 里的 ecdh）
@@ -73,10 +74,21 @@ RUN set -eux; \
 #   --disable-static          只构建动态库，缩小镜像
 #
 # v2.86-PR10 删除：
-#   --enable-sha1             RFC 8247 明确反对，strongSwan Security Recommendations 列为弱算法
 #   --enable-md5              同上（char 启动时不需要 HASH_SHA1,openssl plugin 已经提供 SHA256+）
 #   --enable-stroke           strongSwan 6.0+ 已 deprecate，swanctl 覆盖所有常用操作，镜像 -8MB
 #
+# v2.86-PR14 回加 --enable-sha1（Windows 10/11 + Android 原生客户端兼容，实测 192.168.50.63）：
+#   PR10 删掉 sha1 后，Windows 原生 IKEv2 客户端 100% 连不上，两个硬性卡点：
+#     1) Windows 默认 IKE 提案只带 modp1024（注册表 NegotiateDH2048_AES256 加固后才提
+#        modp2048），且 integrity 全是 sha1 系列 → 服务端无 sha1 时注册表加固也救不了 ESP；
+#     2) Windows 默认 ESP 提案是 aes256-sha1 / aes128-sha1 / 3des-sha1（sha1-only），
+#        服务端 esp_proposals 无 sha1 → CREATE_CHILD_SA 必然 NO_PROPOSAL_CHOSEN。
+#   实机对照（同机 swanctl 客户端仿真）：
+#     - 默认 Windows 提案：IKE_SA_INIT 直接 NO_PROPOSAL_CHOSEN（缺 modp1024）
+#     - 注册表增强提案：IKE_SA+EAP 全通，CHILD_SA NO_PROPOSAL_CHOSEN（缺 sha1）
+#   RFC 8247 确实不建议 sha1，但这是 Windows 原生客户端唯一能落的兜底；
+#   提案列表里排在最后（强算法在前），新客户端永远协商到强算法，实际安全性不受影响。
+#   md5 不回加（无客户端需要）；3des 不回加（Windows 落 aes256-sha1/aes128-sha1 即可）。
 #   未来按需：--enable-eap-tls / eap-ttls（证书认证）、--enable-xauth/eap-radius
 RUN ./configure \
         --prefix=/usr \
@@ -104,6 +116,11 @@ RUN ./configure \
         --enable-eap-identity \
         --enable-openssl \
         --enable-sha2 \
+        # v2.86-PR14:回加 sha1 —— Windows 10/11 与 Android 原生 IKEv2 客户端的
+        # IKE integrity / PRF 与 ESP auth 都只带 sha1 兜底,没有这个插件它们必然
+        # NO_PROPOSAL_CHOSEN(实测见上方 v2.86-PR14 注释块)。提案排序强算法在前,
+        # 现代 iOS/macOS/strongSwan-app 客户端不受影响。
+        --enable-sha1 \
         --enable-hmac \
         --enable-nonce \
         --enable-random \
@@ -240,7 +257,7 @@ COPY --from=strongswan-builder /tmp/strongswan-install/etc      /etc
 RUN set -eux; \
     cd /etc/strongswan.d/charon; \
     for plugin in random socket-default vici kernel-netlink kernel-libipsec \
-                 openssl resolve stroke updown drbg eap-mschapv2 eap-identity counters; do \
+                 openssl resolve stroke updown drbg eap-mschapv2 eap-identity counters sha1; do \
         conf="$plugin.conf"; \
         if [ -f "$conf" ] && [ ! -s "$conf" ]; then \
             printf '%s {\n    load = yes\n}\n' "$plugin" > "$conf"; \
