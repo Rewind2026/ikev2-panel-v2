@@ -45,9 +45,16 @@ atomic_rename() {
   mv -f "$tmp" "$dst"
 }
 
-# v2.86-PR12.1:atomic copy to swanctl
+# v2.86-PR21:fullchain 拆分安装(叶子 → x509/,链 CA 逐张 → x509ca/,AIA 补根)
+# 背景:strongSwan 每个 .pem 只加载第一张证书 —— 旧逻辑把整份 fullchain 拷进
+# x509/,续签后服务器只发叶子证书,Windows IKEEXT 不做 AIA 补链,必然连不上。
+# (首启路径同款修复在 entrypoint.sh §7.5;这里是续签路径的 reloadcmd hook)
+# 失败回退:退回旧的整份单文件拷贝(leaf-first,iOS 仍可用),不让续签失败。
 if [ -f "${LE_FULLCHAIN}" ]; then
-  atomic_rename "${LE_FULLCHAIN}" "${SWAN_X509}" "644"
+  if ! /etc/ikev2-panel/scripts/install-cert-chain.sh "${DOMAIN}" "${LE_FULLCHAIN}"; then
+    echo "[ikev2-reload] WARN: install-cert-chain.sh failed, fallback to legacy single-file copy" >&2
+    atomic_rename "${LE_FULLCHAIN}" "${SWAN_X509}" "644"
+  fi
 fi
 if [ -f "${LE_PRIVKEY}" ]; then
   atomic_rename "${LE_PRIVKEY}" "${SWAN_KEY}" "600"

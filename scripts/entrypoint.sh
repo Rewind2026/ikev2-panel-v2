@@ -1546,45 +1546,22 @@ if [ "${IKEV2_CERT_MODE:-self-signed}" = "letsencrypt" ]; then
 
   # 复制到 strongSwan 默认查找路径(v2.86-PR12.4 atomic + key 0600)
   #
-  # v2.86-PR19(A11):剥掉链尾的根证书,只保留 leaf + intermediate。
+  # v2.86-PR21:fullchain 拆分安装,替换 v2.86-PR19(A11) 的"剥根 + 整份单文件拷贝"。
   #
-  # 背景(2026-10-12,192.168.50.63 + iOS 17 实测):
-  # LE 从 2025 起默认签发的 fullchain 是 **3 张**:
-  #     leaf(CN=vpn.rewind2023.cn) → "Let's Encrypt YR2" → "ISRG Root YR"
-  # 而 "ISRG Root YR" 本身是根证书(由 ISRG Root X1 交叉签发)。
+  # 背景(2026-10-29,130 实机 Win11 排障):
+  # strongSwan 每个 .pem 文件只加载**第一张**证书 —— A11 把整份 fullchain 拷进
+  # x509/,charon 只认得叶子,服务器 IKE_AUTH 从不下发中间 CA。iOS / strongSwan-app
+  # 客户端会自己做 AIA 补链所以能过;Windows IKEEXT 用系统根库构建链、不做 AIA
+  # 补链 → "潜在 CA 未知/不合法",连接必失败。
+  # 正确姿势(130 实机运行时验证,Win11 + iPhone 双通过):叶子 → x509/,
+  # 链 CA 逐张单独 → x509ca/,必要时 AIA 向上补根。详见 install-cert-chain.sh 头注释。
   #
-  # RFC 5246 §7.4.2/§7.4.1:发送方**不应**把信任锚(根证书)包含在链里,
-  # 客户端本地已预置 iOS 的系统根证书。strongSwan 拿到 3 张会原样全发出去,
-  # iOS 的路径构建引擎对"根证书由另一个根证书签发"(YR → X1 交叉签发)
-  # 存在已知的歧义拒绝路径 —— 实测表现为 IKE_AUTH 阶段客户端静默断开。
-  #
-  # strongSwan 官方的做法是只 load leaf + 中间 CA,把根留给客户端的系统信任库。
-  # 所以这里在拷贝前统一剥掉链尾的根,只留前 N-1 张(至少 2 张:leaf+intermediate)。
-  LE_CHAIN_FIXED="$(mktemp)"
-  if openssl crl2pkcs7 -nocrl -certfile "${LE_FULLCHAIN}" 2>/dev/null | \
-     openssl pkcs7 -print_certs -outform PEM > /dev/null 2>&1; then
-    total_certs=$(grep -c "BEGIN CERTIFICATE" "${LE_FULLCHAIN}" 2>/dev/null || echo 1)
-    if [ "${total_certs}" -gt 2 ]; then
-      # 逐张拆出前 N-1 张(去掉最后一张根)
-      awk -v keep=$((total_certs - 1)) -v out="${LE_CHAIN_FIXED}" '
-        /-----BEGIN CERTIFICATE-----/ { n++ }
-        n <= keep { print >> out }
-      ' "${LE_FULLCHAIN}"
-      if grep -q "BEGIN CERTIFICATE" "${LE_CHAIN_FIXED}" 2>/dev/null; then
-        cp "${LE_CHAIN_FIXED}" "${LE_FULLCHAIN}"
-        echo "${LOG_PREFIX} LE: 剥掉链尾根证书,保留 $((total_certs - 1)) 张(原 ${total_certs} 张)—— iOS 不接受带根的 fullchain"
-      else
-        echo "${LOG_PREFIX} WARN: 剥根失败,保留原 fullchain(${total_certs} 张)"
-      fi
-    else
-      echo "${LOG_PREFIX} LE: fullchain 已是 ${total_certs} 张(leaf+intermediate),无需剥根"
-    fi
-  else
-    echo "${LOG_PREFIX} WARN: 无法解析 fullchain,跳过剥根(保持原样)"
+  # 失败回退:helper 非 0(fullchain 损坏 / 磁盘满等极端场景)时退回旧的整份拷贝 ——
+  # 行为等同 A11 之前(leaf-first,iOS 仍可用),不让容器起不来。
+  if ! /etc/ikev2-panel/scripts/install-cert-chain.sh "${IKEV2_DOMAIN}" "${LE_FULLCHAIN}"; then
+    echo "${LOG_PREFIX} WARN: install-cert-chain.sh failed, fallback to legacy single-file copy" >&2
+    atomic_rename_inline "${LE_FULLCHAIN}" "${SWAN_X509}" "644"
   fi
-  rm -f "${LE_CHAIN_FIXED}"
-
-  atomic_rename_inline "${LE_FULLCHAIN}" "${SWAN_X509}" "644"
   atomic_rename_inline "${LE_PRIVKEY}"  "${SWAN_KEY}" "600"
   echo "${LOG_PREFIX} LE: cert installed to ${SWAN_X509}"
 

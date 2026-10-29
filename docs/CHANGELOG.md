@@ -18,6 +18,54 @@ hotfix。升级前请重点看目标版本的「⚠️ 行为变更」。
 
 ---
 
+## v2.100（2026-10-29）— 修好 LE 证书链：叶子与链 CA 分目录安装 + AIA 向上补根
+
+**用户诉求：「把证书部分修复一下。」（130 生产环境 Win11 排障）**
+
+结论：**strongSwan 每个证书文件只加载第一张证书**，旧实现把整份 fullchain 拷进
+`x509/`，导致服务器 IKE_AUTH **只发叶子证书、不发中间 CA**。Windows 11 的 IKEEXT
+不做 AIA 补链 → 拿不到中间 CA 就静默丢弃响应。现改为叶子入 `x509/`、
+每张链 CA 单独入 `x509ca/`，并支持 AIA 向上补根。
+
+### 一、根因
+
+| 客户端 | 链构建方式 | 缺中间 CA 时 |
+|--------|-----------|-------------|
+| iOS / strongSwan App | 自己做 AIA 补链 | 正常 |
+| Windows IKEEXT | 系统根库建链，**不做 AIA 补链** | 静默失败（连错误包都没有） |
+
+v2.86-PR19(A11) 的「剥掉链尾根证书」方向没错，但只解决了「多不多」，
+没解决「怎么装」—— 剩下 2 张仍装在同一个文件里，charon 照样只认第一张。
+
+### 二、改动清单（4 个文件）
+
+| 文件 | 改动 |
+|------|------|
+| `scripts/install-cert-chain.sh` | **新增**。fullchain 拆分（awk 按 PEM 块切）、叶子 → `x509/`、链 CA 逐张 → `x509ca/`、AIA 向上补根（sha256 指纹去重防循环，最多 4 层）、幂等清理旧文件、原子安装（POSIX sh / busybox 兼容） |
+| `scripts/entrypoint.sh` | §7.5 删掉 A11 剥根块，改为调用 helper；helper 失败时回退旧的整份拷贝（不让容器起不来） |
+| `scripts/ikev2-reload.sh` | 续签路径（`acme.sh --reloadcmd` hook）同款修复 —— 旧实现续签后整份 fullchain 又会原样进 `x509/`，首启修好也会复发 |
+| `Dockerfile` | `COPY scripts/install-cert-chain.sh` + `chmod +x` |
+
+Go 面板程序零改动。
+
+### 三、行为变更
+
+| 项 | 之前（v2.99） | 现在（v2.100） |
+|----|--------------|--------------|
+| `x509/<domain>.pem` | 整份 fullchain（charon 只认第一张） | 只有叶子 |
+| `x509ca/` | 空 | 每张链 CA 一个独立文件 |
+| 续签后是否退化 | 会 | 不会 |
+| `/data/le/fullchain.pem` | 被剥根回写（污染） | 只读，不改 |
+| Windows 11 证书链 | 只有 leaf → 静默失败 | 完整链 → 可构建信任路径 |
+
+### 四、已知限制（与本次修复无关）
+
+Windows 11 在「端到端公网 IPv6 且无 NAT」链路上会发原生 ESP（IP 协议 50），
+容器 `kernel-libipsec` 无 XFRM → 内核回 ICMPv6 拒绝 → Windows 反复重建 CHILD_SA。
+服务器侧已无解（伪造 NAT-D、`encap = yes` 均实测无效）。表现：IKE 能连上、ping 不通。
+
+---
+
 ## v2.99（2026-10-28）— 兼容 Windows 11 / Android 12+ 原生 IKEv2：补 sha1 插件与 modp1024 兜底提案
 
 **用户诉求：「安卓原生 VPN 还是连接不上，Windows 11 ikev2 也连接不上，

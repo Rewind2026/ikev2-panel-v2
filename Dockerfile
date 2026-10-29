@@ -278,6 +278,9 @@ COPY scripts/entrypoint.sh                    /usr/local/bin/entrypoint.sh
 COPY scripts/ikev2-updown                     /usr/local/bin/ikev2-updown
 COPY scripts/renew-cert.sh                    /etc/ikev2-panel/scripts/renew-cert.sh
 COPY scripts/ikev2-reload.sh                  /usr/local/bin/ikev2-reload.sh
+# v2.86-PR21:fullchain 拆分安装(leaf→x509/、链 CA 逐张→x509ca/、AIA 补根)。
+# entrypoint.sh §7.5 与 ikev2-reload.sh 都调用;helper 缺失/失败时回退旧单文件拷贝。
+COPY scripts/install-cert-chain.sh            /etc/ikev2-panel/scripts/install-cert-chain.sh
 COPY scripts/ikev2.nft.template               /etc/ikev2-panel/scripts/ikev2.nft.template
 # v2.86-PR20:网络模式规格表（host / macvlan / ipvlan 的唯一数据源）。
 # entrypoint.sh 在容器内 source 这个路径，缺文件会 exit 12。
@@ -304,7 +307,8 @@ RUN set -eux; \
     chmod +x /usr/local/bin/entrypoint.sh \
              /usr/local/bin/ikev2-updown \
              /usr/local/bin/ikev2-reload.sh \
-             /etc/ikev2-panel/scripts/renew-cert.sh && \
+             /etc/ikev2-panel/scripts/renew-cert.sh \
+             /etc/ikev2-panel/scripts/install-cert-chain.sh && \
     chmod a+r /etc/ikev2-panel/scripts/network-mode.sh
 
 # 运行时目录
