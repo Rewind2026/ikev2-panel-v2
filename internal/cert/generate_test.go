@@ -205,7 +205,10 @@ func TestRenderMobileconfig(t *testing.T) {
 	//   - DisconnectOnSleep=false → iOS 锁屏不主动断 VPN
 	//   - DisconnectOnIdle=0      → 闲置不主动断（Apple Deployment "Never disconnect")
 	//   - NATKeepaliveEnabled+60  → 锁屏后由硬件网卡发 NAT keepalive，防运营商 NAT 老化
-	//   - OnDemandEnabled=1 + Action=Connect → Wi-Fi/Cellular 切换自动重连
+	// v2.101: OnDemand 出厂默认翻为**关闭**(OnDemandEnabled=0,完全手动)。
+	// 原默认(1 + 无条件 Action=Connect)会在手动关闭 VPN 后于后台自动重连,
+	// 与 IncludeAllNetworks=true 的 Apple "default drop" 叠加造成整机断网。
+	// 见 BaseMobileConfigDefaults 注释与 docs/TROUBLESHOOTING.md §2.6。
 	if !strings.Contains(s, "<key>DisconnectOnSleep</key><false/>") {
 		t.Error("DisconnectOnSleep must be <false/> (Apple DTS: iOS 锁屏不会主动断 VPN)")
 	}
@@ -220,14 +223,15 @@ func TestRenderMobileconfig(t *testing.T) {
 	if !strings.Contains(s, "<key>NATKeepAliveInterval</key><integer>60</integer>") {
 		t.Error("NATKeepAliveInterval must be 60s (Apple 最小 20)")
 	}
-	if !strings.Contains(s, "<key>OnDemandEnabled</key><integer>1</integer>") {
-		t.Error("OnDemandEnabled must be 1 (Wi-Fi/Cellular 切换自动重连)")
+	// v2.101: 出厂默认(opts=nil)应为 OnDemandEnabled=0 —— 关闭按需自动连接
+	if !strings.Contains(s, "<key>OnDemandEnabled</key><integer>0</integer>") {
+		t.Error("OnDemandEnabled must be 0 by default (v2.101, fix iOS disconnect blackout)")
 	}
-	if !strings.Contains(s, "<key>OnDemandRules</key><array>") {
-		t.Error("OnDemandRules must be present when OnDemandEnabled=1")
+	if strings.Contains(s, "<key>OnDemandRules</key>") {
+		t.Error("OnDemandRules must NOT be present when OnDemandEnabled=0")
 	}
-	if !strings.Contains(s, "<key>Action</key><string>Connect</string>") {
-		t.Error("OnDemand Action=Connect rule must exist (strongSwan 官方默认)")
+	if strings.Contains(s, "<key>Action</key><string>Connect</string>") {
+		t.Error("OnDemand Action=Connect rule must NOT appear by default (v2.101)")
 	}
 
 	// LE 模式：无内联 CA

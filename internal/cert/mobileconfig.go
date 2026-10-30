@@ -90,14 +90,24 @@ func BaseMobileConfigDefaults() MobileConfigOpts {
 	sleepFalse := false
 	include := true
 	exclude := true
-	onDemand := true
+	// v2.101: OnDemand 默认从 true 翻成 false(完全手动)。
+	// 原因:OnDemandEnabled=1(无条件 Action=Connect)会在用户手动关闭 VPN 后
+	// 仍于后台自动重连,与 IncludeAllNetworks=true 的"default drop"(Apple 官方
+	// 语义:隧道不在时丢弃所有未进隧道的流量,防泄漏)叠加,造成"关闭 VPN 后
+	// 手机断网,删描述文件才能恢复"。默认改为手动后,关 VPN 就是真关闭。
+	// 代价:Wi-Fi ↔ 蜂窝切换后需手动重连。需要自动重连的管理员可在
+	// 后台「Apple 描述文件选项」里重新开启(admin defaults / per-user overlay)。
+	// 见 docs/TROUBLESHOOTING.md §2.6。
+	onDemand := false
 	return MobileConfigOpts{
 		UserDefinedName:      nil, // 由 Render 处 fallback "IKEv2 VPN"
 		DisconnectOnSleep:    &sleepFalse,
 		NATKeepaliveEnabled:  &keep,
 		NATKeepaliveInterval: intPtr(60),
 		OnDemandEnabled:      &onDemand,
-		OnDemandProfile:      OnDemandAlwaysConnect,
+		// OnDemandProfile 保留 always:它只描述"开启按需时用什么规则",
+		// OnDemandEnabled=false 时渲染层不输出 OnDemandRules,无实际作用。
+		OnDemandProfile: OnDemandAlwaysConnect,
 		OnDemandSSID:         "",
 		IncludeAllNetworks:   &include,
 		ExcludeLocalNetworks: &exclude,
@@ -457,6 +467,13 @@ func isValidIP(s string) bool {
 //   - OnDemandEnabled=1 + Action=Connect
 //     Wi-Fi ↔ Cellular 切换时自动重连(防止 MOBIKE 切换期间意外掉)
 //
+//   - v2.101:OnDemand 默认翻为**关闭**(OnDemandEnabled=false,完全手动)。
+//     原默认(无条件 Action=Connect)会在用户手动关闭 VPN 后于后台自动重连,
+//     与 IncludeAllNetworks=true 的 Apple "default drop" 语义(隧道不在时丢弃
+//     所有未进隧道的流量)叠加,造成"关闭 VPN 后整机断网,删除描述文件才恢复"
+//     (Apple Developer Forums 官方确认该行为)。仍需自动重连的,走后台
+//     「Apple 描述文件选项」开启;详见 docs/TROUBLESHOOTING.md §2.6。
+//
 //   - v2.86-PR12.13:加 IncludeAllNetworks=true + ExcludeLocalNetworks=true。
 //     背景:iOS 17+ 默认对 ESP tunnel 做 split-tunnel by IPv6,跟 IPv6-only VPN 服务器
 //     不一定兼容(我们 server 端 local_ts = 0.0.0.0/0, ::/0,需要 client 把所有流量
@@ -759,7 +776,15 @@ func xmlEscape(s string) string {
 // v2.92：修复 L2 模式下 web 打不开 —— table 220 补直连(scope link)路由，
 // 同网段回包不再绕网关（绕网关会被网关注入 RST，TLS 握手必失败）。
 // 详见 docs/CHANGELOG.md（v2.92）与 docs/TROUBLESHOOTING.md §1.7.8。
-const PanelVersion = "v2.92"
+// v2.101：iOS 关闭 VPN 后断网修复 —— OnDemand 出厂默认翻为手动
+// （OnDemandEnabled=false，见 BaseMobileConfigDefaults 注释），消除
+// on-demand 后台自动重连与 IncludeAllNetworks "default drop" 叠加导致的
+// 整机断网。IncludeAllNetworks 默认**保留 true**（v2.86-PR12.13 引入，
+// 修复 iOS 17+ 对 ESP 隧道按 IPv6 split-tunnel 与 IPv6-only 服务器不兼容
+// 的问题，翻回 false 会回归"连上但部分 App 流量不进隧道"）。受断网困扰
+// 的存量用户在后台「Apple 描述文件选项」按需关闭并重装描述文件。
+// 详见 docs/CHANGELOG.md（v2.101）与 docs/TROUBLESHOOTING.md §2.6。
+const PanelVersion = "v2.101"
 
 // generateUUID RFC 4122 v4 随机 UUID。
 // mobileconfig 的 PayloadUUID/ProfileUUID 必须全局唯一，否则 iOS 覆盖会乱。

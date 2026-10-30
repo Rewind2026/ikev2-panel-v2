@@ -18,6 +18,38 @@ hotfix。升级前请重点看目标版本的「⚠️ 行为变更」。
 
 ---
 
+## v2.101（2026-10-30）— iOS 关闭 VPN 后断网：OnDemand 出厂默认翻为手动
+
+**用户诉求：「iOS 下发的描述文件可以使用，但是关闭 VPN 的时候有时会导致手机连接不上网络，删除描述文件后才解决。」**
+
+结论：**两个出厂配置叠加**导致 —— `IncludeAllNetworks=true`（Apple "default drop"
+语义：隧道不在时丢弃所有未进隧道的流量，官方确认行为）+ `OnDemandEnabled=1`
+无条件 `Action=Connect`（关 VPN 后仍在后台自动重连）。手动关闭后 OnDemand 引擎
+拉起重连造成隧道抖动，default drop 未随断开撤销 → 整机断网，删描述文件 /
+连其他 VPN 才恢复。
+
+### ⚠️ 行为变更
+
+| 字段 | 旧默认 | 新默认 | 说明 |
+|------|--------|--------|------|
+| `OnDemandEnabled` | `true`（无条件 Connect） | **`false`（完全手动）** | 关 VPN 就是真关闭；代价是 Wi-Fi↔蜂窝切换后需手动重连，可在后台「Apple 描述文件选项」重新开启 |
+| `IncludeAllNetworks` | `true` | `true`（**不变**） | 保留：v2.86-PR12.13 为修 iOS 17+ ESP 隧道按 IPv6 split-tunnel 与 IPv6-only 服务器不兼容而设，翻回 false 会回归「连上但部分 App 流量不进隧道」 |
+
+### 改动清单（5 个文件）
+
+- `internal/cert/mobileconfig.go`：`BaseMobileConfigDefaults()` OnDemand 默认翻 false
+  （`OnDemandProfile` 保留 always，仅表示"开启时用什么规则"）；`PanelVersion` → v2.101
+- `internal/cert/mobileconfig_opts_test.go` / `internal/cert/generate_test.go`：默认值与渲染断言同步
+- `web/templates/admin_mobileconfig_defaults_content.html`：后台「出厂默认值参考」文案同步
+- `docs/TROUBLESHOOTING.md`：新增 §2.6「iOS 关闭 VPN 后手机断网」（机理 / 自救 / 解法 / 验证）
+
+### 升级注意
+
+**已安装到 iPhone 上的描述文件是静态快照，不会随镜像升级自动更新** ——
+受影响的存量用户需重新下载并安装描述文件。判断是否中招见 TROUBLESHOOTING §2.6。
+
+---
+
 ## v2.100（2026-10-29）— 修好 LE 证书链：叶子与链 CA 分目录安装 + AIA 向上补根
 
 **用户诉求：「把证书部分修复一下。」（130 生产环境 Win11 排障）**

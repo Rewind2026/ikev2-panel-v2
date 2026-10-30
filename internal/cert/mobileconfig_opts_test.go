@@ -30,8 +30,11 @@ func TestDefaultMobileConfigOpts(t *testing.T) {
 	if def.NATKeepaliveInterval == nil || *def.NATKeepaliveInterval != 60 {
 		t.Errorf("NATKeepaliveInterval default should be 60")
 	}
-	if def.OnDemandEnabled == nil || !*def.OnDemandEnabled {
-		t.Errorf("OnDemandEnabled default should be true")
+	// v2.101: OnDemand 默认翻为 false(关闭按需,修复 iOS 关 VPN 后断网,
+	// 见 BaseMobileConfigDefaults 注释)。OnDemandProfile 保留 always 语义:
+	// 仅表示"如果开启按需,默认用无条件 Connect 规则"。
+	if def.OnDemandEnabled == nil || *def.OnDemandEnabled {
+		t.Errorf("OnDemandEnabled default should be false (v2.101, see TROUBLESHOOTING §2.6)")
 	}
 	if def.OnDemandProfile != OnDemandAlwaysConnect {
 		t.Errorf("OnDemandProfile default should be %q, got %q", OnDemandAlwaysConnect, def.OnDemandProfile)
