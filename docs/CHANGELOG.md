@@ -18,6 +18,76 @@ hotfix。升级前请重点看目标版本的「⚠️ 行为变更」。
 
 ---
 
+## v2.102（2026-11-04）— Android IPv6 直连：kernel-libipsec 启用裸 ESP
+
+**用户诉求：「iOS 没问题，Windows 是因为 IPv6 only 的原因无解对吧？现在安卓 iOS 都正常」
+（实为：Android 原生客户端 IPv6 直连时 CHILD_SA 装不上、数据面不通。）**
+
+结论：**Android（AOSP 系统 VPN）走 IPv6 直连时可用**，且**不改动任何 strongSwan
+源码**（已用官方源码包逐字节校验）。改动只有 1 个文件：`Dockerfile`。
+
+### 一、根因
+
+AOSP 的 `IkeSessionStateMachine.needEnableEncapulation()` **仅对 IPv4 为真**，
+IPv6 链路**不做 NAT-D 检测**、也**永不浮动到 UDP-4500**。于是 Android 在 v6 直连下
+只发裸 ESP（IP 协议 50）。
+
+而容器用的 `kernel-libipsec` 默认**只收发封装 ESP**（`raw_esp = no`），
+`require_encap` 为 true → 裸 ESP SA 装不上 → CHILD_SA 建立失败、数据面不通。
+
+strongSwan 6.0.1 源码侧确认（`kernel_libipsec_plugin.c`）：
+
+```c
+if (lib->settings->get_bool(lib->settings,
+                "%s.plugins.kernel-libipsec.raw_esp", FALSE, lib->ns))
+{
+        this->esp_handler = kernel_libipsec_esp_handler_create();
+        ...
+}
+```
+
+且 `kernel_libipsec_ipsec.c` 里 `require_encap = !lib->get(lib, "kernel-libipsec-esp-handler")`
+—— 即 `raw_esp = yes` 会让裸 ESP SA 可安装。
+
+### 二、改了什么（2 个文件）
+
+| 文件 | 改动 |
+|------|------|
+| `Dockerfile` | ① 写 `/etc/strongswan.d/charon/kernel-libipsec.conf`（`load = yes` + `raw_esp = yes`）→ 启用 `kernel_libipsec_esp_handler`（RAW socket 收发裸 ESP，v4+v6 皆可）<br>② 写 `/etc/strongswan.d/zz-fragment-size.conf`（`charon.fragment_size_v6 = 1150`）→ 固化 IPv6 分片上限（此前只是容器内手工 drop-in，重建即丢） |
+| `internal/cert/mobileconfig_opts_test.go` | 修一条**过时断言**（v2.101 遗留）：`TestRenderMobileconfig_NilOpts_UsesDefault` 仍期望默认输出 `OnDemandRules`（Action=Connect），但 v2.101 已把出厂默认 `OnDemandEnabled` 翻为 `false`（完全手动），默认**不应**输出 `OnDemandRules`。断言改为反向断言 + 校验 `OnDemandEnabled=0`。**只改测试，不改任何运行时行为**。 |
+
+Go 面板运行时逻辑零改动，`PanelVersion` 不变（按 v2.93–v2.100 的惯例，
+纯服务端 / 构建期变更不 bump 描述文件里的版本号）。
+
+### 三、为什么不用改 strongSwan 源码
+
+排查过程中曾对 `ike_natd.c` 打过「fake NAT」三刀补丁（骗 charon 认为存在 NAT），
+在 `raw_esp = yes` 生效后**全部失效**（补丁针对的是封装 ESP 路径），
+已于 2026-11-04 全部回滚为上游原版。
+
+当前部署的 `ike_natd.c` 与官方 `strongswan-6.0.1.tar.bz2`（MD5 `c3ddc81d1d11ce3d5431e15da7718748`）
+里的同名文件 **MD5 完全一致**（`50dc1df92ab60fc7722957287603036c`）——**纯原版、零代码补丁**。
+
+### 四、实测（192.168.50.130 生产环境）
+
+* Android（AOSP 系统 VPN，IPv6 直连）：SA 状态 `INSTALLED, TUNNEL`（**非封装**），
+  本地端口保持 `[500]` 未浮动到 4500，`udp4500` 流量为 0；
+  in/out 计数与 `nft esp` 计数、`ipsec0` TX 相互吻合 → 裸 ESP 路径成立。
+* iOS：走 NAT 后的标准 UDP-4500 封装路径**不受影响**，照常正常。
+* Windows：v2.100 记录的「原生 ESP 结构性无解」在**服务器侧已由本次改动消除**
+  （Windows 走的是标准 UDP-4500 路径，其此前的失败另有原因，见 TROUBLESHOOTING §2.4）。
+
+### 五、⚠️ 注意事项
+
+* **必须换镜像才生效**：`raw_esp` 与 `fragment_size_v6` 都在**镜像内**的
+  `/etc/strongswan.d/` 下，只改面板配置无效。
+* **回滚方式**：删掉 `kernel-libipsec.conf` 里的 `raw_esp = yes`
+  + 删掉 `zz-fragment-size.conf`，重启容器即可（回到封装 ESP 路径）。
+* IPv6 分片上限 1150 字节：**客户端按 RFC 7383 自动适配**，对 iOS/Android/Windows 无感，
+  不需要任何客户端侧改动。
+
+---
+
 ## v2.101（2026-10-30）— iOS 关闭 VPN 后断网：OnDemand 出厂默认翻为手动
 
 **用户诉求：「iOS 下发的描述文件可以使用，但是关闭 VPN 的时候有时会导致手机连接不上网络，删除描述文件后才解决。」**

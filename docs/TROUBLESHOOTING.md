@@ -1149,6 +1149,53 @@ App 内看日志：设置 → 日志查看器，或 `adb logcat | grep -i charon
 | `unable to resolve hostname` | `.sswan` 里的 `remote_addrs` 域名没解析，检查 DDNS 是否正常 |
 | `AUTHENTICATION_FAILED` | 密码错，或该用户已被禁用 |
 
+#### 2.3.2 Android IPv6 直连：隧道建不起来 / 建起来没流量
+
+**症状**：Android 12+ 系统原生 IKEv2，在**端到端公网 IPv6 直连**（不经 NAT）
+的链路上连不上；或能建 SA 但没有流量。iOS / Windows 同时正常。
+
+**根因（v2.102 已修）**：AOSP 的 `IkeSessionStateMachine.needEnableEncapulation()`
+**仅对 IPv4 为真** —— IPv6 链路**不做 NAT-D 检测、也永不浮动到 UDP-4500**，
+只发裸 ESP（IP 协议 50）。而容器里的 `kernel-libipsec` 默认
+`raw_esp = no`（**只收发封装 ESP**），`require_encap` 为 true →
+**裸 ESP SA 装不上**，CHILD_SA 建不起来。
+
+**判据（一条命令）**：
+
+```bash
+docker compose exec ikev2-panel cat /etc/strongswan.d/charon/kernel-libipsec.conf
+# 修复后应含：raw_esp = yes
+```
+
+以及 Android 连上后看 SA 的**本地端口**：
+
+```bash
+docker compose exec ikev2-panel swanctl --list-sas
+# 裸 ESP 路径成立：local 端口是 [500]，且 SA 标记为 TUNNEL（非封装）
+# 封装 ESP 路径：  local 端口是 [4500]
+```
+
+**处置**：升级到 **v2.102+** 镜像（`raw_esp` 固化在镜像内，只改面板配置无效）：
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+**回滚**（回到封装 ESP 路径）：
+
+```bash
+docker compose exec ikev2-panel sh -c '
+  sed -i "/raw_esp = yes/d" /etc/strongswan.d/charon/kernel-libipsec.conf
+  rm -f /etc/strongswan.d/zz-fragment-size.conf
+'
+docker compose restart ikev2-panel
+```
+
+> **不要**再去改 strongSwan 的 `ike_natd.c` 源码打「fake NAT」补丁 ——
+> 那条路针对的是封装 ESP 路径，`raw_esp = yes` 生效后补丁**全部失效**。
+> v2.102 起 strongSwan 保持**上游原版、零代码补丁**。
+
 ### 2.4 能拨号但上不了网（已连接但无流量）
 
 **症状**：显示「已连接」，但任何 app 都打不开网页。`swanctl --list-sas` 显示 ESTABLISHED。

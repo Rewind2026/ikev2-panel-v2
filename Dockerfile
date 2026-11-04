@@ -263,6 +263,22 @@ RUN set -eux; \
             printf '%s {\n    load = yes\n}\n' "$plugin" > "$conf"; \
         fi; \
     done; \
+    # v2.86-PR22(2026-11-04):kernel-libipsec 启用 raw_esp —— Android(AOSP 系统 VPN)IPv6
+    # 直连修复。背景:IPv6 直连时 AOSP 设计上永不浮动到 UDP-4500(IkeSessionStateMachine
+    # needEnableEncapulation 仅 IPv4 为真,v6 无 NAT-D 检测),而 kernel-libipsec 默认
+    # 只收发封装 ESP → Android 在 v6 直连下 CHILD_SA 装不上/数据面不通。
+    # raw_esp = yes 启用 kernel_libipsec_esp_handler(RAW socket 收发裸 ESP,v4+v6),
+    # 裸 ESP SA 可安装,Android v6 直连即通。实测(192.168.50.130):
+    #   SA "INSTALLED, TUNNEL"(非封装),in/out 计数与 nft esp 计数、ipsec0 TX 吻合,
+    #   udp4500 流量为 0;iOS 走 NAT 后标准 UDP-4500 路径不受影响。
+    # 与之配套:ike_natd.c 保持上游原版(曾试过 fake-NAT 三刀补丁,raw_esp 模式下
+    # 全部失效,已回滚,勿再打)。
+    printf 'kernel-libipsec {\n    load = yes\n\n    # Android IPv6 直连裸 ESP 修复(2026-11-04),勿删,见 Dockerfile 同名注释\n    raw_esp = yes\n}\n' > kernel-libipsec.conf; \
+    # v2.86-PR22:固化 zz-fragment-size.conf(此前只在容器内手工 drop-in,未持久化,
+    # 重建容器会丢)。2026-10-30 诊断:服务器→手机方向 4x1232 字节 IKE_AUTH 分片全丢
+    # (疑运营商按包大小丢弃),显式限 IKEv2 IPv6 分片总大小 1150 字节(线上每片约
+    # 1102,低于 1200 门槛)。客户端按 RFC 7383 自动适配,对 iOS/Android/Win 无感。
+    printf 'charon {\n    # 2026-10-30:IPv6 分片过 1232B 全丢,限 1150B,回滚 = 删本文件 + 重启容器\n    fragment_size_v6 = 1150\n}\n' > /etc/strongswan.d/zz-fragment-size.conf; \
     echo "=== fixed empty plugin confs ==="; \
     for f in *.conf; do \
         echo -n "$f: "; \

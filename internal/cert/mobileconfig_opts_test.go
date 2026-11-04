@@ -341,8 +341,15 @@ func TestRenderMobileconfig_NilOpts_UsesDefault(t *testing.T) {
 	if !strings.Contains(s, `<key>NATKeepAliveInterval</key><integer>60</integer>`) {
 		t.Errorf("nil opts should use default NATKeepAliveInterval=60")
 	}
-	if !strings.Contains(s, `<array><dict><key>Action</key><string>Connect</string></dict></array>`) {
-		t.Errorf("nil opts should use default OnDemandRules (always)")
+	// v2.101 起出厂默认 OnDemandEnabled=false（完全手动）→ **不输出** OnDemandRules。
+	// 这条断言原先期望默认输出 Action=Connect，与 v2.101 的行为变更冲突
+	// （v2.101 只翻了 OnDemandEnabled 的默认值，忘了同步这里）。
+	// 详见 docs/CHANGELOG.md（v2.101）与 docs/TROUBLESHOOTING.md §2.6。
+	if strings.Contains(s, "<key>OnDemandRules</key>") {
+		t.Errorf("nil opts should NOT emit OnDemandRules (default OnDemandEnabled=false since v2.101)")
+	}
+	if !strings.Contains(s, `<key>OnDemandEnabled</key><integer>0</integer>`) {
+		t.Errorf("nil opts should use default OnDemandEnabled=0")
 	}
 }
 
