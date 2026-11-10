@@ -1340,6 +1340,47 @@ SA 半死时关闭（DPD 探测中、刚切过网、服务器重启后）最容�
 **验证**：重装描述文件 → 连 VPN → 关 VPN → 立刻开 APP / 浏览器应正常上网；
 设置 → VPN 应停在「未连接」，不再自动跳回「连接中」。
 
+### 2.7 拓扑图不显示客户端已连线（Windows / Linux）
+
+**症状**：客户端**网络是通的**（能上网），但首页拓扑图上**看不到该用户「已连线」**，
+用户列表的在线态也是空的；iOS / Android 则正常显示。
+
+**判据**（一条命令）：
+
+```bash
+docker compose exec ikev2-panel swanctl --list-sas | grep -A3 'ikev2-rw:'
+# 正常（v2.104 起）：
+#   remote alice                 ← remote-eap-id = EAP 用户名
+# 异常（v2.103 及更早的判定依据）：
+#   remote CN=DESKTOP-ABC123     ← remote-id = IKE 身份(IDi)，Windows 是机器证书主体
+#   remote 10.10.0.2             ← Linux 客户端不发 id = 时落到主机名/IP
+```
+
+**根因**：面板此前按 strongSwan 的 `remote-id`（**IKE 身份 IDi**）去比用户名，
+而 IDi 在不同平台上的含义完全不同：
+
+| 平台 | IDi（`remote-id`）实际是什么 | 能否匹配用户名 |
+|------|---------------------------|--------------|
+| iOS / macOS | mobileconfig 的 `LocalIdentifier = 用户名` | 恰好能（巧合） |
+| Windows | 机器证书主体 DN | 不能 |
+| Linux | 客户端不发 `id =` 时落到主机名 / IP | 不能 |
+
+**v2.104 起已修**：在线判定改为优先取 `remote-eap-id`
+（strongSwan 官方 vici 文档：`remote-eap-id = <remote EAP identity, if EAP-authenticated>`，
+即 EAP 认证时的登录用户名），缺失时才回退 `remote-id`（兼容老 charon）。
+同一 bug 在**流量归账**和**「强制下线」按钮**上也一并修好了。
+
+**解法**：升级到 v2.104 及以上镜像。
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+> **升级后仍不显示？** 先确认 SA 上确实带 `remote-eap-id`（上面那条命令）。
+> 若 `remote` 行既不是用户名也不是机器身份，说明客户端根本没完成 EAP 认证，
+> 按 §2.2 / §2.3 排查连接本身，而不是在线判定。
+
 ---
 
 ## 3. Let's Encrypt 续签失败

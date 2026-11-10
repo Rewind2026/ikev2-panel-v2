@@ -18,6 +18,73 @@ hotfix。升级前请重点看目标版本的「⚠️ 行为变更」。
 
 ---
 
+## v2.104（2026-11-10）— 修好 Windows / Linux 的拓扑图在线判定；彻底移除 .sswan 导出
+
+**用户诉求：「Windows / Linux 连接后网络是通的，但拓扑图不会显示客户端已连线」
+（实为：在线判定拿 IKE 身份 IDi 去比用户名，而 IDi 在 Windows 上是机器证书主体、
+在 Linux 上是主机名，永远不是登录用户名。）**
+
+### 一、在线判定改用 `remote-eap-id`（EAP-Identity）
+
+| 文件 | 改动 |
+|------|------|
+| `internal/swanctl/parser.go` | 新增 `pickRemoteID()`：`remote-eap-id` 优先，缺失回退 `remote-id` |
+| `internal/swanctl/terminate.go` | 抽出 `saMatchesUsername()`：有 `remote-eap-id` 就只按它匹配，不误伤同机器其他用户 |
+| `internal/swanctl/listener.go` | 审计事件（`ike-updown`）同样优先 `remote-eap-id` |
+
+**根因**：strongSwan 的 `remote-id` 是 IKE 身份（IDi），`remote-eap-id` 才是 EAP
+认证时的登录用户名。面板此前只读 `remote-id`：
+
+| 平台 | IDi 实际是什么 | 能否匹配用户名 |
+|------|---------------|--------------|
+| iOS / macOS | mobileconfig 的 `LocalIdentifier = 用户名` | 恰好能（巧合） |
+| Windows | 机器证书主体 DN | 不能 |
+| Linux | 客户端不发 `id =` 时落到主机名 / IP | 不能 |
+
+**同一 bug 的三处影响，本次一并修好：**
+
+* 首页拓扑图 / 用户列表在线态 —— Windows / Linux 已连接但不显示在线
+* 流量归账（`limit/collector.go`）—— 流量记不到对应用户名
+* 「强制下线」按钮 —— 找不到 SA 却返回幂等成功的假象
+
+**兼容性**：老 charon 不推 `remote-eap-id` 时自动回退原 `remote-id` 路径，行为不变。
+
+新增 4 个表驱动测试（parser / terminate / listener 三层）。
+
+### 二、彻底移除 `.sswan` 客户端配置导出
+
+`.sswan` 是 Android strongSwan App 的**专有导入格式**，离开该 App 无法使用；
+Linux 桌面发行版又**没有系统自带 IKEv2 客户端**，必须自行安装 strongSwan ——
+"为了用配置文件先装第三方客户端"与"所有连接走系统自带客户端"的目标相悖。
+
+删除内容：`GET /users/{id}/sswan` 端点、`renderSSwanTemplate()` 实现、
+`internal/web/sswan_config_test.go` 整个测试文件，以及用户详情页的「Linux」标签面板、
+Android 说明页、README、API 文档、故障排查文档中的对应内容。
+
+### ⚠️ 行为变更
+
+| 项 | 之前 | 现在 |
+|----|------|------|
+| `GET /users/{id}/sswan` | 返回 `.sswan` 配置 | **端点已删除（404）** |
+| 在线判定依据 | `remote-id`（机器身份） | **`remote-eap-id`（EAP 用户名）**，缺失回退 |
+| 强制下线 | Windows / Linux 假成功 | 真正踢掉，不误伤同机器其他用户 |
+| 用户详情页 OS 标签 | 5 个 | 3 个（iOS / macOS、Android 12+、CA 证书） |
+
+**镜像内配置零变更**：纯 Go + 模板改动，`Dockerfile` 未动，
+`/etc/strongswan.d/` 与 v2.102 起的状态完全一致；仍**必须换镜像**才生效。
+`.mobileconfig` 内容与 `PanelVersion` 未变，**不需要重装 iOS 描述文件**。
+
+---
+
+## v2.103（2026-11-10）— 会话安全补强：滑动空闲超时 + 改密吊销其他会话
+
+* `sessions` 表加 `last_seen_at` 列，存量行用 `created_at` 回填（升级不踢人）
+* `GetSessionByID` 用单条 `UPDATE ... RETURNING` 原子完成绝对过期校验 + 空闲窗口校验 + 滑动续期
+* 新增 `IKEV2_SESSION_IDLE`（默认 1h，`0s` 显式关闭）→ 面板设置页下拉可热生效
+* 管理员改密成功后吊销除当前会话外的全部会话，审计 `admin.password.sessions_revoked`
+
+---
+
 ## v2.102（2026-11-04）— Android IPv6 直连：kernel-libipsec 启用裸 ESP
 
 **用户诉求：「iOS 没问题，Windows 是因为 IPv6 only 的原因无解对吧？现在安卓 iOS 都正常」
