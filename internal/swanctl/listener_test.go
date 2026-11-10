@@ -166,6 +166,41 @@ func TestHandleEvent_InvalidUnique(t *testing.T) {
 	}
 }
 
+// TestHandleEvent_EapIDPriority v2.104:ike-updown 与 list-sas 共用同一
+// IKE_SA 消息构造,Windows/Linux 的 remote-id 是机器身份,审计反查 user
+// 必须优先取 remote-eap-id。
+func TestHandleEvent_EapIDPriority(t *testing.T) {
+	cases := []struct {
+		name    string
+		kv      map[string]any
+		wantEap string
+	}{
+		{"windows: 优先 remote-eap-id", map[string]any{
+			"up":            "yes",
+			"uniqueid":      "1",
+			"remote-id":     "2 CN=DESKTOP-ABC123, DC=corp, DC=local",
+			"remote-eap-id": "alice",
+		}, "alice"},
+		{"老 charon:回退 remote-id", map[string]any{
+			"up":        "yes",
+			"uniqueid":  "2",
+			"remote-id": "2 bob",
+		}, "2 bob"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var got SALifecycleEvent
+			listener := NewLifecycleListener("", func(evt SALifecycleEvent) {
+				got = evt
+			}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			listener.handleEvent(newEvent("ike-updown", tc.kv))
+			if got.RemoteID != tc.wantEap {
+				t.Errorf("RemoteID = %q, want %q", got.RemoteID, tc.wantEap)
+			}
+		})
+	}
+}
+
 // TestNewLifecycleListener_EmptySocketPath 验证默认 socket path。
 func TestNewLifecycleListener_EmptySocketPath(t *testing.T) {
 	l := NewLifecycleListener("", nil, nil)

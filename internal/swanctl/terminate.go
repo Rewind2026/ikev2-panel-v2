@@ -127,13 +127,28 @@ func (m *Manager) findSAUniqueIDs(ctx context.Context, sess *vici.Session, usern
 		if err != nil {
 			continue
 		}
-		// remote-id 形如 "2 alice" 或 "2 CN=alice"（charon 6.x 是 "type id"）
-		remoteID := getString(inner, "remote-id")
-		if matchUsername(remoteID, username) {
+		// v2.104:匹配优先用 remote-eap-id(= EAP 用户名,全平台一致)。
+		// Windows 原生客户端的 remote-id 是机器证书 DN / 计算机名,
+		// Linux strongSwan 的 remote-id 是主机名/IP —— 只按 remote-id 匹配时,
+		// 对这两个平台的"强制下线"恒找不到 SA,返回幂等成功的假象。
+		if saMatchesUsername(getString(inner, "remote-eap-id"), getString(inner, "remote-id"), username) {
 			uids = append(uids, uid)
 		}
 	}
 	return uids, nil
+}
+
+// saMatchesUsername 判断一个 IKE_SA 是否属于指定 username(v2.104)。
+//
+// 语义:remote-eap-id 存在时**只**按它匹配 —— 它就是 EAP 登录用户名,
+// 全平台一致;remote-id 是 IKE 身份(IDi),Windows/Linux 上是机器身份,
+// 拿它兜底反而可能把同机器的其他用户误伤。remote-eap-id 缺失
+// (老 charon / 非 EAP)时才回退 remote-id(剥 "N " 前缀与 "CN=",原行为)。
+func saMatchesUsername(eapID, remoteID, username string) bool {
+	if eapID != "" {
+		return matchUsername(eapID, username)
+	}
+	return matchUsername(remoteID, username)
 }
 
 // matchUsername 检查 VICI 远程标识是否对应指定 username。

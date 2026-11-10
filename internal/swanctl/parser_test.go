@@ -192,6 +192,36 @@ func TestParseSingleSA_MultipleChildren(t *testing.T) {
 	}
 }
 
+func TestParseSingleSA_WindowsClientEapID(t *testing.T) {
+	// v2.104:Windows 原生客户端 —— IKE 身份(IDi)是机器证书 DN,不是用户名。
+	// charon 在 EAP 认证时额外推 remote-eap-id = 登录用户名。
+	// RemoteID 必须取 remote-eap-id,否则拓扑/流量/踢下线全部匹配失败。
+	src := makeSAFlat("10", "ESTABLISHED", "", "2001:db8::70[4500]", nil)
+	src.Set("remote-id", "2 CN=DESKTOP-ABC123, CN=DESKTOP-ABC123, DC=corp, DC=local")
+	src.Set("remote-eap-id", "alice")
+
+	sa, err := parseSingleSA(src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if sa.RemoteID != "alice" {
+		t.Errorf("RemoteID: got %q want EAP identity %q", sa.RemoteID, "alice")
+	}
+}
+
+func TestParseSingleSA_EapIDFallbackToRemoteID(t *testing.T) {
+	// 老版本 charon 不推 remote-eap-id(字段缺失)→ 回退 remote-id,行为不变。
+	src := makeStreamingSA("ikev2-rw", "4", "ESTABLISHED", "alice", "2001:db8::63[4500]", nil)
+
+	sa, err := parseSingleSA(src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if sa.RemoteID != "alice" {
+		t.Errorf("RemoteID: got %q want %q", sa.RemoteID, "alice")
+	}
+}
+
 func TestCountActiveIkeSAs(t *testing.T) {
 	sas := []SA{
 		{UniqueID: "1", IkeState: "ESTABLISHED"},

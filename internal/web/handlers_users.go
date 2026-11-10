@@ -338,8 +338,9 @@ func (s *Server) handleUserDetail(w http.ResponseWriter, r *http.Request) {
 	// 即使已经有流量产生 — 跟主页 topology 不一致)。
 	//
 	// 复用 loadActiveSAs (3s timeout + ESTABLISHED 过滤),遍历 RemoteID 跟
-	// username 比对 —— parser.go 里 RemoteID 已经 extractID 剥过 "2 " / "CN="
-	// 前缀,可以直接 == 。
+	// username 比对 —— v2.104 起 RemoteID 优先取 remote-eap-id(EAP 用户名,
+	// 全平台一致),直接 == 即可;老 charon 回退 extractID 剥过 "2 " 前缀的
+	// remote-id。
 	activeSAs, _ := loadActiveSAs(r.Context(), s)
 	userOnline := false
 	for _, sa := range activeSAs {

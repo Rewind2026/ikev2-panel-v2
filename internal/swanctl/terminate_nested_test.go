@@ -96,6 +96,36 @@ func TestSAFieldsExtractableFromNestedMessage(t *testing.T) {
 	}
 }
 
+// TestSAMatchesUsername_EapIDPriority 是 v2.104 的核心回归测试:
+// Windows / Linux 原生客户端的 remote-id 是机器身份(证书 DN / 主机名),
+// 不是用户名。remote-eap-id 存在时必须**只**按它匹配 —— 否则:
+//   - 按 remote-id 匹配 → 恒找不到 SA,"强制下线"对这两个平台假成功
+//   - remote-id 也参与匹配 → 同一台机器(DN 相同)的其他用户会被误踢
+func TestSAMatchesUsername_EapIDPriority(t *testing.T) {
+	winDN := "2 CN=DESKTOP-ABC123, CN=DESKTOP-ABC123, DC=corp, DC=local"
+	cases := []struct {
+		name      string
+		eapID     string
+		remoteID  string
+		username  string
+		wantMatch bool
+	}{
+		{"windows: eap 命中机器 DN 不误伤", "alice", winDN, "alice", true},
+		{"windows: 别的用户不误踢", "alice", winDN, "bob", false},
+		{"linux: eap 命中", "alice", "linux-pc.corp.local", "alice", true},
+		{"linux: 别的用户不误踢", "alice", "linux-pc.corp.local", "bob", false},
+		{"老 charon 无 eap 字段:回退 remote-id", "", "2 alice", "alice", true},
+		{"老 charon 无 eap 字段:不匹配", "", "2 bob", "alice", false},
+		{"两者皆空", "", "", "alice", false},
+	}
+	for _, c := range cases {
+		if got := saMatchesUsername(c.eapID, c.remoteID, c.username); got != c.wantMatch {
+			t.Errorf("%s: saMatchesUsername(eap=%q, remote=%q, user=%q) = %v, 期望 %v",
+				c.name, c.eapID, c.remoteID, c.username, got, c.wantMatch)
+		}
+	}
+}
+
 func TestMatchUsername(t *testing.T) {
 	cases := []struct {
 		remoteID  string

@@ -146,12 +146,25 @@ func parseSingleSA(m *vici.Message) (SA, error) {
 		return SA{}, fmt.Errorf("vici SA message is nil")
 	}
 
+	// v2.104:身份选取 —— 优先 remote-eap-id,回退 remote-id。
+	//
+	// 为什么:remote-id 是 IKE 身份(IDi),而客户端的 IKE 身份**不一定是用户名**:
+	//   - iOS:mobileconfig 显式设了 LocalIdentifier = 用户名 → remote-id 直接命中
+	//   - Windows 原生:IKE 身份是机器证书主体 DN / 计算机名,EAP 用户名不在 IDi 里
+	//   - Linux strongSwan:sswan 模板里 local 段只设 eap_id 没设 id,
+	//     IDi 落到主机名/IP
+	// EAP 认证成功后 charon 的 IKE_SA 身份**不会**回写成 EAP 用户名,所以按
+	// remote-id 匹配 username 时,Windows/Linux 全部落空 —— 拓扑不显示在线、
+	// 流量归不了账、"强制下线"按钮假成功。VICI 在 EAP 认证时额外提供
+	// remote-eap-id(strongSwan vici README:list-sa 消息含
+	// "remote-eap-id = <remote EAP identity, if EAP-authenticated>"),
+	// 它就是 EAP-Identity = 登录用户名,全平台一致。
 	sa := SA{
 		UniqueID:   getString(inner, "uniqueid"),
 		IkeState:   getString(inner, "state"),
 		LocalAddr:  getHostPort(inner, "local"),
 		RemoteAddr: getHostPort(inner, "remote"),
-		RemoteID:   extractID(getString(inner, "remote-id")),
+		RemoteID:   pickRemoteID(inner),
 		LocalID:    extractID(getString(inner, "local-id")),
 	}
 
@@ -164,6 +177,22 @@ func parseSingleSA(m *vici.Message) (SA, error) {
 		sa.Children = parseChildSAs(childMsg)
 	}
 	return sa, nil
+}
+
+// pickRemoteID 从 SA Message 里选"用户名"身份。
+//
+// 优先 remote-eap-id(EAP-Identity,即登录用户名),回退 extractID(remote-id)。
+// 回退路径服务于:
+//   - 非 EAP 场景(未来加 pubkey 客户端认证)
+//   - 老版本 charon 没推 remote-eap-id 字段(字段缺失 getString 返回 "")
+//
+// 注意 remote-id 可能带 "2 " 类型前缀且 DN 含空格,extractID 只取第一个空格
+// 后的第一段 —— 有 remote-eap-id 时根本不会走到这条有损路径。
+func pickRemoteID(inner *vici.Message) string {
+	if eap := getString(inner, "remote-eap-id"); eap != "" {
+		return eap
+	}
+	return extractID(getString(inner, "remote-id"))
 }
 
 // parseChildSAs 解析 child-sas Message。

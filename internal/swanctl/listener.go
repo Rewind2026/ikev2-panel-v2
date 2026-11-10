@@ -198,7 +198,15 @@ func (l *LifecycleListener) handleEvent(ev vici.Event) {
 		// 找到了嵌套 SA Message → 解析字段
 		uniqueID = parseUint32Field(saMsg, "uniqueid")
 		remoteHost = parseStringField(saMsg, "remote-host")
-		remoteID = parseStringField(saMsg, "remote-id")
+		// v2.104:与 parser.pickRemoteID 同一语义 —— 优先 remote-eap-id。
+		// ike-updown 事件与 list-sas 共用同一个 IKE_SA 消息构造(vici_ike.c
+		// build_ike_sa),字段集一致。Windows/Linux 客户端的 remote-id 是机器
+		// 身份(证书 DN / 主机名),不是 EAP 用户名,审计里只有 remote-id 时
+		// 反查不到 user。
+		remoteID = parseStringField(saMsg, "remote-eap-id")
+		if remoteID == "" {
+			remoteID = parseStringField(saMsg, "remote-id")
+		}
 		remoteVips = parseStringField(saMsg, "remote-vips")
 		break // 只取第一个 connection(多 conn 场景罕见)
 	}
