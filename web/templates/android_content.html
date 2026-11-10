@@ -25,8 +25,9 @@
       <ol style="padding-left: 1.5rem; line-height: 1.8; color: var(--ikev2-fg);">
         <li>设置 → <strong>网络和互联网</strong> → <strong>VPN</strong> → 右上角 <strong>+</strong></li>
         <li>类型选 <strong>「IKEv2/IPsec MSCHAPv2」</strong>（<b>仅 Android 12+ 有原生 IKEv2</b>；
-          Android 11 及以下系统设置里没有这个类型，请直接用下方 strongSwan App 方案。
-          AOSP 源码求证：原生 IKEv2 由 Mainline 模块 packages/modules/IPsec 承载，Android 12 起才进系统设置）</li>
+          Android 11 及以下系统设置里没有这个类型 —— 本面板面向系统原生客户端，
+          老系统用户需自行安装 strongSwan App 并按右侧参数手工填入，面板不提供 app 导入配置）。
+          AOSP 源码求证：原生 IKEv2 由 Mainline 模块 packages/modules/IPsec 承载，Android 12 起才进系统设置</li>
         <li>按下表填写（<strong>不需要</strong>任何预共享密钥 PSK）</li>
         <li>保存 → 点连接 → 通知栏出现钥匙图标 = 连上</li>
       </ol>
@@ -54,18 +55,12 @@
       {{end}}
     </article>
 
-    <h3 class="section-title mt-5">strongSwan App 用户</h3>
+    <h3 class="section-title mt-5">其他说明</h3>
     <article class="card card-pad">
-      <p>如果你用的是 <strong>strongSwan App</strong>（而非系统原生），走的是另一条路：</p>
-      <ol style="padding-left: 1.5rem; line-height: 1.8; color: var(--ikev2-fg);">
-        <li>下载本页的 <code>.sswan</code> 配置文件</li>
-        <li>strongSwan App → <strong>设置</strong> → <strong>导入配置</strong> → 选该文件</li>
-        <li>导入后打开该连接，在密码框里<b>手动输入密码</b>（.sswan 不含密码）</li>
-        <li>确认「本地 ID」已填为用户名，否则服务端索要用户名时无从应答</li>
-      </ol>
-      <p style="margin-top:0.75rem; font-size:0.9em; color:var(--ikev2-fg-muted);">
-        <b>注意</b>：面板的二维码只对 iOS / macOS 有效（它下发的是 .mobileconfig，
-        Android 无法解析）。Android 请用本页的 <code>.sswan</code> 或手工填参。
+      <p style="font-size:0.9em; color:var(--ikev2-fg-muted);">
+        面板的二维码只对 iOS / macOS 有效（它下发的是 .mobileconfig，Android 无法解析）。
+        Android 一律走本页的系统 VPN 设置 + 右侧参数手工填入。
+        Linux 桌面没有系统自带 IKEv2 客户端，请在用户详情页的「Linux」标签下载 swanctl 配置。
       </p>
     </article>
 

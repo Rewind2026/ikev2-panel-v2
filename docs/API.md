@@ -159,7 +159,7 @@ mobileconfig 渲染是**三层合并**：builtin 出厂值 + admin 全局默认 
 | POST | `/users/{id}/delete/confirm` | 真正删除 |
 | GET | `/users/{id}/mobileconfig` | 下载 `.mobileconfig` |
 | GET | `/users/{id}/mobileconfig.qr.png` | 二维码 PNG |
-| GET | `/users/{id}/sswan` | strongSwan 客户端导入文件（`.sswan`） |
+| GET | `/users/{id}/sswan` | Linux strongSwan swanctl 配置（`{username}-swanctl.conf`） |
 | GET | `/users/{id}/android` | Android 11+ 系统设置配置指引 |
 | GET | `/account` | 改自己密码的表单 |
 | GET | `/audit` | 审计日志 |

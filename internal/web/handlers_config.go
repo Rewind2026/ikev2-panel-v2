@@ -258,7 +258,9 @@ func (s *Server) renderInstallError(w http.ResponseWriter, msg string) {
 }
 
 // handleUserSSwan GET /users/{id}/sswan
-// strongSwan 客户端配置（Android / Linux）
+// Linux strongSwan 客户端配置(swanctl.conf 格式)。
+// v2.104 起不再面向 Android strongSwan app —— Android 走系统原生客户端
+// (/users/{id}/android 配置页),Linux 没有系统自带 IKEv2 客户端,这是唯一途径。
 func (s *Server) handleUserSSwan(w http.ResponseWriter, r *http.Request) {
 	id, ok := s.requireUserID(w, r)
 	if !ok {
@@ -279,11 +281,17 @@ func (s *Server) handleUserSSwan(w http.ResponseWriter, r *http.Request) {
 	conf := renderSSwanTemplate(u.Username, s.ServerCN, serverAddr)
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.sswan"`, u.Username))
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s-swanctl.conf"`, u.Username))
 	_, _ = w.Write([]byte(conf))
 }
 
-// renderSSwanTemplate 生成 strongSwan 客户端配置(Android app / Linux 共用)。
+// renderSSwanTemplate 生成 Linux strongSwan swanctl 客户端配置。
+//
+// v2.104:不再面向 Android strongSwan app —— .sswan 是该 app 的专有导入格式,
+// 而 Android 12+ 系统原生 VPN 已支持 IKEv2/IPsec MSCHAPv2(见 /users/{id}/android
+// 配置页),app 导入路径没有存在意义。Linux 没有系统自带 IKEv2 客户端,
+// swanctl.conf 是唯一途径,故本文件定位收窄为 Linux 专用,文件名同步改为
+// {username}-swanctl.conf。
 //
 // 抽成独立函数而不是内联在 handler 里,是为了让
 // TestSSwanConfig_* 能在不启 HTTP server 的前提下断言渲染结果 ——
@@ -291,23 +299,22 @@ func (s *Server) handleUserSSwan(w http.ResponseWriter, r *http.Request) {
 // 数量错了只会在运行时产出 %!s(MISSING) 之类的垃圾。
 func renderSSwanTemplate(username, serverCN, serverAddr string) string {
 	connID := "ikev2-rw-" + username
-	return fmt.Sprintf(`# strongSwan IKEv2 客户端配置
+	return fmt.Sprintf(`# strongSwan IKEv2 客户端配置(Linux swanctl)
 # 用户名: %[1]s
 # 服务端: %[3]s (CN: %[2]s)
 #
-# Linux strongSwan 客户端:
-#   1. 写入 /etc/swanctl/conf.d/%[1]s.conf
-#   2. swanctl --load-all
-#   3. swanctl -i -c %[4]s
+# 适用平台:仅 Linux(Linux 没有系统自带 IKEv2 客户端,strongSwan 是标准方案)。
+# iOS / macOS / Windows / Android 12+ 原生客户端不走本文件,见面板对应客户端页。
 #
-# Android strongSwan app:
-#   strongSwan App → 设置 → 导入配置 → 选本文件(%[1]s.sswan)
-#   导入后手动填写密码(本文件不含密码,secret 留空)。
-#   LE 模式(Lets Encrypt)下**无需**额外装 CA,系统已信任 ISRG Root;
-#   自签模式才需要先把面板 CA 装到系统信任存储。
-#   导入后还要在连接属性里确认 "本地 ID" 已填,%[1]s。
+# 使用步骤:
+#   1. sudo cp %[1]s-swanctl.conf /etc/swanctl/conf.d/
+#   2. 编辑文件,把下方 secret = "" 填上该用户的密码(本文件不含密码)
+#   3. sudo swanctl --load-all
+#   4. sudo swanctl -i -c %[4]s
 #
-# iOS / macOS 不走本文件 —— 它们用 .mobileconfig(面板二维码)。
+# 自签模式下还需把面板 CA 放进 swanctl 信任存储:
+#   sudo cp ca.cert.pem /etc/swanctl/x509ca/
+# LE 模式(Lets Encrypt)无需额外装 CA,系统已信任 ISRG Root。
 
 connections {
     %[4]s {

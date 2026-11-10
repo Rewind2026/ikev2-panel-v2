@@ -1128,15 +1128,17 @@ CHILD 无 PFS，服务端 esp_proposals 已含 modpnone 条目），提案层面
 
 **先确认走对了路**：面板的**二维码只支持 iOS / macOS**。二维码指向 `/install/<token>`，服务端返回的是 `.mobileconfig`（Apple MDM 专有 plist，`PayloadType = com.apple.vpn.managed`），**Android 浏览器只会下载一个装不上的文件**，而且 token 是一次性的（用掉即作废）。
 
-Android 用户应改用：
+Android 用户应走系统原生：`/users/<id>/android` 页面的手工填参指引（见 2.3）。
 
-- **系统原生**：`/users/<id>/android` 页面的手工填参指引（见 2.3）
-- **strongSwan App**：从用户详情页下载 `.sswan`，App 内「设置 → 导入配置」
+> v2.104 起面板不再提供 Android strongSwan App 的 `.sswan` 导入文件 —— Android 12+
+> 系统原生 VPN 已支持 IKEv2/IPsec MSCHAPv2，App 导入路径没有存在意义。
+> Android 11 及以下（系统设置里没有原生 IKEv2 类型）仍可自行安装 strongSwan App
+> 手工填入 2.3 的参数；Linux 用户从用户详情页「Linux」标签下载 `swanctl.conf`。
 
-`.sswan` 导入后的两个必查项：
+strongSwan App 手工填参的两个必查项：
 
-1. **密码是空的** —— 文件不含密码（`secret = ""`），需在 App 连接属性里手填
-2. **本地 ID 要填用户名** —— 否则服务端发 EAP-Identity Request 时客户端无从应答
+1. **密码**在连接属性里手填
+2. **本地 IPsec 标识符（本地 ID）要填用户名** —— 否则服务端发 EAP-Identity Request 时客户端无从应答
 
 App 内看日志：设置 → 日志查看器，或 `adb logcat | grep -i charon`。
 
@@ -1146,7 +1148,7 @@ App 内看日志：设置 → 日志查看器，或 `adb logcat | grep -i charon
 |-----------|------|
 | `EAP-Identity request configured, but not supported` | 服务端 `eap-identity` 插件缺失（面板 Dockerfile 漏了 `--enable-eap-identity`） |
 | `constraint check failed: EAP identity` | 服务端配了 `eap_id = %identity`（约束语义），应改为 `%any`（索要语义） |
-| `unable to resolve hostname` | `.sswan` 里的 `remote_addrs` 域名没解析，检查 DDNS 是否正常 |
+| `unable to resolve hostname` | 配置里的 `remote_addrs` 域名没解析，检查 DDNS 是否正常 |
 | `AUTHENTICATION_FAILED` | 密码错，或该用户已被禁用 |
 
 #### 2.3.2 Android IPv6 直连：隧道建不起来 / 建起来没流量

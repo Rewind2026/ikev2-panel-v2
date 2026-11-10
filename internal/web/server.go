@@ -435,7 +435,7 @@ func cacheControlForStatic(next http.Handler) http.Handler {
 // 例外（不动）：
 //   - 静态资源 /static/(FileServer 自己处理 slash)
 //   - 根路径 /
-//   - 带 file extension 的路径(.css / .png / .pem / .mobileconfig / .sswan)
+//   - 带 file extension 的路径(.css / .png / .pem / .mobileconfig)
 //   - POST 请求不重写(避免重发)
 //   - query string 保留
 func trailingSlashRedirect(next http.Handler) http.Handler {
@@ -446,7 +446,7 @@ func trailingSlashRedirect(next http.Handler) http.Handler {
 		// 2) 非 GET(避免 POST 重发)
 		// 3) 路径长度 <= 1 (避免 "//" 这种边界)
 		// 4) 末尾不是 /
-		// 5) 去掉末尾 / 后的最后一段含 "." (文件路径: .pem .css .png .mobileconfig .sswan)
+		// 5) 去掉末尾 / 后的最后一段含 "." (文件路径: .pem .css .png .mobileconfig)
 		if path == "/" || r.Method != "GET" || len(path) <= 1 || path[len(path)-1] != '/' {
 			next.ServeHTTP(w, r)
 			return

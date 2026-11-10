@@ -73,24 +73,36 @@ func TestSSwanConfig_SecretEmptyNotPlaceholder(t *testing.T) {
 		t.Error(".sswan 里 secret 仍是占位文案 \"由用户输入\",strongSwan 会当字面密码")
 	}
 	if !strings.Contains(got, `secret = ""`) {
-		t.Error(".sswan 里 secret 应留空,让用户在 app 里手填")
+		t.Error(".sswan 里 secret 应留空,让用户手填")
 	}
 }
 
-// TestSSwanConfig_NoMisleadingQRComment 断言不再声称"扫码导入"。
+// TestSSwanConfig_NoMisleadingQRComment 断言不再声称"扫码导入",也不再提供
+// Android strongSwan app 导入指引(v2.104:本文件收窄为 Linux swanctl 专用)。
 //
 // 面板的二维码内容是 /install/{token} URL,下发的是 .mobileconfig,
-// Android strongSwan app 无法解析 .mobileconfig,扫码拿不到可用配置。
+// Android 无法解析。Android 走系统原生客户端,不走本文件。
 func TestSSwanConfig_NoMisleadingQRComment(t *testing.T) {
 	got := renderSSwanTemplate("rewind", "vpn.example.com", "vpn.example.com")
 
 	if strings.Contains(got, "扫码导入") {
 		t.Error(".sswan 注释仍写 \"扫码导入配置\" —— 面板二维码下发的是 .mobileconfig," +
-			"Android strongSwan app 无法导入,会误导用户")
+			"Android 无法导入,会误导用户")
 	}
-	// 应给出真正的 app 导入路径
-	if !strings.Contains(got, "导入配置") {
-		t.Error(".sswan 注释缺少 strongSwan app 的导入指引")
+	// v2.104:Android app 导入指引必须移除(Android 走系统原生客户端)
+	if strings.Contains(got, "导入配置") || strings.Contains(got, "strongSwan app") ||
+		strings.Contains(got, "strongSwan App") {
+		t.Error(".sswan 注释仍含 Android strongSwan app 导入指引 —— v2.104 起本文件仅面向 Linux swanctl")
+	}
+	// 必须给出 Linux swanctl 的真实用法
+	for _, want := range []string{
+		"/etc/swanctl/conf.d/",
+		"swanctl --load-all",
+		"swanctl -i -c ikev2-rw-rewind",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf(".sswan 注释缺少 Linux swanctl 用法 %q", want)
+		}
 	}
 }
 
