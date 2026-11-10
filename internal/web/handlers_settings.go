@@ -83,6 +83,8 @@ type SettingsStatusResp struct {
 	DisplayTimezoneSource        string `json:"display_timezone_source"`
 	SessionTTL                   string `json:"session_ttl"`
 	SessionTTLSource             string `json:"session_ttl_source"`
+	SessionIdle                  string `json:"session_idle"`
+	SessionIdleSource            string `json:"session_idle_source"`
 	CookieSecure                 bool   `json:"cookie_secure"`
 	CookieSecureSource           string `json:"cookie_secure_source"`
 	TrustedProxy                 bool   `json:"trusted_proxy"`
@@ -119,8 +121,10 @@ type SettingsStatusResp struct {
 // 这是 UI 显示与 status API 的唯一真相来源 —— 跟 runtime.Merge 第 4 段
 // 用同一套优先级,区别只在 runtime 跑在启动期、这里跑在 handler 期。
 type settingsEffective struct {
-	displayTimezone        string
-	sessionTTL             time.Duration
+	displayTimezone string
+	sessionTTL      time.Duration
+	// idleTTL 会话空闲超时窗口。0 = 显式关闭(合法值,不能兜底成默认)。
+	idleTTL                time.Duration
 	cookieSecure           bool
 	trustedProxy           bool
 	defaultUserPasswordLen int
@@ -137,6 +141,7 @@ type settingsEffective struct {
 
 	displayTimezoneSet bool // settings.json 里显式设过
 	sessionTTLSet      bool
+	idleTTLSet         bool
 	cookieSecureSet    bool
 	trustedProxySet    bool
 	passwordLenSet     bool
@@ -166,6 +171,7 @@ func (s *Server) effectiveSettings() settingsEffective {
 	eff := settingsEffective{
 		displayTimezone:        s.EnvDisplayTimezone,
 		sessionTTL:             s.EnvSessionTTL,
+		idleTTL:                s.EnvSessionIdle,
 		cookieSecure:           s.EnvCookieSecure,
 		trustedProxy:           s.EnvTrustedProxy,
 		defaultUserPasswordLen: s.EnvDefaultUserPasswordLen,
@@ -185,6 +191,10 @@ func (s *Server) effectiveSettings() settingsEffective {
 	}
 	if eff.sessionTTL <= 0 {
 		eff.sessionTTL = 24 * time.Hour
+	}
+	// idleTTL:0 是合法的「显式关闭」,不能兜底;只有负值(非法)才回出厂默认。
+	if eff.idleTTL < 0 {
+		eff.idleTTL = time.Hour
 	}
 	if eff.defaultUserPasswordLen <= 0 {
 		eff.defaultUserPasswordLen = defaultPasswordLen
@@ -218,6 +228,12 @@ func (s *Server) effectiveSettings() settingsEffective {
 		if d, perr := time.ParseDuration(*st.SessionTTL); perr == nil {
 			eff.sessionTTL = d
 			eff.sessionTTLSet = true
+		}
+	}
+	if st.SessionIdle != nil {
+		if d, perr := time.ParseDuration(*st.SessionIdle); perr == nil && d >= 0 {
+			eff.idleTTL = d
+			eff.idleTTLSet = true
 		}
 	}
 	if st.CookieSecure != nil {
@@ -296,6 +312,8 @@ func (s *Server) handleSettingsStatus(w http.ResponseWriter, r *http.Request) {
 		DisplayTimezoneSource:        pickSource(eff.displayTimezoneSet),
 		SessionTTL:                   eff.sessionTTL.String(),
 		SessionTTLSource:             pickSource(eff.sessionTTLSet),
+		SessionIdle:                  eff.idleTTL.String(),
+		SessionIdleSource:            pickSource(eff.idleTTLSet),
 		CookieSecure:                 eff.cookieSecure,
 		CookieSecureSource:           pickSource(eff.cookieSecureSet),
 		TrustedProxy:                 eff.trustedProxy,
@@ -363,6 +381,7 @@ type settingsStatusData struct {
 	// --- 当前生效值 ---
 	DisplayTimezone        string
 	SessionTTL             string
+	SessionIdle            string
 	CookieSecure           bool
 	TrustedProxy           bool
 	DefaultUserPasswordLen int
@@ -380,6 +399,7 @@ type settingsStatusData struct {
 	// --- env 兜底值(渲染"跟随 env 默认(X)"提示用)---
 	EnvDisplayTimezone        string
 	EnvSessionTTL             string
+	EnvSessionIdle            string
 	EnvCookieSecure           bool
 	EnvTrustedProxy           bool
 	EnvDefaultUserPasswordLen int
@@ -398,6 +418,7 @@ type settingsStatusData struct {
 	// --- 三态:该字段是否被面板显式设过 ---
 	SetDisplayTimezone        bool
 	SetSessionTTL             bool
+	SetSessionIdle            bool
 	SetCookieSecure           bool
 	SetTrustedProxy           bool
 	SetDefaultUserPasswordLen bool
@@ -414,11 +435,12 @@ type settingsStatusData struct {
 	PlainHTTP bool
 
 	// 预配置下拉选项
-	TimezoneOptions   []settingsOption
-	SessionTTLOptions []settingsOption
-	LogLevelOptions   []settingsOption
-	LogFormatOptions  []settingsOption
-	NftFamilyOptions  []settingsOption
+	TimezoneOptions    []settingsOption
+	SessionTTLOptions  []settingsOption
+	SessionIdleOptions []settingsOption
+	LogLevelOptions    []settingsOption
+	LogFormatOptions   []settingsOption
+	NftFamilyOptions   []settingsOption
 
 	// 数值输入框的 min/max(跟 panelstate 的校验常量同源)
 	PasswordLenMin int
@@ -477,6 +499,20 @@ var presetSessionTTLs = []struct{ Value, Label string }{
 	{"24h", "24 小时 · 推荐"},
 	{"168h", "7 天"},
 	{"720h", "30 天 · 上限"},
+}
+
+// presetSessionIdles 「会话空闲超时」的预置选项。
+//
+// "0s" 是合法选项 = 显式关闭(仅受登录会话时长约束)。
+// 空闲超时解决的是"管理员忘了关面板":挂着不动超过窗口就自动登出,
+// 持续操作则每次请求都在滑动,永远不会被误踢。
+var presetSessionIdles = []struct{ Value, Label string }{
+	{"0s", "关闭 · 仅受登录时长约束"},
+	{"15m", "15 分钟 · 最严格"},
+	{"30m", "30 分钟"},
+	{"1h", "1 小时 · 推荐"},
+	{"4h", "4 小时"},
+	{"24h", "24 小时"},
 }
 
 // v2.86 批次 E 的枚举下拉。取值集合直接引用 panelstate 的白名单 ——
@@ -589,6 +625,7 @@ func loadSettingsStatus(s *Server) settingsStatusData {
 	out := settingsStatusData{
 		DisplayTimezone:        eff.displayTimezone,
 		SessionTTL:             normalizeTTLString(eff.sessionTTL),
+		SessionIdle:            normalizeIdleString(eff.idleTTL),
 		CookieSecure:           eff.cookieSecure,
 		TrustedProxy:           eff.trustedProxy,
 		DefaultUserPasswordLen: eff.defaultUserPasswordLen,
@@ -604,6 +641,7 @@ func loadSettingsStatus(s *Server) settingsStatusData {
 
 		EnvDisplayTimezone:        s.EnvDisplayTimezone,
 		EnvSessionTTL:             normalizeTTLString(s.EnvSessionTTL),
+		EnvSessionIdle:            normalizeIdleString(s.EnvSessionIdle),
 		EnvCookieSecure:           s.EnvCookieSecure,
 		EnvTrustedProxy:           s.EnvTrustedProxy,
 		EnvDefaultUserPasswordLen: s.EnvDefaultUserPasswordLen,
@@ -616,6 +654,7 @@ func loadSettingsStatus(s *Server) settingsStatusData {
 
 		SetDisplayTimezone:        eff.displayTimezoneSet,
 		SetSessionTTL:             eff.sessionTTLSet,
+		SetSessionIdle:            eff.idleTTLSet,
 		SetCookieSecure:           eff.cookieSecureSet,
 		SetTrustedProxy:           eff.trustedProxySet,
 		SetDefaultUserPasswordLen: eff.passwordLenSet,
@@ -654,6 +693,9 @@ func loadSettingsStatus(s *Server) settingsStatusData {
 	if out.EnvSessionTTL == "" {
 		out.EnvSessionTTL = "24h"
 	}
+	if out.EnvSessionIdle == "" {
+		out.EnvSessionIdle = "1h"
+	}
 	if out.EnvDefaultUserPasswordLen <= 0 {
 		out.EnvDefaultUserPasswordLen = defaultPasswordLen
 	}
@@ -666,6 +708,7 @@ func loadSettingsStatus(s *Server) settingsStatusData {
 
 	out.TimezoneOptions = buildTimezoneOptions(eff.displayTimezone)
 	out.SessionTTLOptions = buildSessionTTLOptions(out.SessionTTL)
+	out.SessionIdleOptions = buildEnumOptions(presetSessionIdles, out.SessionIdle)
 	out.LogLevelOptions = buildEnumOptions(presetLogLevels, eff.logLevel)
 	out.LogFormatOptions = buildEnumOptions(presetLogFormats, eff.logFormat)
 	out.NftFamilyOptions = buildEnumOptions(presetNftFamilies, eff.nftFamily)
@@ -781,6 +824,22 @@ func normalizeTTLString(d time.Duration) string {
 	return d.String()
 }
 
+// normalizeIdleString 会话空闲超时的回显规范化。
+// 与 normalizeTTLString 的关键差异:0 = 「显式关闭」是合法值,
+// 不能像 TTL 那样把 <=0 兜底成默认——否则用户选「关闭」保存后,
+// 下次打开页面又变回 1h。
+func normalizeIdleString(d time.Duration) string {
+	if d < 0 {
+		return "1h"
+	}
+	for _, p := range presetSessionIdles {
+		if pd, err := time.ParseDuration(p.Value); err == nil && pd == d {
+			return p.Value
+		}
+	}
+	return d.String()
+}
+
 // handleSettingsSave POST /api/settings/save
 //
 // 表单语义(每个控件的"未设置"表达见文件头第 2 条):
@@ -832,6 +891,7 @@ func (s *Server) handleSettingsSave(w http.ResponseWriter, r *http.Request) {
 	st := panelstate.Settings{
 		DisplayTimezone:        optString(r.PostForm, "display_timezone"),
 		SessionTTL:             optString(r.PostForm, "session_ttl"),
+		SessionIdle:            optString(r.PostForm, "session_idle"),
 		CookieSecure:           optBool(r.PostForm, "cookie_secure"),
 		TrustedProxy:           optBool(r.PostForm, "trusted_proxy"),
 		DefaultUserPasswordLen: passwordLen,
@@ -876,8 +936,8 @@ func (s *Server) handleSettingsSave(w http.ResponseWriter, r *http.Request) {
 	after := s.effectiveSettings()
 	s.applyRuntimeSettings(after)
 
-	details := fmt.Sprintf("display_timezone=%s session_ttl=%s cookie_secure=%t trusted_proxy=%t password_len=%d",
-		after.displayTimezone, after.sessionTTL, after.cookieSecure,
+	details := fmt.Sprintf("display_timezone=%s session_ttl=%s session_idle=%s cookie_secure=%t trusted_proxy=%t password_len=%d",
+		after.displayTimezone, after.sessionTTL, after.idleTTL, after.cookieSecure,
 		after.trustedProxy, after.defaultUserPasswordLen)
 	s.Logger.Info("settings saved via panel", "before_tz", before.displayTimezone, "after_tz", after.displayTimezone)
 	s.writeAudit(r, "settings.save", details)
@@ -962,6 +1022,7 @@ func (s *Server) applyRuntimeSettings(eff settingsEffective) {
 	}
 	s.settingsRT.Store(&settingsRuntime{
 		sessionTTL:             eff.sessionTTL,
+		idleTTL:                eff.idleTTL,
 		cookieSecure:           cookieSecure,
 		trustedProxy:           eff.trustedProxy,
 		defaultUserPasswordLen: eff.defaultUserPasswordLen,

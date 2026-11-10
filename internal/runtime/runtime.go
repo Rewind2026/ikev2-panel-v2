@@ -127,6 +127,15 @@ func Merge(env *config.Config) (*Runtime, error) {
 				stderrWarn("panelstate settings.json session_ttl invalid", perr)
 			}
 		}
+		if st.SessionIdle != nil {
+			// 空闲超时同 session_ttl 三态;"0s" = 显式关闭,是合法值,
+			// 与 TTL 不同:这里 d >= 0 就采纳,负值(非法)回 env。
+			if d, perr := time.ParseDuration(*st.SessionIdle); perr == nil && d >= 0 {
+				r.SessionIdleTTL = d
+			} else if perr != nil {
+				stderrWarn("panelstate settings.json session_idle invalid", perr)
+			}
+		}
 		if st.CookieSecure != nil {
 			r.CookieSecure = *st.CookieSecure
 		}

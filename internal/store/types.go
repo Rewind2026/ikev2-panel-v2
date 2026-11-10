@@ -50,7 +50,11 @@ type Session struct {
 	CSRFToken string // 32 字节 hex
 	CreatedAt int64
 	ExpiresAt int64
-	UserAgent string
+	// LastSeenAt 最后一次「通过认证的请求」时刻。滑动空闲窗口的基准:
+	// 持续使用不断前移,闲置超过窗口(IKEV2_SESSION_IDLE,0=关闭)就地失效。
+	// 登录时 = CreatedAt。
+	LastSeenAt int64
+	UserAgent  string
 }
 
 // Admin 表的一行。v2 全表只有 id=1 一条记录。

@@ -104,6 +104,13 @@ type Settings struct {
 	// 存字符串可以原样回显,不用在 UI 层反复换算。
 	SessionTTL *string `json:"session_ttl,omitempty"`
 
+	// SessionIdle 会话空闲超时窗口,"0s" = 显式关闭。
+	// nil = 用 env IKEV2_SESSION_IDLE,再退到 1h。
+	// 与 SessionTTL 的关键差异:0 是合法值("关闭"),不能像 TTL 那样
+	// 把 0 当"未设置"处理 —— 所以这里必须用独立的 "0s" 字符串表达,
+	// 且 Validate 对 0 放行。
+	SessionIdle *string `json:"session_idle,omitempty"`
+
 	// CookieSecure session cookie 的 Secure 标志。
 	// nil = 用 env IKEV2_COOKIE_SECURE,再退到 true。
 	// 指针而非 bool:需要区分"没配"(跟 env)和"显式关掉"。
@@ -179,6 +186,7 @@ func (s *Settings) IsZero() bool {
 	}
 	return s.DisplayTimezone == nil &&
 		s.SessionTTL == nil &&
+		s.SessionIdle == nil &&
 		s.CookieSecure == nil &&
 		s.TrustedProxy == nil &&
 		s.DefaultUserPasswordLen == nil &&
@@ -295,6 +303,18 @@ func (s *Settings) Validate() error {
 		if d < MinSessionTTL || d > MaxSessionTTL {
 			return fmt.Errorf("session_ttl 必须在 %s ~ %s 之间,当前是 %s",
 				MinSessionTTL, MaxSessionTTL, d)
+		}
+	}
+	if s.SessionIdle != nil {
+		raw := *s.SessionIdle
+		d, err := time.ParseDuration(raw)
+		if err != nil {
+			return fmt.Errorf("session_idle %q 不是合法时长(如 30m / 1h;关闭请填 0s)", raw)
+		}
+		// 0 = 显式关闭,合法;负值非法。上界与 SessionTTL 对齐:
+		// 空闲窗口比登录会话时长还长就没有意义了。
+		if d < 0 || d > MaxSessionTTL {
+			return fmt.Errorf("session_idle 必须在 0(关闭) ~ %s 之间,当前是 %s", MaxSessionTTL, d)
 		}
 	}
 	if s.DefaultUserPasswordLen != nil {

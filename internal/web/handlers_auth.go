@@ -23,9 +23,10 @@ type loginPageData struct {
 
 // handleLoginPage GET /login。已登录则 302 → /。
 func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
-	// 已登录直接跳首页
-	if auth.GetSessionCookie(r) != "" {
-		if _, err := s.Store.GetSessionByID(r.Context(), auth.GetSessionCookie(r), time.Now()); err == nil {
+	// 已登录直接跳首页。空闲超窗/绝对过期的会话在这里同样视为未登录
+	// (GetSessionByID 内部原子校验+滑动,与 requireSession 同一语义)。
+	if sessID := auth.GetSessionCookie(r); sessID != "" {
+		if _, err := s.Store.GetSessionByID(r.Context(), sessID, time.Now(), s.idleTTL()); err == nil {
 			http.Redirect(w, r, "/", http.StatusFound)
 			return
 		}

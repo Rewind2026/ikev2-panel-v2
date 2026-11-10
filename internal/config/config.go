@@ -65,8 +65,12 @@ type Config struct {
 	DefaultUserPasswordLen int
 
 	// Session
-	SessionTTL   time.Duration
-	CookieSecure bool // cookie Secure 标志；dev 测试可置 false
+	SessionTTL time.Duration
+	// SessionIdleTTL 会话空闲超时窗口(env IKEV2_SESSION_IDLE,默认 1h,"0s" 显式关闭)。
+	// 空闲超过该时长后下一次请求视为会话已死,送回登录页;持续使用不断滑动,
+	// 永不因空闲被踢。与 SessionTTL(绝对过期)双约束。
+	SessionIdleTTL time.Duration
+	CookieSecure   bool // cookie Secure 标志；dev 测试可置 false
 	// v2.86 配置统一批次 D:是否信任 X-Forwarded-For / X-Real-IP。
 	// 之前只在 internal/auth.isTrustedProxy 里直接读 env,面板既看不到也改不了。
 	TrustedProxy bool // 默认 false(公网直连时读 XFF 等于让客户端伪造 IP 绕过登录限速)
@@ -117,7 +121,9 @@ func Load() (*Config, error) {
 		ACMEEmail:              getenv("IKEV2_ACME_EMAIL", ""),
 		DefaultUserPasswordLen: getint("IKEV2_DEFAULT_USER_PASSWORD_LEN", 12),
 		SessionTTL:             getdur("IKEV2_SESSION_TTL", 24*time.Hour),
-		CookieSecure:           getbool("IKEV2_COOKIE_SECURE", true),
+		// 空闲超时默认 1h;"0s" 显式关闭(仅受 SessionTTL 绝对过期约束)。
+		SessionIdleTTL: getdur("IKEV2_SESSION_IDLE", time.Hour),
+		CookieSecure:   getbool("IKEV2_COOKIE_SECURE", true),
 		// v2.86 配置统一批次 D:信任反向代理开关。
 		// 原先只有 internal/auth.isTrustedProxy 直接 os.Getenv 读,面板无从展示/修改。
 		// 现在 config 读一次存进字段,auth 侧仍保留 env 读取(见 auth.ClientIP 注释)。

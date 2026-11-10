@@ -18,6 +18,7 @@ package web
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -144,6 +145,27 @@ func (s *Server) handleAccountChangePassword(w http.ResponseWriter, r *http.Requ
 	// 7. 审计（成功才记，失败由 logger 负责）
 	s.writeAudit(r, "admin.password.change",
 		"username="+fresh.Username+",remote="+auth.ClientIP(r))
+
+	// 7a. 吊销除当前会话外的全部会话。
+	//
+	// 改密是「旧凭据不再可信」的信号:其他浏览器/已泄露的 session cookie
+	// 必须立即失效,而不是继续用到绝对过期。此前这里什么都不做 —— 攻击者
+	// 若已拿到 session,改密码救不回来。
+	//
+	// 当前会话保留:这个浏览器刚刚用旧密码+新密码完整走完改密流程,
+	// 踢掉它只会丢掉下面的 flash 提示,没有安全增益。
+	// 失败不中断改密(密码已落库),记 warn 留排查线索。
+	if sess0, _ := SessionFrom(r.Context()); sess0 != nil {
+		n, err := s.Store.DeleteSessionsExcept(r.Context(), sess0.ID)
+		if err != nil {
+			s.Logger.Warn("revoke other sessions after password change", "err", err)
+		} else if n > 0 {
+			s.Logger.Info("revoked other sessions after password change",
+				"admin", fresh.Username, "revoked", n)
+			s.writeAudit(r, "admin.password.sessions_revoked",
+				fmt.Sprintf("count=%d,remote=%s", n, auth.ClientIP(r)))
+		}
+	}
 
 	// 7b. 删除 INITIAL_ADMIN_PASSWORD.txt。
 	//

@@ -153,5 +153,23 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("add mobileconfig_opts column: %w", err)
 		}
 	}
+	// v2.103-PR(session-idle):sessions 表加 last_seen_at 列,滑动空闲超时。
+	// ALTER TABLE 不支持 IF NOT EXISTS,先查列名再加(同 mobileconfig_opts 模式)。
+	// 存量行 last_seen_at=0 会被空闲窗口判为「极久没用」直接踢掉——
+	// 升级不踢人,刚加完列立刻用 created_at 兜底回填。
+	var hasLastSeen int
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'last_seen_at'`,
+	).Scan(&hasLastSeen); err != nil {
+		return fmt.Errorf("check last_seen_at column: %w", err)
+	}
+	if hasLastSeen == 0 {
+		if _, err := s.DB.ExecContext(ctx,
+			`ALTER TABLE sessions ADD COLUMN last_seen_at INTEGER NOT NULL DEFAULT 0;
+			 UPDATE sessions SET last_seen_at = created_at WHERE last_seen_at = 0`,
+		); err != nil {
+			return fmt.Errorf("add last_seen_at column: %w", err)
+		}
+	}
 	return nil
 }

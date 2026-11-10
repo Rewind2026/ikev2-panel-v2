@@ -36,7 +36,10 @@ type Server struct {
 	Limiter    *limit.Limiter
 	Templates  *template.Template
 	SessionTTL time.Duration
-	Version    string // v2.86-PR18:面板版本号(由 main.go 注入,登录页品牌区展示用)
+	// IdleTTL 会话空闲超时窗口。0 = 关闭(仅受 SessionTTL 绝对过期约束)。
+	// 启动期注入(env IKEV2_SESSION_IDLE),批次 2 起面板设置页可覆盖(运行期生效)。
+	IdleTTL time.Duration
+	Version string // v2.86-PR18:面板版本号(由 main.go 注入,登录页品牌区展示用)
 
 	// HTTPS / 证书
 	Cert          *tls.Certificate // 面板 HTTPS 证书（M5+）
@@ -100,8 +103,11 @@ type Server struct {
 	// v2.86 配置统一批次 D:面板设置的 **env 启动值 / 出厂兜底值**。
 	// 面板渲染"当前值"和"来源"时需要它们做对照,跟 SettingsStore 的三态配合:
 	// key 缺失 → 显示这里;key 有值 → 显示 settings.json 的值。
-	EnvDisplayTimezone        string
-	EnvSessionTTL             time.Duration
+	EnvDisplayTimezone string
+	EnvSessionTTL      time.Duration
+	// EnvSessionIdle 空闲超时的 env 原值(Merge 前),面板渲染"跟随 env 默认(X)"用。
+	// 0 = env 显式关闭。
+	EnvSessionIdle            time.Duration
 	EnvCookieSecure           bool
 	EnvTrustedProxy           bool
 	EnvDefaultUserPasswordLen int
@@ -319,7 +325,9 @@ func New(srv *Server, staticDir string) http.Handler {
 // 只含"读侧不依赖启动期捕获"的字段(见 Server.settingsRT 注释):
 // DisplayTimezone 不在内 —— 模板 FuncMap 闭包捕获,改它必须重启。
 type settingsRuntime struct {
-	sessionTTL             time.Duration
+	sessionTTL time.Duration
+	// idleTTL 会话空闲超时窗口(0 = 关闭)。与 sessionTTL 同一批运行期快照语义。
+	idleTTL                time.Duration
 	cookieSecure           bool
 	trustedProxy           bool
 	defaultUserPasswordLen int
@@ -339,6 +347,15 @@ func (s *Server) sessionTTL() time.Duration {
 		return rt.sessionTTL
 	}
 	return s.SessionTTL
+}
+
+// idleTTL 当前生效的会话空闲超时窗口。语义同 sessionTTL();
+// 0 = 关闭空闲检查,会话只受绝对过期约束。
+func (s *Server) idleTTL() time.Duration {
+	if rt := s.settingsRT.Load(); rt != nil {
+		return rt.idleTTL
+	}
+	return s.IdleTTL
 }
 
 // cookieSecure 当前生效的 cookie Secure 标志。
@@ -783,7 +800,9 @@ func (s *Server) requireSession(next http.Handler) http.Handler {
 			return
 		}
 		now := time.Now()
-		sess, err := s.Store.GetSessionByID(r.Context(), sessID, now)
+		// 校验 + 空闲滑动在 GetSessionByID 里原子完成;
+		// 空闲超窗或绝对过期都视为「会话不存在」,送回登录页。
+		sess, err := s.Store.GetSessionByID(r.Context(), sessID, now, s.idleTTL())
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				http.Redirect(w, r, "/login", http.StatusFound)

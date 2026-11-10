@@ -1087,6 +1087,25 @@ environment:
     </div>
 
     <div class="form-section">
+      <label class="form-label" for="settings-idle">会话空闲超时
+        <small style="color: var(--ikev2-fg-muted); font-weight: 400;">（挂着不动多久后自动登出）</small>
+      </label>
+      <select id="settings-idle" name="session_idle">
+        {{range .Settings.SessionIdleOptions}}
+        <option value="{{.Value}}" {{if .Selected}}selected{{end}}>{{.Label}}</option>
+        {{end}}
+      </select>
+      <p class="form-hint">
+        当前：<code>{{.Settings.SessionIdle}}</code>
+        {{if .Settings.SetSessionIdle}}(面板设置)
+        {{else}}(跟随 <code>IKEV2_SESSION_IDLE</code>，当前 <code>{{.Settings.EnvSessionIdle}}</code>)
+        {{end}}
+        · 持续操作每次请求都在滑动计时，<strong>不会被误踢</strong>；停下不动超过窗口就自动登出
+        · 立即生效，影响<strong>所有</strong>已登录会话
+      </p>
+    </div>
+
+    <div class="form-section">
       <span class="form-label">安全开关</span>
 
       {{/*

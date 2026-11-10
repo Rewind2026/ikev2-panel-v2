@@ -153,7 +153,7 @@ func TestSessionCRUD(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := s.GetSessionByID(ctx, "abc123", time.Now())
+	got, err := s.GetSessionByID(ctx, "abc123", time.Now(), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +171,7 @@ func TestSessionCRUD(t *testing.T) {
 	if err := s.CreateSession(ctx, expiredSess); err != nil {
 		t.Fatal(err)
 	}
-	_, err = s.GetSessionByID(ctx, "expired1", time.Now())
+	_, err = s.GetSessionByID(ctx, "expired1", time.Now(), 0)
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("expected ErrNotFound for expired session, got %v", err)
 	}
@@ -185,6 +185,51 @@ func TestSessionCRUD(t *testing.T) {
 	// Delete
 	if err := s.DeleteSession(ctx, "abc123"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestSessionIdleTimeoutAndSlide 滑动空闲窗口的语义:
+//   - last_seen 距今超过 idleTTL → 拒绝(视为不存在),但**不销毁行**
+//     (登出传 idleTTL=0 时仍能消费,留审计线索);
+//   - 命中一次后 last_seen 滑到 now,之后持续使用永不因空闲被踢;
+//   - idleTTL=0(关闭)完全不检查。
+func TestSessionIdleTimeoutAndSlide(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	sess := &Session{
+		ID:        "idle-sess",
+		CSRFToken: "csrf",
+		CreatedAt: time.Now().Add(-3 * time.Hour).Unix(),
+		ExpiresAt: time.Now().Add(21 * time.Hour).Unix(),
+	}
+	if err := s.CreateSession(ctx, sess); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. idleTTL=1h,但 created_at(=last_seen_at 兜底)在 3h 前 → 拒绝
+	if _, err := s.GetSessionByID(ctx, "idle-sess", time.Now(), time.Hour); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("超窗 session 应视为不存在, got %v", err)
+	}
+
+	// 2. 拒绝不应销毁行:idleTTL=0(登出语义)仍能消费
+	if _, err := s.GetSessionByID(ctx, "idle-sess", time.Now(), 0); err != nil {
+		t.Fatalf("空闲拒绝不应销毁行, got %v", err)
+	}
+
+	// 3. 步骤 2 命中已把 last_seen 滑到 now:idleTTL=1h 现在应该命中
+	if _, err := s.GetSessionByID(ctx, "idle-sess", time.Now(), time.Hour); err != nil {
+		t.Fatalf("滑动后同窗口应命中, got %v", err)
+	}
+
+	// 4. 再把 last_seen 拨回 2h 前,1h 窗口立刻拒绝(窗口确实在起作用)
+	if _, err := s.DB.ExecContext(ctx,
+		`UPDATE sessions SET last_seen_at = ? WHERE id = 'idle-sess'`,
+		time.Now().Add(-2*time.Hour).Unix()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetSessionByID(ctx, "idle-sess", time.Now(), time.Hour); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("拨回后应再次拒绝, got %v", err)
 	}
 }
 

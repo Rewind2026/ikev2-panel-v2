@@ -43,6 +43,7 @@ import (
 type envConfigSnapshot struct {
 	displayTimezone        string
 	sessionTTL             time.Duration
+	sessionIdle            time.Duration
 	cookieSecure           bool
 	trustedProxy           bool
 	defaultUserPasswordLen int
@@ -65,6 +66,7 @@ func main() {
 	envSnapshot := envConfigSnapshot{
 		displayTimezone:        envCfg.DisplayTimezone,
 		sessionTTL:             envCfg.SessionTTL,
+		sessionIdle:            envCfg.SessionIdleTTL,
 		cookieSecure:           envCfg.CookieSecure,
 		trustedProxy:           envCfg.TrustedProxy,
 		defaultUserPasswordLen: envCfg.DefaultUserPasswordLen,
@@ -587,7 +589,8 @@ func main() {
 		Limiter:       lm,
 		Templates:     tmpl,
 		SessionTTL:    cfg.SessionTTL,
-		Version:       panelVersion, // v2.86-PR18:登录页品牌区展示用
+		IdleTTL:       cfg.SessionIdleTTL, // v2.103-PR:会话空闲超时(env IKEV2_SESSION_IDLE,设置页可覆盖)
+		Version:       panelVersion,       // v2.86-PR18:登录页品牌区展示用
 		Cert:          tlsCert,
 		Secure:        cfg.CookieSecure,
 		ServerAddr:    mcAddr,
@@ -637,6 +640,7 @@ func main() {
 		SettingsStore:             settingsStore,
 		EnvDisplayTimezone:        envSnapshot.displayTimezone,
 		EnvSessionTTL:             envSnapshot.sessionTTL,
+		EnvSessionIdle:            envSnapshot.sessionIdle,
 		EnvCookieSecure:           envSnapshot.cookieSecure,
 		EnvTrustedProxy:           envSnapshot.trustedProxy,
 		EnvDefaultUserPasswordLen: envSnapshot.defaultUserPasswordLen,
