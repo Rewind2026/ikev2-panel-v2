@@ -98,10 +98,6 @@
           <span>Android 12+</span>
           <span class="os-hint">系统自带</span>
         </button>
-        <button type="button" data-os-key="linux">
-          <span>Linux</span>
-          <span class="os-hint">命令行</span>
-        </button>
         <button type="button" data-os-key="ca">
           <span>CA 证书</span>
           <span class="os-hint">校验用</span>
@@ -265,29 +261,10 @@
         </ol>
       </div>
 
-      <div class="os-panel" data-os-key="linux">
-        <h3>Linux strongSwan</h3>
-        <p>命令行客户端配置（Linux 无系统自带 IKEv2 客户端，需安装 strongSwan）。</p>
-        <a href="/users/{{.User.ID}}/sswan" class="btn-primary" role="button">下载 swanctl 配置</a>
-        <p class="text-sm text-muted mt-3">下载后把文件里的 <code>secret = ""</code> 填上该用户的密码。<small>（文件不含密码）</small></p>
-        <div class="terminal-card">
-          <div class="term-header">
-            <span class="term-title">安装步骤</span>
-            <button type="button" class="copy-btn" data-copy-text="sudo cp {{.User.Username}}-swanctl.conf /etc/swanctl/conf.d/&#10;sudo swanctl --load-all&#10;sudo swanctl -i ikev2-rw-{{.User.Username}}">复制命令</button>
-          </div>
-          <pre><code><span class="term-comment"># 1. 复制到 swanctl 配置目录</span>
-<span class="term-prompt">$</span> sudo cp {{.User.Username}}-swanctl.conf /etc/swanctl/conf.d/
-<span class="term-comment"># 2. 填密码(编辑文件里的 secret = "")后加载所有配置</span>
-<span class="term-prompt">$</span> sudo swanctl --load-all
-<span class="term-comment"># 3. 启动连接(连接名 = ikev2-rw-{用户名})</span>
-<span class="term-prompt">$</span> sudo swanctl -i ikev2-rw-{{.User.Username}}</code></pre>
-        </div>
-      </div>
-
       <div class="os-panel" data-os-key="ca">
         <h3>CA 证书</h3>
         {{if .CertIncludeCA}}
-          <p>Android 原生 / Linux strongSwan 客户端都要先装 CA 证书才能验证服务器身份。</p>
+          <p>Android 原生客户端要先装 CA 证书才能验证服务器身份。</p>
           <a href="/ca.cert.pem" class="btn-primary" role="button">下载 ca.cert.pem</a>
           <p class="text-sm text-muted mt-3">Android 需要把 CA 装到<b>系统</b>信任存储（装到「用户」凭据对 VPN 不生效）；iOS / macOS 已通过 .mobileconfig 自动安装。</p>
         {{else}}

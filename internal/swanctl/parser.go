@@ -151,8 +151,7 @@ func parseSingleSA(m *vici.Message) (SA, error) {
 	// 为什么:remote-id 是 IKE 身份(IDi),而客户端的 IKE 身份**不一定是用户名**:
 	//   - iOS:mobileconfig 显式设了 LocalIdentifier = 用户名 → remote-id 直接命中
 	//   - Windows 原生:IKE 身份是机器证书主体 DN / 计算机名,EAP 用户名不在 IDi 里
-	//   - Linux strongSwan:sswan 模板里 local 段只设 eap_id 没设 id,
-	//     IDi 落到主机名/IP
+	//   - Linux strongSwan:客户端不发 id = 时,IDi 落到主机名/IP
 	// EAP 认证成功后 charon 的 IKE_SA 身份**不会**回写成 EAP 用户名,所以按
 	// remote-id 匹配 username 时,Windows/Linux 全部落空 —— 拓扑不显示在线、
 	// 流量归不了账、"强制下线"按钮假成功。VICI 在 EAP 认证时额外提供

@@ -1,4 +1,4 @@
-// 客户端配置下载 handler：mobileconfig / sswan / CA cert / 二维码 / 一次性安装 token。
+// 客户端配置下载 handler：mobileconfig / CA cert / 二维码 / 一次性安装 token。
 // 见 docs/API.md §3
 package web
 
@@ -255,112 +255,6 @@ func (s *Server) renderInstallError(w http.ResponseWriter, msg string) {
   <p>%s</p>
 </div></body></html>`, msg)
 	_, _ = w.Write([]byte(body))
-}
-
-// handleUserSSwan GET /users/{id}/sswan
-// Linux strongSwan 客户端配置(swanctl.conf 格式)。
-// v2.104 起不再面向 Android strongSwan app —— Android 走系统原生客户端
-// (/users/{id}/android 配置页),Linux 没有系统自带 IKEv2 客户端,这是唯一途径。
-func (s *Server) handleUserSSwan(w http.ResponseWriter, r *http.Request) {
-	id, ok := s.requireUserID(w, r)
-	if !ok {
-		return
-	}
-	u, err := s.Store.GetUserByID(r.Context(), id)
-	if err != nil {
-		http.NotFound(w, r)
-		return
-	}
-
-	serverAddr := s.ServerAddr
-	if serverAddr == "" {
-		http.Error(w, "服务器地址未配置", http.StatusInternalServerError)
-		return
-	}
-
-	conf := renderSSwanTemplate(u.Username, s.ServerCN, serverAddr)
-
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s-swanctl.conf"`, u.Username))
-	_, _ = w.Write([]byte(conf))
-}
-
-// renderSSwanTemplate 生成 Linux strongSwan swanctl 客户端配置。
-//
-// v2.104:不再面向 Android strongSwan app —— .sswan 是该 app 的专有导入格式,
-// 而 Android 12+ 系统原生 VPN 已支持 IKEv2/IPsec MSCHAPv2(见 /users/{id}/android
-// 配置页),app 导入路径没有存在意义。Linux 没有系统自带 IKEv2 客户端,
-// swanctl.conf 是唯一途径,故本文件定位收窄为 Linux 专用,文件名同步改为
-// {username}-swanctl.conf。
-//
-// 抽成独立函数而不是内联在 handler 里,是为了让
-// TestSSwanConfig_* 能在不启 HTTP server 的前提下断言渲染结果 ——
-// 这个模板的 Sprintf 格式符与实参数量必须严格配对,而 Go 编译期不检查,
-// 数量错了只会在运行时产出 %!s(MISSING) 之类的垃圾。
-func renderSSwanTemplate(username, serverCN, serverAddr string) string {
-	connID := "ikev2-rw-" + username
-	return fmt.Sprintf(`# strongSwan IKEv2 客户端配置(Linux swanctl)
-# 用户名: %[1]s
-# 服务端: %[3]s (CN: %[2]s)
-#
-# 适用平台:仅 Linux(Linux 没有系统自带 IKEv2 客户端,strongSwan 是标准方案)。
-# iOS / macOS / Windows / Android 12+ 原生客户端不走本文件,见面板对应客户端页。
-#
-# 使用步骤:
-#   1. sudo cp %[1]s-swanctl.conf /etc/swanctl/conf.d/
-#   2. 编辑文件,把下方 secret = "" 填上该用户的密码(本文件不含密码)
-#   3. sudo swanctl --load-all
-#   4. sudo swanctl -i -c %[4]s
-#
-# 自签模式下还需把面板 CA 放进 swanctl 信任存储:
-#   sudo cp ca.cert.pem /etc/swanctl/x509ca/
-# LE 模式(Lets Encrypt)无需额外装 CA,系统已信任 ISRG Root。
-
-connections {
-    %[4]s {
-        local {
-            auth = eap-mschapv2
-            eap_id = %[1]s
-        }
-        remote {
-            auth = pubkey
-            id = %[2]s
-        }
-        remote_addrs = %[3]s
-        children {
-            %[4]s {
-                remote_ts = 0.0.0.0/0, ::/0
-                mode = tunnel
-                esp_proposals = aes256gcm16-sha256, aes128gcm16-sha256
-            }
-        }
-        version = 2
-        mobike = yes
-        # v2.86-PR19(A15):对齐服务端 proposals(见 configs/swanctl-ipv6-only.conf)。
-        #
-        # 原来这里只发 modp2048:
-        #     aes256gcm16-sha256-modp2048, aes128gcm16-sha256-modp2048
-        # 服务端虽有 modp2048 兜底(不会协商失败),但客户端**只发一条** proposal
-        # 时,best-of 的结果必然是 modp2048 —— 即每次都落到最弱的 DH 组。
-        # 这与服务端 :66-98 刻意做的"算法去弱"(curve25519 / ecp256 / modp3072
-        # 优先,modp2048 仅兜底)完全背道而驰。
-        #
-        # strongSwan 的 proposals 列表顺序 = 优先级(preferred 在前),服务端会
-        # 挑双方都支持的最强那一条。这里与服务端保持同序即可。
-        proposals = aes256gcm16-sha256-curve25519, aes128gcm16-sha256-curve25519, aes256gcm16-sha256-ecp256, aes128gcm16-sha256-ecp256, aes256gcm16-sha256-modp3072, aes128gcm16-sha256-modp3072, aes256gcm16-sha256-modp2048, aes128gcm16-sha256-modp2048
-        send_certreq = yes
-        unique = replace
-        rekey_time = 24h
-    }
-}
-
-secrets {
-    eap-%[1]s {
-        id = %[1]s
-        secret = ""
-    }
-}
-`, username, serverCN, serverAddr, connID)
 }
 
 // handleUserCACert GET /ca.cert.pem

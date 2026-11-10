@@ -11,7 +11,7 @@
 |------|------|
 | 单容器 | strongSwan + 面板合成一个镜像，`docker compose up -d` 即可 |
 | 网络零配置 | 出口网卡、公网 IP、VPN 虚拟网段由 entrypoint 自动探测，只有域名必须手填 |
-| 用户自助接入 | 面板生成 iOS `.mobileconfig`（含二维码）、Android 原生参数页、strongSwan `.sswan` |
+| 用户自助接入 | 面板生成 iOS `.mobileconfig`（含二维码）、Android 原生参数页 |
 | 免内核 XFRM | ESP 走用户态 `kernel-libipsec`，不依赖宿主内核 XFRM 模块，OpenVZ/LXC 也能跑 |
 | 证书自愈 | 默认自签 CA + 面板证书，容器销毁后从数据卷恢复；也可切 Let's Encrypt（DNS-01） |
 | DDNS | 阿里云 DNS API 同步 A / AAAA 记录，公网 IP 变了自动改解析 |
@@ -604,9 +604,8 @@ strongSwan 侧**不存在**任何能改这个权限的配置项（改 `charon.co
 - 单一管理员账号，无 RBAC / 2FA。
 - 二维码里的面板地址取自访问用的 `Host`，部署时必须用域名或 IP 访问，不能用 `localhost`。
 - **二维码只对 iOS / macOS 有效。** 它下发的是 `.mobileconfig`（Apple MDM 专有格式），
-  Android 浏览器无法解析 —— Android 用户请用 `/users/<id>/android`（系统原生填参）
-  或 `/users/<id>/sswan`（strongSwan App 导入）。二维码里的 token 是一次性的，
-  在 Android 上扫了会白白作废。
+  Android 浏览器无法解析 —— Android 用户请用 `/users/<id>/android`（系统原生填参）。
+  二维码里的 token 是一次性的，在 Android 上扫了会白白作废。
 - 本地开发模式（判定依据是 `/etc/swanctl` 目录是否存在，而非 VICI 连通性）
   把用户配置写到 `<DataDir>/swanctl-conf.d/` 并跳过所有 VICI 操作，仅供调试。
 

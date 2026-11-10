@@ -235,8 +235,7 @@ func New(srv *Server, staticDir string) http.Handler {
 	mux.Handle("GET /users/{id}", protect(http.HandlerFunc(srv.handleUserDetail)))
 	mux.Handle("GET /users/{id}/mobileconfig", protect(http.HandlerFunc(srv.handleUserMobileconfig)))
 	mux.Handle("GET /users/{id}/mobileconfig.qr.png", protect(http.HandlerFunc(srv.handleUserMobileconfigQR)))
-	mux.Handle("GET /users/{id}/sswan", protect(http.HandlerFunc(srv.handleUserSSwan)))
-	// Android 11+ 原生客户端配置页（不走 sswan 导入，走系统 VPN 设置手动配 EAP-MSCHAPv2）
+	// Android 11+ 原生客户端配置页（走系统 VPN 设置手动配 EAP-MSCHAPv2）
 	mux.Handle("GET /users/{id}/android", protect(http.HandlerFunc(srv.handleUserAndroidConfig)))
 	mux.Handle("POST /users/{id}/reset-password", protectPOST(http.HandlerFunc(srv.handleUserResetPassword)))
 	// v2.86-PR12.21:每用户 mobileconfig 覆盖项 API。

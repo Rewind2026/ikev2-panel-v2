@@ -1133,7 +1133,7 @@ Android 用户应走系统原生：`/users/<id>/android` 页面的手工填参�
 > v2.104 起面板不再提供 Android strongSwan App 的 `.sswan` 导入文件 —— Android 12+
 > 系统原生 VPN 已支持 IKEv2/IPsec MSCHAPv2，App 导入路径没有存在意义。
 > Android 11 及以下（系统设置里没有原生 IKEv2 类型）仍可自行安装 strongSwan App
-> 手工填入 2.3 的参数；Linux 用户从用户详情页「Linux」标签下载 `swanctl.conf`。
+> 手工填入 2.3 的参数。
 
 strongSwan App 手工填参的两个必查项：
 
